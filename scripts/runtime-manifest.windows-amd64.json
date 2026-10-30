@@ -1,0 +1,81 @@
+{
+  "version": 1,
+  "os": "windows",
+  "arch": "amd64",
+  "mihomo_version": "v1.19.32",
+  "openconnect_version": "v9.21.git.25.70d1e79-0.fc43",
+  "files": [
+    {
+      "path": "bin/iconv.dll",
+      "sha256": "9f4100cf0f20030bb5e7b0191a75cd27c5e0f5e8205cc358e6aee22006d0261c"
+    },
+    {
+      "path": "bin/libgcc_s_seh-1.dll",
+      "sha256": "8601abde8bcffd435233865553ea9f4175e6b07cc0e8c9d08f50ecebab98b019"
+    },
+    {
+      "path": "bin/libgmp-10.dll",
+      "sha256": "07d7415f9cfc6b7ed3f30c62abbdd98fb45b6c4b2ac7acf922fde0e227cab7a5"
+    },
+    {
+      "path": "bin/libgnutls-30.dll",
+      "sha256": "8de0f3195f1b98e0a318d2cdf34933f71a099bfbfeffbaeccfdca033081e6d82"
+    },
+    {
+      "path": "bin/libhogweed-6.dll",
+      "sha256": "8a86f7f5f9969c9b00fa5359c97423c31ac8aed2c3d666e06ee40b4d41b6d222"
+    },
+    {
+      "path": "bin/libintl-8.dll",
+      "sha256": "d13216ebd314465299e0022706edf1b117d4468f11cd3bfd7768480d97f4e802"
+    },
+    {
+      "path": "bin/liblz4.dll",
+      "sha256": "ebabc13985c97860fdc62844e1044e4f4ddc960b474903992c9c54332660b2b5"
+    },
+    {
+      "path": "bin/libnettle-8.dll",
+      "sha256": "78a1ff85dc789ac663feba7e78796517daba4f4485548516edfee60b2668f4c5"
+    },
+    {
+      "path": "bin/libopenconnect-5.dll",
+      "sha256": "28d1501093298e549c1deb8ebe630bc4d846946019a802cbc7b094e3a03041d8"
+    },
+    {
+      "path": "bin/libstoken-1.dll",
+      "sha256": "5396e30a262eaa7cc069bcd5cfd36e36d918a2518c65c8a332a9ccb3ac6ad9a3"
+    },
+    {
+      "path": "bin/libtasn1-6.dll",
+      "sha256": "9b7c6bcb5fde660ee22dfd600d921b464780c4394c8643de69b2a2b0a5009abe"
+    },
+    {
+      "path": "bin/libwinpthread-1.dll",
+      "sha256": "ccbd0ad81d6fed75e076670710643ad02d3c390179866ad3e1fe6b9ef7bc92c2"
+    },
+    {
+      "path": "bin/libxml2-2.dll",
+      "sha256": "0816b0e02b024bbaa4a3089865e8b567ee90506d1a42e458f9e45f3936a38bb4"
+    },
+    {
+      "path": "bin/mihomo.exe",
+      "sha256": "beb9878924d7bd38c67176b441ab5e668cc378bfe751c8dc8fef3eb5aaf566d5"
+    },
+    {
+      "path": "bin/openconnect.exe",
+      "sha256": "856df75f9bb23a9407a80e8e52d30af9cd89fbcd1675df95aaf0414cd918e0cb"
+    },
+    {
+      "path": "bin/wintun.dll",
+      "sha256": "e5da8447dc2c320edc0fc52fa01885c103de8c118481f683643cacc3220dafce"
+    },
+    {
+      "path": "bin/zlib1.dll",
+      "sha256": "84e998099a945872750d326f4a86a4fc275bbf1434e2de88d7d87973465ed491"
+    },
+    {
+      "path": "certs/ca-bundle.crt",
+      "sha256": "796f1389bfea13c0ed78f663b765baaff54a508e5483786bd6ece73c5e3e3cbe"
+    }
+  ]
+}

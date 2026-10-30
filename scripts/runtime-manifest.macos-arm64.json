@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "os": "darwin",
+  "arch": "arm64",
+  "mihomo_version": "v1.19.32",
+  "openconnect_version": "9.21",
+  "files": [
+    {
+      "path": "bin/openconnect",
+      "sha256": "ffce3aa973ecbd03ce5c5c6b45a46c0ab946d2fa36cfdab61341ae627b691612"
+    },
+    {
+      "path": "bin/mihomo",
+      "sha256": "df88b4ca06a8d3611c23d924c15234de3df90d3603d0a98e7acfb9b7765b9e2a"
+    },
+    {
+      "path": "lib/libcrypto.3.dylib",
+      "sha256": "5d4e849910477c9830006455fb8a632eceab8ea52eb4985afc1565e3e5a719e6"
+    },
+    {
+      "path": "lib/libssl.3.dylib",
+      "sha256": "a09223f79eba9e3e6db2988f7f8fb1d09b1ed5957835e26b23c427be367de152"
+    }
+  ]
+}

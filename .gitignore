@@ -1,0 +1,23 @@
+.tools/
+.local/
+dist/
+runtime/
+*.log
+*.test
+.DS_Store
+
+
+# User profiles, credentials, local exports and development evidence.
+private/
+profiles/
+.local-*/
+*.private.*
+.env
+.env.*
+*.key
+*.p12
+*.pfx
+*.sqlite*
+*.zip
+coverage*
+__pycache__/

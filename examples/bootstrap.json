@@ -1,0 +1,66 @@
+{
+  "version": 1,
+  "policy": {
+    "version": 1,
+    "company": {
+      "domains": [
+        "gateway.corp.example.com",
+        "git.corp.example.com"
+      ],
+      "cidrs": [],
+      "dns": [
+        "192.0.2.53"
+      ]
+    },
+    "personal": {
+      "domains": [
+        "www.gstatic.com"
+      ],
+      "cidrs": [],
+      "dns": [
+        "https://1.1.1.1/dns-query"
+      ]
+    },
+    "direct_dns": [
+      "223.5.5.5"
+    ],
+    "vpn": {
+      "server": "https://vpn.example.com:4433",
+      "endpoint_ipv4": "192.0.2.1"
+    },
+    "ports": {
+      "proxy": 17890,
+      "dns": 53
+    },
+    "probes": [
+      {
+        "url": "https://gateway.corp.example.com:8443/",
+        "channel": "company"
+      },
+      {
+        "url": "https://git.corp.example.com/",
+        "channel": "company"
+      },
+      {
+        "url": "https://www.gstatic.com/generate_204",
+        "channel": "personal"
+      },
+      {
+        "url": "https://www.baidu.com/",
+        "channel": "direct"
+      }
+    ]
+  },
+  "subscriptions": {
+    "nodes": {
+      "url": "https://subscription.example.com/config?token=REPLACE_LOCALLY",
+      "use_rules": true,
+      "groups": {
+        "Proxy Group": "personal",
+        "Ad Block": "reject"
+      }
+    },
+    "rules": [],
+    "interval_minutes": 60
+  }
+}
