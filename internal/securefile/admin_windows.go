@@ -205,6 +205,13 @@ func (s AdminStore) Read(relative string, limit int64) ([]byte, error) {
 	}
 	return readAs(p, limit, true, administratorSID)
 }
+func (s AdminStore) ReadTail(relative string, limit int64) ([]byte, error) {
+	p, err := s.path(relative)
+	if err != nil {
+		return nil, err
+	}
+	return readAsBounded(p, limit, true, administratorSID, true)
+}
 func (s AdminStore) Bytes(relative string, data []byte) error {
 	p, e := s.path(relative)
 	if e != nil {

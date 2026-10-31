@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"netlaunch/internal/auth"
+	"netlaunch/internal/buildinfo"
 	"netlaunch/internal/engine"
 	"netlaunch/internal/platform"
 	"netlaunch/internal/policy"
@@ -22,7 +23,7 @@ import (
 	"netlaunch/internal/subscription"
 )
 
-const Version = "0.1.0-preview.1"
+const Version = buildinfo.Version
 const Example = `{
   "version": 1,
   "company": {
@@ -64,12 +65,17 @@ func (c CLI) Run(args []string) error {
 		c.Err = io.Discard
 	}
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" {
-		fmt.Fprintln(c.Out, "NetLaunch "+Version+"\nCommands: init, import, sync, plan, doctor, check-runtime, auth, up, status, down, version\nOptions: --profile DIR --runtime DIR; init --file POLICY_OR_BOOTSTRAP.json; import --file FILE; up --prepare-only\nmacOS network lifecycle is experimental; plan, doctor and check-runtime do not change networking.")
+		fmt.Fprintln(c.Out, "NetLaunch "+Version+"\nCommands: init, import, sync, plan, config validate|diff|apply|rollback|history, rules explain TARGET, doctor, check-runtime, auth, up, status, down, version, diagnostics export\nOptions: --profile DIR --runtime DIR; init --file POLICY_OR_BOOTSTRAP.json; import --file FILE; config validate|diff|apply --file POLICY.json; config apply|rollback --restart; config rollback --revision SHA256; up --prepare-only; version --json\nmacOS network lifecycle is experimental; config apply/rollback changes the next-start policy unless --restart is specified. Diagnostics exports allowlisted saved status to stdout; it does not check live network health.")
 		return nil
 	}
 	if args[0] == "version" {
-		fmt.Fprintln(c.Out, Version)
-		return nil
+		return c.version(args[1:])
+	}
+	if args[0] == "diagnostics" {
+		return c.diagnostics(args[1:])
+	}
+	if args[0] == "config" || args[0] == "rules" {
+		return c.maintenance(args)
 	}
 	profile, e := DefaultProfile()
 	if e != nil {
@@ -97,26 +103,8 @@ func (c CLI) Run(args []string) error {
 	if fs.NArg() != 0 {
 		return errors.New("unexpected arguments")
 	}
-	if opts.prepareOnly && args[0] != "up" {
-		return errors.New("--prepare-only is only valid with up")
-	}
-	if opts.validationTimeout != 0 && (args[0] != "up" || !platform.WindowsValidationBuild) {
-		return errors.New("--validation-timeout requires up in a windows_validation build")
-	}
-	if args[0] == "up" && platform.WindowsValidationBuild && (opts.validationTimeout < time.Second || opts.validationTimeout > 45*time.Minute) {
-		return errors.New("Windows validation requires an explicit --validation-timeout between 1s and 45m")
-	}
-	if opts.sessionTimeout != 0 && (args[0] != "up" || !platform.WindowsHomeBuild || platform.WindowsValidationBuild) {
-		return errors.New("--session-timeout requires up in a windows_home build")
-	}
-	if args[0] == "up" && platform.WindowsHomeBuild {
-		if platform.WindowsValidationBuild {
-			return errors.New("windows_home and windows_validation build tags cannot be combined")
-		}
-		opts.validationTimeout, e = homeSessionTimeout(opts.sessionTimeout)
-		if e != nil {
-			return e
-		}
+	if e = validateLaunchOptions(&opts, args[0]); e != nil {
+		return e
 	}
 	opts.profile, e = filepath.Abs(opts.profile)
 	if e != nil {
@@ -125,6 +113,12 @@ func (c CLI) Run(args []string) error {
 	opts.runtime, e = filepath.Abs(opts.runtime)
 	if e != nil {
 		return e
+	}
+	if opts.file != "" {
+		opts.file, e = filepath.Abs(opts.file)
+		if e != nil {
+			return errors.New("input file path unavailable")
+		}
 	}
 	switch args[0] {
 	case "check-runtime":
@@ -180,6 +174,18 @@ func (c CLI) Run(args []string) error {
 		return c.status(opts)
 	case "down":
 		return c.down(opts)
+	case "up":
+		return c.startProfile(opts)
+	}
+	if args[0] == "sync" || args[0] == "import" {
+		unlock, err := securefile.Lock(filepath.Join(opts.profile, "launch.lock"), time.Second)
+		if err != nil {
+			return err
+		}
+		defer unlock()
+		if err := requireCompleteConfigTransaction(opts.profile); err != nil {
+			return err
+		}
 	}
 	cfg, e := readPolicy(opts.profile)
 	if e != nil {
@@ -223,7 +229,7 @@ func (c CLI) Run(args []string) error {
 	if args[0] == "auth" {
 		run, runErr := currentRun(opts)
 		if runErr == nil {
-			if st, e := statusFor(run); e == nil && st.Phase == "authentication_required" {
+			if st, e := statusFor(run); e == nil && requiresFreshAuthentication(opts.profile, cfg, st) {
 				opts.force = true
 			}
 		}
@@ -240,11 +246,6 @@ func (c CLI) Run(args []string) error {
 			}
 		}
 		return nil
-	}
-	if args[0] == "up" {
-		if e := c.syncSubscriptions(opts, cfg, false); e != nil {
-			return e
-		}
 	}
 	cfg, nodes, e := effectiveProfile(opts.profile, cfg)
 	if e != nil {
@@ -266,8 +267,6 @@ func (c CLI) Run(args []string) error {
 			return errors.New("startup prerequisites are not satisfied")
 		}
 		return nil
-	case "up":
-		return c.up(opts, cfg, nodes)
 	default:
 		return errors.New("unknown command; run netlaunch help")
 	}
@@ -352,7 +351,7 @@ func statusFor(run string) (engine.Status, error) {
 	}
 	var s engine.Status
 	e = json.Unmarshal(b, &s)
-	return s, e
+	return engine.RefreshStatus(s, time.Now()), e
 }
 func (c CLI) status(o options) error {
 	run, e := currentRun(o)
@@ -400,21 +399,46 @@ func (c CLI) down(o options) error {
 	fmt.Fprintln(c.Out, "Recovery complete.")
 	return nil
 }
-func (c CLI) up(o options, cfg policy.Config, nodes []policy.Node) error {
+func (c CLI) startProfile(o options) error {
 	if e := securefile.Dir(o.profile); e != nil {
 		return e
-	}
-	if !platform.Supported() {
-		return errors.New("native lifecycle unavailable on this platform")
 	}
 	unlock, e := securefile.Lock(filepath.Join(o.profile, "launch.lock"), time.Second)
 	if e != nil {
 		return e
 	}
 	defer unlock()
+	if e := requireCompleteConfigTransaction(o.profile); e != nil {
+		return e
+	}
+	cfg, e := readPolicy(o.profile)
+	if e != nil {
+		return e
+	}
+	if e = c.syncSubscriptions(o, cfg, false); e != nil {
+		return e
+	}
+	cfg, nodes, e := effectiveProfile(o.profile, cfg)
+	if e != nil {
+		return e
+	}
+	return c.upLocked(o, cfg, nodes)
+}
+
+// The caller holds launch.lock from configuration read through readiness.
+func (c CLI) upLocked(o options, cfg policy.Config, nodes []policy.Node) error {
+	if !platform.Supported() {
+		return errors.New("native lifecycle unavailable on this platform")
+	}
+	if e := policy.ValidateEndpoints(cfg, nodes); e != nil {
+		return e
+	}
+	var e error
 	if run, e := currentRun(o); e == nil {
 		if s, e := statusFor(run); e != nil || s.Phase != "stopped" {
 			return errors.New("a previous run needs attention; run status or down first")
+		} else if requiresFreshAuthentication(o.profile, cfg, s) {
+			o.force = true
 		}
 	}
 	if issues, _ := diagnose(o, cfg); len(issues) > 0 {
@@ -510,12 +534,27 @@ func (c CLI) up(o options, cfg policy.Config, nodes []policy.Node) error {
 				return c.json(s)
 			}
 			if s.Phase == "stopped" || s.Phase == "recovery_failed" {
+				if engine.NeedsAuthentication(s) {
+					return errors.New("VPN authentication was rejected or expired; run auth, then up")
+				}
 				return errors.New("startup did not complete; inspect status and use the recovery entry")
 			}
 		}
 		time.Sleep(time.Second)
 	}
 	return errors.New("startup readiness deadline exceeded; use status or the recovery entry")
+}
+
+func requiresFreshAuthentication(profile string, cfg policy.Config, status engine.Status) bool {
+	if !engine.NeedsAuthentication(status) {
+		return false
+	}
+	if status.Phase == "stopped" {
+		if session, valid := auth.Load(profile, cfg.VPN); valid && session.Created.After(status.Updated) {
+			return false
+		}
+	}
+	return true
 }
 
 // A batch supervisor can activate this staged run within its existing, scoped
@@ -546,4 +585,30 @@ func copyBinary(from, to string) error {
 		return ce
 	}
 	return sealStaged(to)
+}
+
+func validateLaunchOptions(o *options, command string) error {
+	if o.prepareOnly && command != "up" {
+		return errors.New("--prepare-only is only valid with up")
+	}
+	if o.validationTimeout != 0 && (command != "up" || !platform.WindowsValidationBuild) {
+		return errors.New("--validation-timeout requires up in a windows_validation build")
+	}
+	if command == "up" && platform.WindowsValidationBuild && (o.validationTimeout < time.Second || o.validationTimeout > 45*time.Minute) {
+		return errors.New("Windows validation requires an explicit --validation-timeout between 1s and 45m")
+	}
+	if o.sessionTimeout != 0 && (command != "up" || !platform.WindowsHomeBuild || platform.WindowsValidationBuild) {
+		return errors.New("--session-timeout requires up in a windows_home build")
+	}
+	if command == "up" && platform.WindowsHomeBuild {
+		if platform.WindowsValidationBuild {
+			return errors.New("windows_home and windows_validation build tags cannot be combined")
+		}
+		value, e := homeSessionTimeout(o.sessionTimeout)
+		if e != nil {
+			return e
+		}
+		o.validationTimeout = value
+	}
+	return nil
 }

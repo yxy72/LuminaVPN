@@ -24,8 +24,10 @@ type VPN struct {
 	EndpointIPv4 string `json:"endpoint_ipv4"`
 }
 type Probe struct {
-	URL     string `json:"url"`
-	Channel string `json:"channel"`
+	URL            string `json:"url"`
+	Channel        string `json:"channel"`
+	Purpose        string `json:"purpose,omitempty"`
+	ExpectedStatus []int  `json:"expected_status,omitempty"`
 }
 type Ports struct {
 	Proxy int `json:"proxy"`
@@ -77,7 +79,7 @@ func Decode(data []byte) (Config, error) {
 	d := json.NewDecoder(bytes.NewReader(data))
 	d.DisallowUnknownFields()
 	if err := d.Decode(&c); err != nil {
-		return c, errors.New("invalid policy JSON or unknown field")
+		return c, decodeError(data, err)
 	}
 	var extra any
 	if d.Decode(&extra) != io.EOF {
@@ -91,10 +93,13 @@ func (c Config) Validate() error {
 		return err
 	}
 	if c.Version != 1 {
-		return errors.New("unsupported policy version")
+		return fieldError("version", "unsupported policy version")
 	}
-	if c.Ports.Proxy < 1024 || c.Ports.Proxy > 65535 || c.Ports.DNS < 1 || c.Ports.DNS > 65535 || c.Ports.Proxy == c.Ports.DNS {
-		return errors.New("invalid or overlapping local ports")
+	if c.Ports.Proxy < 1024 || c.Ports.Proxy > 65535 {
+		return fieldError("ports.proxy", "expected a port from 1024 through 65535")
+	}
+	if c.Ports.DNS < 1 || c.Ports.DNS > 65535 || c.Ports.Proxy == c.Ports.DNS {
+		return fieldError("ports.dns", "expected a port from 1 through 65535, different from ports.proxy")
 	}
 	// Version 1 intentionally supports exact names and narrow IPv4 grants.
 	// DNS suffix grants require on-demand route leases and are not silently approximated.
@@ -106,28 +111,30 @@ func (c Config) Validate() error {
 	for i, ch := range []Channel{c.Company, c.Personal} {
 		owner := []string{"company", "personal"}[i]
 		if len(ch.Domains)+len(ch.CIDRs) == 0 || len(ch.Domains)+len(ch.CIDRs) > 128 {
-			return fmt.Errorf("%s needs 1–128 explicit targets", owner)
+			return fieldError(owner, "needs 1–128 explicit targets")
 		}
-		for _, domain := range ch.Domains {
+		for index, domain := range ch.Domains {
+			field := fmt.Sprintf("%s.domains[%d]", owner, index)
 			if !ValidDomain(domain) {
-				return fmt.Errorf("%s has an invalid exact domain", owner)
+				return fieldError(field, "invalid exact domain")
 			}
 			if _, ok := owners[domain]; ok {
-				return errors.New("duplicate or overlapping domain authorization")
+				return fieldError(field, "duplicate or overlapping domain authorization")
 			}
 			owners[domain] = owner
 		}
-		for _, raw := range ch.CIDRs {
+		for index, raw := range ch.CIDRs {
+			field := fmt.Sprintf("%s.cidrs[%d]", owner, index)
 			p, err := netip.ParsePrefix(raw)
 			if err != nil || !p.Addr().Is4() || p != p.Masked() || p.Bits() < 24 {
-				return errors.New("v1 CIDR grants must be canonical IPv4 /24 through /32")
+				return fieldError(field, "v1 CIDR grants must be canonical IPv4 /24 through /32")
 			}
 			if _, err = IPv4(p.Addr().String()); err != nil {
-				return err
+				return fieldError(field, "expected a usable IPv4 address")
 			}
 			for _, old := range prefixes {
 				if old.p.Overlaps(p) {
-					return errors.New("overlapping CIDR authorization")
+					return fieldError(field, "overlapping CIDR authorization")
 				}
 			}
 			prefixes = append(prefixes, struct {
@@ -136,56 +143,66 @@ func (c Config) Validate() error {
 			}{p, owner})
 		}
 		if len(ch.DNS) == 0 || len(ch.DNS) > 4 {
-			return fmt.Errorf("%s needs explicit DNS servers", owner)
+			return fieldError(owner+".dns", "needs 1–4 explicit DNS servers")
 		}
 	}
-	for _, s := range append(append([]string{}, c.Company.DNS...), c.DirectDNS...) {
-		if _, err := IPv4(s); err != nil {
-			return errors.New("company/direct DNS must use explicit IPv4 addresses")
+	for _, group := range []struct {
+		field   string
+		servers []string
+	}{{"company.dns", c.Company.DNS}, {"direct_dns", c.DirectDNS}} {
+		for index, s := range group.servers {
+			if _, err := IPv4(s); err != nil {
+				return fieldError(fmt.Sprintf("%s[%d]", group.field, index), "DNS must use explicit IPv4 addresses")
+			}
 		}
 	}
 	if len(c.DirectDNS) == 0 || len(c.DirectDNS) > 4 {
-		return errors.New("direct DNS is required")
+		return fieldError("direct_dns", "needs 1–4 explicit DNS servers")
 	}
-	for _, s := range c.Personal.DNS {
+	for index, s := range c.Personal.DNS {
+		field := fmt.Sprintf("personal.dns[%d]", index)
 		u, err := url.Parse(s)
 		if err != nil || u.Scheme != "https" || u.User != nil || u.Fragment != "" || u.RawQuery != "" || u.Path != "/dns-query" {
-			return errors.New("personal DNS must be explicit HTTPS /dns-query endpoints")
+			return fieldError(field, "personal DNS must be explicit HTTPS /dns-query endpoints")
 		}
 		if _, err := IPv4(u.Hostname()); err != nil {
-			return errors.New("personal DNS bootstrap must use a literal IPv4 address")
+			return fieldError(field, "personal DNS bootstrap must use a literal IPv4 address")
 		}
 		if u.Port() != "" && u.Port() != "443" {
-			return errors.New("personal DNS uses HTTPS port 443")
+			return fieldError(field, "personal DNS uses HTTPS port 443")
 		}
 	}
 	u, err := url.Parse(c.VPN.Server)
 	if err != nil || u.Scheme != "https" || !validPort(u) || !ValidDomain(u.Hostname()) || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
-		return errors.New("VPN server must be a credential-free HTTPS hostname")
+		return fieldError("vpn.server", "VPN server must be a credential-free HTTPS hostname")
 	}
 	if _, err := IPv4(c.VPN.EndpointIPv4); err != nil {
-		return errors.New("VPN needs an explicit IPv4 bootstrap endpoint")
+		return fieldError("vpn.endpoint_ipv4", "VPN needs an explicit IPv4 bootstrap endpoint")
 	}
 	seen := map[string]bool{}
-	for _, p := range c.Probes {
+	for index, p := range c.Probes {
+		field := fmt.Sprintf("probes[%d]", index)
+		if err := p.validatePurpose(field); err != nil {
+			return err
+		}
 		u, err := url.Parse(p.URL)
 		if err != nil || u.Scheme != "https" || !validPort(u) || u.User != nil || u.RawQuery != "" || u.Fragment != "" || len(p.URL) > 1024 {
-			return errors.New("health probes must be credential-free HTTPS URLs")
+			return fieldError(field+".url", "health probes must be credential-free HTTPS URLs")
 		}
 		if p.Channel != "company" && p.Channel != "personal" && p.Channel != "direct" {
-			return errors.New("invalid probe channel")
+			return fieldError(field+".channel", "invalid probe channel")
 		}
 		if p.Channel == "direct" {
 			if !ValidDomain(u.Hostname()) || owners[u.Hostname()] != "" {
-				return errors.New("direct probe conflicts with an authorized channel")
+				return fieldError(field+".url", "direct probe conflicts with an authorized channel")
 			}
 		} else if owners[u.Hostname()] != p.Channel {
-			return errors.New("probe domain is not in its channel's exact whitelist")
+			return fieldError(field+".url", "probe domain is not in its channel's exact whitelist")
 		}
 		seen[p.Channel] = true
 	}
 	if !seen["company"] || !seen["personal"] || !seen["direct"] {
-		return errors.New("company, personal and direct HTTPS probes are required")
+		return fieldError("probes", "company, personal and direct HTTPS probes are required")
 	}
 	return nil
 }

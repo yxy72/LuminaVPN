@@ -67,6 +67,18 @@ func Read(path string, limit int64, private bool) ([]byte, error) {
 	return readAs(path, limit, private, user)
 }
 func readAs(path string, limit int64, private bool, user string) ([]byte, error) {
+	return readAsBounded(path, limit, private, user, false)
+}
+
+// ReadTail retains Read's handle identity, reparse, link and private ACL checks.
+func ReadTail(path string, limit int64, private bool) ([]byte, error) {
+	user, err := currentSID()
+	if err != nil {
+		return nil, err
+	}
+	return readAsBounded(path, limit, private, user, true)
+}
+func readAsBounded(path string, limit int64, private bool, user string, tail bool) ([]byte, error) {
 	if limit < 0 || limit == math.MaxInt64 {
 		return nil, errors.New("invalid read limit")
 	}
@@ -104,8 +116,16 @@ func readAs(path string, limit int64, private bool, user string) ([]byte, error)
 		}
 	}
 	i, e := f.Stat()
-	if e != nil || i.Size() > limit {
+	if e != nil || (!tail && i.Size() > limit) {
 		return nil, errors.New("file size limit exceeded")
+	}
+	if tail {
+		if i.Size() > limit {
+			if _, e := f.Seek(i.Size()-limit, io.SeekStart); e != nil {
+				return nil, e
+			}
+		}
+		return io.ReadAll(io.LimitReader(f, limit))
 	}
 	b, e := io.ReadAll(io.LimitReader(f, limit+1))
 	if int64(len(b)) > limit {

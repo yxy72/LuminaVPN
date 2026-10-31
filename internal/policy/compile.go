@@ -38,10 +38,16 @@ func Compile(c Config, nodes []Node, b Binding, secret string) (map[string]any, 
 		proxies = append(proxies, n)
 		personal = append(personal, n["name"].(string))
 	}
-	var rules []string
+	plan, err := RulePlan(c)
+	if err != nil {
+		return nil, err
+	}
+	rules := make([]string, 0, len(plan))
+	for _, r := range plan {
+		rules = append(rules, r.CoreRule())
+	}
 	dnsPolicy := map[string]any{}
 	for i, ch := range []Channel{c.Company, c.Personal} {
-		group := []string{"CORP", "PERSONAL"}[i]
 		servers := []string{}
 		for _, d := range ch.DNS {
 			if i == 0 {
@@ -51,11 +57,7 @@ func Compile(c Config, nodes []Node, b Binding, secret string) (map[string]any, 
 			}
 		}
 		for _, h := range ch.Domains {
-			rules = append(rules, "DOMAIN,"+h+","+group, "DOMAIN,"+h+",REJECT")
 			dnsPolicy[h] = servers
-		}
-		for _, cidr := range ch.CIDRs {
-			rules = append(rules, "IP-CIDR,"+cidr+","+group+",no-resolve", "IP-CIDR,"+cidr+",REJECT,no-resolve")
 		}
 	}
 	// Pin local health targets before subscription rules, including direct probes.
@@ -66,7 +68,6 @@ func Compile(c Config, nodes []Node, b Binding, secret string) (map[string]any, 
 	for _, probe := range c.Probes {
 		if probe.Channel == "direct" {
 			u, _ := url.Parse(probe.URL)
-			rules = append(rules, "DOMAIN,"+u.Hostname()+",PHYSICAL")
 			dnsPolicy[u.Hostname()] = direct
 		}
 	}
@@ -78,12 +79,6 @@ func Compile(c Config, nodes []Node, b Binding, secret string) (map[string]any, 
 	}
 	suffixes := map[string]decision{}
 	for index, r := range c.PersonalRules {
-		group := map[string]string{"personal": "PERSONAL", "direct": "PHYSICAL", "reject": "REJECT"}[r.Target]
-		line := r.Type + "," + r.Value + "," + group
-		if r.Type == "IP-CIDR" {
-			line += ",no-resolve"
-		}
-		rules = append(rules, line)
 		if r.Type == "IP-CIDR" {
 			continue
 		}
@@ -122,7 +117,6 @@ func Compile(c Config, nodes []Node, b Binding, secret string) (map[string]any, 
 		}
 		dnsPolicy[key] = servers
 	}
-	rules = append(rules, "IP-CIDR,198.18.0.0/15,REJECT,no-resolve", "MATCH,PHYSICAL")
 	return map[string]any{
 		"mixed-port": c.Ports.Proxy, "allow-lan": false, "bind-address": "127.0.0.1", "mode": "rule", "log-level": "warning", "ipv6": false,
 		"interface-name": b.Physical, "external-controller": fmt.Sprintf("127.0.0.1:%d", b.ControllerPort), "secret": secret,

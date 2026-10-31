@@ -69,6 +69,10 @@ func TestWindowsPackageExcludesUnlistedPrivateFiles(t *testing.T) {
 	for _, name := range []string{"netlaunch.exe", "README.md", "THIRD_PARTY.md", "licenses/golang-x-sys.txt", "examples/policy.json", "runtime/notices/Go-LICENSE", "runtime/notices/mihomo-LICENSE", "runtime/notices/yaml-LICENSE", "runtime/notices/openconnect/COPYING.LGPL", "runtime/notices/windows-components.txt"} {
 		write(name, []byte("fixture"))
 	}
+	write("examples/bootstrap.json", []byte("fixture"))
+	for _, name := range windowsEntries {
+		write(name, []byte("fixture"))
+	}
 	m := runtimebundle.Manifest{Version: 1, OS: "windows", Arch: "amd64"}
 	data := []byte("fixed runtime fixture")
 	digest := sha256.Sum256(data)

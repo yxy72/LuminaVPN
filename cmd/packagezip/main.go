@@ -13,13 +13,19 @@ import (
 )
 
 var entries = []string{
-	"netlaunch", "README.md", "THIRD_PARTY.md", "examples/policy.json",
+	"netlaunch", "README.md", "THIRD_PARTY.md", "examples/policy.json", "examples/bootstrap.json",
 	"licenses/golang-x-sys.txt",
 	"runtime/manifest.json", "runtime/bin/mihomo", "runtime/bin/openconnect",
 	"runtime/lib/libcrypto.3.dylib", "runtime/lib/libssl.3.dylib",
 	"runtime/notices/Go-LICENSE", "runtime/notices/mihomo-LICENSE", "runtime/notices/yaml-LICENSE",
 	"runtime/notices/openconnect/COPYING.LGPL", "runtime/notices/openssl@3/LICENSE.txt",
 	"初始化.command", "检查环境.command", "启动.command", "状态.command", "停止与恢复.command", "公司认证.command",
+	"同步订阅.command", "检查配置.command", "诊断导出.command", "版本信息.command",
+}
+
+var windowsEntries = []string{
+	"初始化.cmd", "检查环境.cmd", "启动.cmd", "状态.cmd", "停止与恢复.cmd", "公司认证.cmd",
+	"同步订阅.cmd", "检查配置.cmd", "诊断导出.cmd", "版本信息.cmd",
 }
 
 func packageZIP(source, destination string) (err error) {
@@ -31,6 +37,8 @@ func packageWindowsZIP(source, destination string) error {
 		return e
 	}
 	names := []string{"netlaunch.exe", "README.md", "THIRD_PARTY.md", "licenses/golang-x-sys.txt", "examples/policy.json", "runtime/manifest.json", "runtime/notices/Go-LICENSE", "runtime/notices/mihomo-LICENSE", "runtime/notices/yaml-LICENSE", "runtime/notices/openconnect/COPYING.LGPL", "runtime/notices/windows-components.txt"}
+	names = append(names, "examples/bootstrap.json")
+	names = append(names, windowsEntries...)
 	for _, f := range m.Files {
 		// A runtime manifest cannot pull arbitrary configuration or logs into
 		// a package. Only executable dependencies and the public CA are bundled.

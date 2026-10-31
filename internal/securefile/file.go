@@ -23,6 +23,17 @@ func Dir(path string) error {
 }
 
 func Read(path string, limit int64, private bool) ([]byte, error) {
+	return readBounded(path, limit, private, false)
+}
+
+// ReadTail reads at most limit bytes from the end of a verified regular file.
+// It uses the same identity and permission checks as Read, without loading a
+// potentially long-lived component log into memory.
+func ReadTail(path string, limit int64, private bool) ([]byte, error) {
+	return readBounded(path, limit, private, true)
+}
+
+func readBounded(path string, limit int64, private, tail bool) ([]byte, error) {
 	if limit < 0 || limit == math.MaxInt64 {
 		return nil, errors.New("invalid read limit")
 	}
@@ -30,7 +41,7 @@ func Read(path string, limit int64, private bool) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !before.Mode().IsRegular() || before.Mode()&os.ModeSymlink != 0 || before.Size() > limit {
+	if !before.Mode().IsRegular() || before.Mode()&os.ModeSymlink != 0 || (!tail && before.Size() > limit) {
 		return nil, errors.New("expected a bounded regular file, not a symlink")
 	}
 	if private && before.Mode().Perm()&0077 != 0 {
@@ -44,6 +55,14 @@ func Read(path string, limit int64, private bool) ([]byte, error) {
 	after, err := f.Stat()
 	if err != nil || !os.SameFile(before, after) {
 		return nil, errors.New("file identity changed while opening")
+	}
+	if tail {
+		if after.Size() > limit {
+			if _, err := f.Seek(after.Size()-limit, io.SeekStart); err != nil {
+				return nil, err
+			}
+		}
+		return io.ReadAll(io.LimitReader(f, limit))
 	}
 	b, err := io.ReadAll(io.LimitReader(f, limit+1))
 	if len(b) > int(limit) {

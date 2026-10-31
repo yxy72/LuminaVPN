@@ -1,4 +1,4 @@
-//go:build darwin
+//go:build darwin || windows
 
 package engine
 
@@ -6,13 +6,21 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
-
-	"netlaunch/internal/securefile"
 )
 
-func vpnBootstrapFailure(run string) error {
-	data, _ := securefile.Read(filepath.Join(private(run), "vpn-private.log"), 128<<10, true)
-	return errors.New("VPN bootstrap failed: " + vpnFailureCode(string(data)))
+func vpnBootstrapFailure(run string, child Child) error {
+	code := vpnAttemptFailure(run, child)
+	if code == "authentication_rejected" {
+		return errVPNAuthenticationRequired
+	}
+	return errors.New("VPN bootstrap failed: " + code)
+}
+func vpnAttemptFailure(run string, child Child) string {
+	if child.LogName == "" || filepath.Base(child.LogName) != child.LogName {
+		return "pending_or_unclassified"
+	}
+	data, _ := readVPNLog(run, child.LogName)
+	return vpnFailureCode(string(data))
 }
 
 // Only fixed classifications leave the administrator log. Never copy output

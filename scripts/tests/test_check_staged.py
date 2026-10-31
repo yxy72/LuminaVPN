@@ -11,6 +11,12 @@ spec.loader.exec_module(check)
 
 
 class SourceBoundaryTests(unittest.TestCase):
+    def test_public_windows_entries_have_a_narrow_allowlist(self):
+        for name in ['scripts/package-windows.ps1', 'scripts/entries-windows/启动.cmd', 'scripts/entries-windows/诊断导出.cmd']:
+            self.assertFalse(check.scan([(name, '100644', b'public launcher')], set()))
+        for name in ['scripts/home.private.ps1', 'scripts/entries-windows/private.cmd', 'scripts/entries-windows/nested/启动.cmd', 'scripts/unknown.ps1']:
+            self.assertTrue(check.scan([(name, '100644', b'local setup')], set()))
+
     def test_private_file_cannot_be_forced_into_index(self):
         for name in ['profiles/policy.json', '.local/result.json', 'scripts/network.private.json', 'dist/preview.zip', 'acceptance-report.md']:
             self.assertTrue(check.scan([(name, '100644', b'{}')], set()))

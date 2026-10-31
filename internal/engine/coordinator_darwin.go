@@ -67,6 +67,9 @@ func initialize(run string) (State, error) {
 	}
 	m.Executable = filepath.Join(private(run), "netlaunch")
 	s := State{Version: 1, Phase: "preparing", Heartbeat: time.Now(), Runner: identity, Manifest: m, DNS: map[string]DNSChange{}, Personal: selector.Reject}
+	if e = initializeStateStorage(run, &s); e != nil {
+		return s, e
+	}
 	if e = save(run, &s); e != nil {
 		return s, e
 	}
@@ -99,10 +102,14 @@ func serve(run string) (returned error) {
 	defer cancel()
 	defer func() {
 		cancel()
-		if returned != nil {
-			_ = update(run, func(s *State) error { s.Error = "startup_or_runtime_failed"; return nil })
+		reason := "coordinator_exit"
+		if errors.Is(returned, errVPNAuthenticationRequired) {
+			reason = "authentication_required"
 		}
-		_ = recoverRun(run, "coordinator_exit")
+		if returned != nil {
+			_ = update(run, func(s *State) error { s.Error = runtimeFailureReason(returned); return nil })
+		}
+		_ = recoverRun(run, reason)
 	}()
 	// Freeze the executables and secrets in root-owned storage before executing them.
 	if e = runtimebundle.Copy(filepath.Join(run, "runtime"), filepath.Join(private(run), "runtime")); e != nil {
@@ -202,7 +209,7 @@ func serve(run string) (returned error) {
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				if pulse(run) != nil {
+				if alivePulse(run) != nil {
 					cancel()
 					return
 				}
@@ -212,30 +219,31 @@ func serve(run string) (returned error) {
 	if e = endpoint(run, network); e != nil {
 		return e
 	}
-	vpnChild, e := startVPN(run)
+	exits := &childExitTracker{}
+	vpnChild, e := startVPN(run, exits)
 	if e != nil {
 		return e
 	}
-	if e = wait(ctx, run, 45*time.Second, func() error {
+	if e = wait(ctx, run, 45*time.Second, func(ctx context.Context) error {
 		if live, err := alive(vpnChild); err != nil || !live {
-			return &terminalReadinessError{vpnBootstrapFailure(run)}
+			return &terminalReadinessError{vpnBootstrapFailure(run, vpnChild)}
 		}
 		s, e := load(run)
 		if e != nil {
 			return e
 		}
 		if !s.VPN.Bootstrap || !validVPN(s) {
-			return vpnBootstrapFailure(run)
+			return vpnBootstrapFailure(run, vpnChild)
 		}
 		return company.ready()
 	}); e != nil {
 		return e
 	}
-	coreChild, e := spawn(run, "core", []string{core, "-d", private(run), "-f", filepath.Join(private(run), "core.json")})
+	coreChild, e := spawn(run, "core", []string{core, "-d", private(run), "-f", filepath.Join(private(run), "core.json")}, exits)
 	if e != nil {
 		return e
 	}
-	if e = wait(ctx, run, 10*time.Second, func() error {
+	if e = wait(ctx, run, 10*time.Second, func(ctx context.Context) error {
 		ok, e := alive(coreChild)
 		if e != nil {
 			return e
@@ -243,11 +251,11 @@ func serve(run string) (returned error) {
 		if !ok {
 			return errors.New("core exited")
 		}
-		return api(run, "GET", "/configs", nil, &map[string]any{})
+		return apiContext(ctx, run, "GET", "/configs", nil, &map[string]any{})
 	}); e != nil {
 		return e
 	}
-	if e = openCompany(run, company); e != nil {
+	if e = openCompany(ctx, run, company); e != nil {
 		return e
 	}
 	names := []string{}
@@ -255,8 +263,8 @@ func serve(run string) (returned error) {
 		names = append(names, n["name"].(string))
 	}
 	selection := selector.New(names)
-	if e = wait(ctx, run, 45*time.Second, func() error {
-		if e := choose(run, selection); e != nil {
+	if e = wait(ctx, run, 45*time.Second, func(ctx context.Context) error {
+		if e := choose(ctx, run, selection); e != nil {
 			return e
 		}
 		if selection.Current == selector.Reject {
@@ -266,10 +274,10 @@ func serve(run string) (returned error) {
 	}); e != nil {
 		return e
 	}
-	if e = api(run, "PATCH", "/configs", map[string]any{"tun": map[string]bool{"enable": true}}, nil); e != nil {
+	if e = apiContext(ctx, run, "PATCH", "/configs", map[string]any{"tun": map[string]bool{"enable": true}}, nil); e != nil {
 		return e
 	}
-	if e = wait(ctx, run, 8*time.Second, func() error {
+	if e = wait(ctx, run, 8*time.Second, func(ctx context.Context) error {
 		i, e := platform.Interfaces()
 		if e != nil {
 			return e
@@ -284,24 +292,24 @@ func serve(run string) (returned error) {
 	if e = takeoverDNS(run); e != nil {
 		return e
 	}
-	if e = wait(ctx, run, 60*time.Second, func() error {
-		if e := ensurePersonalSelection(run, selection); e != nil {
+	if e = wait(ctx, run, 60*time.Second, func(ctx context.Context) error {
+		if e := ensurePersonalSelection(ctx, run, selection); e != nil {
 			return e
 		}
-		if e := openCompany(run, company); e != nil {
+		if e := openCompany(ctx, run, company); e != nil {
 			return e
 		}
-		for _, p := range s.Manifest.Config.Probes {
-			if e = probe(run, p, false); e != nil {
-				if p.Channel == "personal" {
-					if rejectErr := rejectPersonal(run, selection, selection.Current, e); rejectErr != nil {
-						return rejectErr
-					}
-				}
-				_ = api(run, "POST", "/cache/dns/flush", nil, nil)
+		ready, err := checkSystemChannels(ctx, run, s.Manifest.Config.Probes, selection, company.ready() == nil, false)
+		if err != nil {
+			return err
+		}
+		if !ready {
+			// Preserve the native startup retry's DNS cache refresh.
+			_ = apiContext(ctx, run, "POST", "/cache/dns/flush", nil, nil)
+			if ctx.Err() == nil {
 				platform.FlushDNS()
-				return e
 			}
+			return errors.New("system channel verification failed")
 		}
 		return nil
 	}); e != nil {
@@ -310,9 +318,14 @@ func serve(run string) (returned error) {
 	if e = update(run, func(s *State) error { s.Phase = "ready"; s.LastReady = time.Now(); s.Error = ""; return nil }); e != nil {
 		return e
 	}
+	sampling := &personalSampling{}
+	defer sampling.close()
 	lastHealth, lastProbe := time.Now(), time.Now()
 	lastGeneration := ""
 	lastResumeRequest := ""
+	retry := &vpnRetry{}
+	disconnected := false
+	networkUnavailable := false
 	for ctx.Err() == nil {
 		select {
 		case <-company.done:
@@ -356,6 +369,7 @@ func serve(run string) (returned error) {
 				}
 			}
 			lastResumeRequest = epoch
+			retry.NetworkChanged(time.Now())
 			selection = selector.New(names)
 			lastHealth, lastProbe = time.Time{}, time.Time{}
 			continue
@@ -366,14 +380,25 @@ func serve(run string) (returned error) {
 		}
 		observed, e := platform.Discover()
 		if e != nil {
+			networkUnavailable = true
+			company.revoke()
 			_ = gate(run)
-			_ = update(run, func(s *State) error { s.Phase = "network_unavailable"; return nil })
+			_ = update(run, func(s *State) error {
+				s.VPN.Bootstrap = false
+				s.Leases = nil
+				s.Phase = "network_unavailable"
+				return nil
+			})
 			time.Sleep(time.Second)
 			continue
 		}
-		if observed != network {
+		if observed != network || networkUnavailable {
+			company.revoke()
 			_ = gate(run)
 			_ = selectPersonal(run, selector.Reject)
+			if e = update(run, func(s *State) error { s.VPN.Bootstrap = false; s.Leases = nil; return nil }); e != nil {
+				return e
+			}
 			if e = endpoint(run, observed); e != nil {
 				return e
 			}
@@ -390,7 +415,7 @@ func serve(run string) (returned error) {
 			if e = saveCore(run, config); e != nil {
 				return e
 			}
-			if e = api(run, "PUT", "/configs?force=true", map[string]string{"path": filepath.Join(private(run), "core.json")}, nil); e != nil {
+			if e = apiContext(ctx, run, "PUT", "/configs?force=true", map[string]string{"path": filepath.Join(private(run), "core.json")}, nil); e != nil {
 				return e
 			}
 			if e = update(run, func(s *State) error {
@@ -405,6 +430,8 @@ func serve(run string) (returned error) {
 				return e
 			}
 			network = observed
+			networkUnavailable = false
+			retry.NetworkChanged(time.Now())
 			selection = selector.New(names)
 			lastHealth = time.Time{}
 			for _, c := range current.Children {
@@ -415,50 +442,80 @@ func serve(run string) (returned error) {
 				}
 			}
 		}
+		current, e = load(run)
+		if e != nil {
+			return e
+		}
 		if _, e := os.Stat(filepath.Join(run, "auth-refresh.json")); e == nil {
 			var fresh auth.Session
-			if e = readJSON(filepath.Join(run, "auth-refresh.json"), &fresh); e != nil || fresh.Validate(current.Manifest.Config.VPN) != nil {
+			if e = readJSON(filepath.Join(run, "auth-refresh.json"), &fresh); e != nil || requireVPNAuthentication(fresh, current.Manifest.Config.VPN, time.Now()) != nil {
 				return errors.New("invalid refreshed authentication")
 			}
-			_ = gate(run)
-			for _, c := range current.Children {
-				if c.Role == "vpn" {
-					if e = stopChild(c); e != nil {
-						return e
-					}
-				}
+			if e = stopVPN(run, company); e != nil {
+				return e
 			}
+			disconnected = true
 			if e = securefile.Write(filepath.Join(private(run), "auth.json"), fresh); e != nil {
 				return e
 			}
-			_ = os.Remove(filepath.Join(run, "auth-refresh.json"))
-			if _, e = startVPN(run); e != nil {
+			if e = os.Remove(filepath.Join(run, "auth-refresh.json")); e != nil {
 				return e
 			}
-			continue // reload the generation and newly journalled child
+			retry.FreshAuthentication(time.Now())
+			delete(exits.exits, "vpn")
 		}
 		vpnAlive := false
-		for _, c := range current.Children {
-			if c.Role == "vpn" {
-				ok, e := alive(c)
-				if e != nil {
-					return e
-				}
-				vpnAlive = vpnAlive || ok
+		currentVPN, hasVPN := latestVPN(current)
+		if hasVPN {
+			vpnAlive, e = alive(currentVPN)
+			if e != nil {
+				return e
 			}
 		}
-		if !vpnAlive {
-			_ = gate(run)
-			_ = update(run, func(s *State) error { s.Phase = "authentication_required"; s.VPN.Bootstrap = false; return nil })
+		exitKnown := false
+		if !vpnAlive && hasVPN {
+			if reason, known := exits.failure(currentVPN); known {
+				exitKnown = true
+				if e = retry.Failed(time.Now(), currentVPN, reason); e != nil {
+					return e
+				}
+			}
 		}
-		refresh := current.VPN.Generation != lastGeneration || current.Phase != "ready" || company.ready() != nil
+		if !vpnAlive && !disconnected {
+			if e = stopVPN(run, company); e != nil {
+				return e
+			}
+			disconnected = true
+		}
+		if (!vpnAlive || retry.AuthenticationRequired) && current.Phase != vpnRecoveryPhase(retry) {
+			if e = update(run, func(s *State) error { markVPNRecovery(s, retry); return nil }); e != nil {
+				return e
+			}
+		}
+		if !vpnAlive && (exitKnown || exits.exits["vpn"] == nil) && retry.Due(time.Now()) {
+			if _, e = startVPN(run, exits); e != nil {
+				if !errors.Is(e, errVPNAuthenticationRequired) {
+					return e
+				}
+				retry.AuthenticationRequired = true
+				if e = update(run, func(s *State) error { markVPNRecovery(s, retry); return nil }); e != nil {
+					return e
+				}
+			} else {
+				retry.Attempted(time.Now())
+				disconnected = false
+			}
+			continue // reload the newly journalled attempt and its generation
+		}
+		retry.Ready(time.Now(), vpnAlive && company.ready() == nil)
+		refresh := current.VPN.Generation != lastGeneration || channelView(current, "company", time.Now()).State != "ready" || company.ready() != nil
 		for _, a := range current.Leases {
 			if time.Until(a.ExpiresAt) < 15*time.Second {
 				refresh = true
 			}
 		}
-		if vpnAlive && refresh {
-			if e = openCompany(run, company); e != nil {
+		if vpnAlive && !retry.AuthenticationRequired && refresh {
+			if e = openCompany(ctx, run, company); e != nil {
 				_ = gate(run)
 				_ = update(run, func(s *State) error { s.Phase = "company_unavailable"; return nil })
 			} else {
@@ -467,30 +524,28 @@ func serve(run string) (returned error) {
 			}
 		}
 		if time.Since(lastHealth) > 15*time.Second {
-			if e = choose(run, selection); e != nil {
-				return e
+			done, err := sampling.refresh(ctx, run, selection)
+			if err != nil {
+				return err
 			}
-			lastHealth = time.Now()
+			if done {
+				lastHealth = time.Now()
+			}
 		}
 		if time.Since(lastProbe) > 30*time.Second {
-			ready := true
-			for _, p := range current.Manifest.Config.Probes {
-				if e = probe(run, p, false); e != nil {
-					ready = false
-					if p.Channel == "personal" {
-						if rejectErr := rejectPersonal(run, selection, selection.Current, e); rejectErr != nil {
-							return rejectErr
-						}
-						lastHealth = time.Time{}
-					}
-				}
+			ready, err := checkSystemChannels(ctx, run, current.Manifest.Config.Probes, selection, company.ready() == nil, retry.AuthenticationRequired || !vpnAlive)
+			if err != nil {
+				return err
+			}
+			if selection.Current == selector.Reject {
+				lastHealth = time.Time{}
 			}
 			_ = update(run, func(s *State) error {
 				if ready {
 					s.Phase = "ready"
 					s.LastReady = time.Now()
 					s.Error = ""
-				} else if s.Phase != "authentication_required" {
+				} else if s.Phase != "authentication_required" && s.Phase != "reconnecting" {
 					s.Phase = "degraded"
 				}
 				return nil
@@ -502,13 +557,16 @@ func serve(run string) (returned error) {
 	return nil
 }
 
-func startVPN(run string) (Child, error) {
+func startVPN(run string, exits *childExitTracker) (Child, error) {
 	s, e := load(run)
 	if e != nil {
 		return Child{}, e
 	}
 	var a auth.Session
 	if e = readJSON(filepath.Join(private(run), "auth.json"), &a); e != nil {
+		return Child{}, e
+	}
+	if e = requireVPNAuthentication(a, s.Manifest.Config.VPN, time.Now()); e != nil {
 		return Child{}, e
 	}
 	u, _ := url.Parse(s.Manifest.Config.VPN.Server)
@@ -521,7 +579,41 @@ func startVPN(run string) (Child, error) {
 		return Child{}, e
 	}
 	args := []string{filepath.Join(private(run), "runtime/bin/openconnect"), "--protocol=anyconnect", "--no-proxy", "--no-system-trust", "--cafile=/etc/ssl/cert.pem", "--non-inter", "--cookie-on-stdin", "--servercert=" + a.Fingerprint, "--resolve=" + u.Hostname() + ":" + s.Manifest.Config.VPN.EndpointIPv4, "--interface=" + s.Manifest.Binding.VPN, vpnScriptOption(hookPath), s.Manifest.Config.VPN.Server}
-	return spawn(run, "vpn", args)
+	return spawn(run, "vpn", args, exits)
+}
+
+func stopVPN(run string, company *companyRuntime) error {
+	company.revoke()
+	if e := gate(run); e != nil {
+		return e
+	}
+	if e := update(run, func(s *State) error { s.VPN.Bootstrap = false; s.Leases = nil; return nil }); e != nil {
+		return e
+	}
+	s, e := load(run)
+	if e != nil {
+		return e
+	}
+	for _, c := range s.Children {
+		if c.Role == "vpn" {
+			if e := stopChild(c); e != nil {
+				return e
+			}
+		}
+	}
+	return update(run, func(s *State) error {
+		if e := guard(run, s); e != nil {
+			return e
+		}
+		for i, route := range s.Routes {
+			if route.Route.Scoped && route.State != "removed" {
+				if e := removeRoute(run, s, i); e != nil {
+					return e
+				}
+			}
+		}
+		return nil
+	})
 }
 
 func vpnScriptOption(path string) string {
@@ -559,8 +651,13 @@ func watch(run string) error {
 			lastEpoch = epoch
 			resumeGrace = time.Now().Add(35 * time.Second)
 		}
-		if time.Since(s.Heartbeat) > 35*time.Second && !time.Now().Before(resumeGrace) {
-			reason = "coordinator_unresponsive"
+		if reason == "" && !time.Now().Before(resumeGrace) {
+			monitor, err := readMonitor(run, s)
+			if err != nil {
+				reason = "coordinator_monitor_invalid"
+			} else {
+				reason = monitorFailure(s, monitor, time.Now())
+			}
 		}
 		if reason != "" {
 			return recoverRun(run, reason)
@@ -648,7 +745,14 @@ func recoverRun(run, reason string) error {
 	if s.Phase == "stopped" {
 		return nil
 	}
-	_ = update(run, func(s *State) error { s.Phase = "stopping"; s.RecoveryReason = reason; return nil })
+	// A stalled coordinator can hold state.lock. The durable STOP marker and
+	// exclusive recovery lock authorize only its recorded identity to be stopped.
+	if e = stopCoordinator(s.Runner); e != nil {
+		return e
+	}
+	if e = update(run, func(s *State) error { s.Phase = "stopping"; s.RecoveryReason = reason; return nil }); e != nil {
+		return e
+	}
 	fail := func(e error) error {
 		_ = update(run, func(s *State) error {
 			s.Phase = "recovery_failed"
@@ -656,6 +760,12 @@ func recoverRun(run, reason string) error {
 			return nil
 		})
 		return e
+	}
+	// Include any child publication completed between the initial read and
+	// coordinator termination before recovering the native resources.
+	s, e = load(run)
+	if e != nil {
+		return fail(e)
 	}
 	_ = gate(run)
 	for _, role := range []string{"core", "vpn"} {

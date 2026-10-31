@@ -1,4 +1,4 @@
-//go:build windows
+//go:build darwin || windows
 
 package engine
 
@@ -12,9 +12,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
@@ -48,23 +48,31 @@ func TestPinnedOpenConnectDistinguishesRejectedCookie(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 			defer cancel()
-			cmd := exec.CommandContext(ctx, filepath.Join(root, "bin", "openconnect.exe"), "--protocol=anyconnect", "--non-inter", "--cookie-on-stdin", "--no-dtls", "--no-proxy", "--no-system-trust", "--cafile="+ca, server.URL)
-			cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-			cmd.Env = append(os.Environ(), "OPENSSL_CONF=NUL")
+			program := "openconnect"
+			if runtime.GOOS == "windows" {
+				program += ".exe"
+			}
+			cmd := exec.CommandContext(ctx, filepath.Join(root, "bin", program), "--protocol=anyconnect", "--non-inter", "--cookie-on-stdin", "--no-dtls", "--no-proxy", "--no-system-trust", "--cafile="+ca, server.URL)
+			hideVPNFixtureWindow(cmd)
+			cmd.Env = append(os.Environ(), "OPENSSL_CONF="+os.DevNull)
 			cmd.Stdin = strings.NewReader("loopback-fixture-cookie\n")
 			var log bytes.Buffer
 			cmd.Stdout, cmd.Stderr = &log, &log
 			err := cmd.Run()
 			var exit *exec.ExitError
-			if !errors.As(err, &exit) || ctx.Err() != nil || exit.ExitCode() != tc.exit || connects.Load() != 1 {
+			if !errors.As(err, &exit) || ctx.Err() != nil || (runtime.GOOS == "windows" && exit.ExitCode() != tc.exit) || connects.Load() != 1 {
 				t.Fatalf("pinned client classification: exit=%v connects=%d deadline=%v", err, connects.Load(), ctx.Err())
+			}
+			classified := vpnFailureCode(log.String())
+			if (tc.status == 401) != (classified == "authentication_rejected") {
+				t.Fatal("pinned client log classification:", classified)
 			}
 		})
 	}
 }
 
-func TestWindowsChildExitIgnoresReplacedAttempt(t *testing.T) {
-	g := &windowsChildren{}
+func TestChildExitIgnoresReplacedAttempt(t *testing.T) {
+	g := &childExitTracker{}
 	releaseOld, releaseNew := make(chan struct{}), make(chan struct{})
 	g.trackExit("vpn", platform.Identity{PID: 10, Birth: "old"}, func() (uint32, error) { <-releaseOld; return 2, nil })
 	old := g.exits["vpn"]
@@ -86,7 +94,7 @@ func TestWindowsChildExitIgnoresReplacedAttempt(t *testing.T) {
 	}
 }
 
-func TestWindowsChildExitClassifiesOnlyKnownCurrentVPNResult(t *testing.T) {
+func TestChildExitClassifiesOnlyKnownCurrentVPNResult(t *testing.T) {
 	for _, tc := range []struct {
 		role     string
 		code     uint32
@@ -95,7 +103,7 @@ func TestWindowsChildExitClassifiesOnlyKnownCurrentVPNResult(t *testing.T) {
 	}{
 		{"vpn", 2, nil, true}, {"vpn", 2, errors.New("exit query failed"), false}, {"vpn", 0, nil, false}, {"vpn", 1, nil, false}, {"core", 2, nil, false},
 	} {
-		g := &windowsChildren{}
+		g := &childExitTracker{}
 		g.trackExit(tc.role, platform.Identity{PID: 10}, func() (uint32, error) { return tc.code, tc.err })
 		<-g.exits[tc.role].done
 		if g.vpnAuthenticationRejected() != tc.rejected {

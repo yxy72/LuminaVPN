@@ -29,6 +29,13 @@ def allowed_path(name):
         return True
     if name in {'examples/policy.json', 'examples/bootstrap.json'}:
         return True
+    if name == 'scripts/package-windows.ps1':
+        return True
+    if p.parent == PurePosixPath('scripts/entries-windows') and p.name in {
+        '初始化.cmd', '检查环境.cmd', '启动.cmd', '状态.cmd', '停止与恢复.cmd',
+        '公司认证.cmd', '同步订阅.cmd', '检查配置.cmd', '诊断导出.cmd', '版本信息.cmd',
+    }:
+        return True
     if p.parts[0] == 'scripts' and p.suffix in {'.sh', '.py', '.command'}:
         return True
     return name in {'scripts/runtime-manifest.macos-arm64.json', 'scripts/runtime-manifest.windows-amd64.json'}

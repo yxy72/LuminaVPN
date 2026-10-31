@@ -23,45 +23,64 @@ import (
 )
 
 func api(run, method, path string, payload, out any) error {
+	return apiContext(context.Background(), run, method, path, payload, out)
+}
+func apiContext(ctx context.Context, run, method, path string, payload, out any) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	var config struct {
 		Secret     string `json:"secret"`
 		Controller string `json:"external-controller"`
 	}
 	if e := readCore(run, &config); e != nil {
-		return e
+		return newCoreFailure("core_configuration_unavailable", e)
 	}
-	if !strings.HasPrefix(config.Controller, "127.0.0.1:") {
-		return errors.New("invalid local control binding")
+	return coreRequest(ctx, config.Controller, config.Secret, method, path, payload, out)
+}
+
+// coreRequest owns only bounded local HTTP I/O; run storage stays at the caller.
+func coreRequest(ctx context.Context, controller, secret, method, path string, payload, out any) error {
+	host, port, err := net.SplitHostPort(controller)
+	number, portErr := strconv.Atoi(port)
+	if err != nil || host != "127.0.0.1" || portErr != nil || number < 1 || number > 65535 {
+		return newCoreFailure("core_binding_invalid", nil)
 	}
 	var body io.Reader
 	if payload != nil {
 		b, e := json.Marshal(payload)
 		if e != nil {
-			return e
+			return newCoreFailure("core_request_invalid", e)
 		}
 		body = bytes.NewReader(b)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	req, e := http.NewRequestWithContext(ctx, method, "http://"+config.Controller+path, body)
+	req, e := http.NewRequestWithContext(ctx, method, "http://"+controller+path, body)
 	if e != nil {
-		return e
+		return newCoreFailure("core_request_invalid", e)
 	}
-	req.Header.Set("Authorization", "Bearer "+config.Secret)
+	req.Header.Set("Authorization", "Bearer "+secret)
 	req.Header.Set("Content-Type", "application/json")
 	client := http.Client{Transport: &http.Transport{Proxy: nil}, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("local control redirects forbidden") }}
 	defer client.CloseIdleConnections()
 	r, e := client.Do(req)
 	if e != nil {
-		return errors.New("local core unavailable")
+		if ctx.Err() != nil {
+			return newCoreFailure("core_request_interrupted", ctx.Err())
+		}
+		return newCoreFailure("core_unavailable", nil)
 	}
 	defer r.Body.Close()
 	if r.StatusCode != 200 && r.StatusCode != 204 {
-		return errors.New("local core rejected request")
+		return &coreFailure{code: "core_request_rejected", status: r.StatusCode}
 	}
 	if out != nil {
 		if json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(out) != nil {
-			return errors.New("invalid local core response")
+			if ctx.Err() != nil {
+				return newCoreFailure("core_request_interrupted", ctx.Err())
+			}
+			return newCoreFailure("core_response_invalid", nil)
 		}
 	}
 	return nil
@@ -70,13 +89,16 @@ func gate(run string) error {
 	return api(run, "PUT", "/proxies/CORP", map[string]string{"name": "REJECT"}, nil)
 }
 func selectPersonal(run, node string) error {
-	if e := api(run, "PUT", "/proxies/PERSONAL", map[string]string{"name": node}, nil); e != nil {
+	return selectPersonalContext(context.Background(), run, node)
+}
+func selectPersonalContext(ctx context.Context, run, node string) error {
+	if e := apiContext(ctx, run, "PUT", "/proxies/PERSONAL", map[string]string{"name": node}, nil); e != nil {
 		return e
 	}
 	var current struct {
 		Now string `json:"now"`
 	}
-	if e := api(run, "GET", "/proxies/PERSONAL", nil, &current); e != nil {
+	if e := apiContext(ctx, run, "GET", "/proxies/PERSONAL", nil, &current); e != nil {
 		return e
 	}
 	if current.Now != node {
@@ -85,7 +107,7 @@ func selectPersonal(run, node string) error {
 	return nil
 }
 
-func probe(run string, p policy.Probe, bound bool, companyDial ...companyproxy.Dial) (result error) {
+func probe(ctx context.Context, run string, p policy.Probe, bound bool, companyDial ...companyproxy.Dial) (result error) {
 	defer func() {
 		if result != nil {
 			result = describeProbeFailure(p, result)
@@ -104,7 +126,7 @@ func probe(run string, p policy.Probe, bound bool, companyDial ...companyproxy.D
 		port = "443"
 	}
 	host := u.Hostname()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	var c net.Conn
 	if bound && len(companyDial) > 0 {
@@ -127,16 +149,26 @@ func probe(run string, p policy.Probe, bound bool, companyDial ...companyproxy.D
 		c, e = d.DialContext(ctx, "tcp4", net.JoinHostPort(host, port))
 	}
 	if e != nil {
-		return errors.New("target TCP not ready")
+		return newProbeFailure("tcp_unavailable", "target TCP not ready")
 	}
 	defer c.Close()
-	_ = c.SetDeadline(time.Now().Add(4 * time.Second))
+	deadline := time.Now().Add(4 * time.Second)
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		deadline = d
+	}
+	_ = c.SetDeadline(deadline)
+	stop := context.AfterFunc(ctx, func() { _ = c.Close() })
+	defer stop()
 	secure := tls.Client(c, &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12})
 	if e = secure.HandshakeContext(ctx); e != nil {
 		return tlsProbeFailure(e)
 	}
 	if !bound {
-		time.Sleep(100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
 		var data struct {
 			Connections []struct {
 				Metadata struct {
@@ -147,7 +179,7 @@ func probe(run string, p policy.Probe, bound bool, companyDial ...companyproxy.D
 				Chains []string `json:"chains"`
 			} `json:"connections"`
 		}
-		if e = api(run, "GET", "/connections", nil, &data); e != nil {
+		if e = apiContext(ctx, run, "GET", "/connections", nil, &data); e != nil {
 			return e
 		}
 		source := strconv.Itoa(c.LocalAddr().(*net.TCPAddr).Port)
@@ -163,7 +195,7 @@ func probe(run string, p policy.Probe, bound bool, companyDial ...companyproxy.D
 			}
 		}
 		if !found {
-			return errors.New("system probe did not use the expected TUN channel")
+			return newProbeFailure("unexpected_system_path", "system probe did not use the expected TUN channel")
 		}
 	}
 	path := u.EscapedPath()
@@ -171,17 +203,19 @@ func probe(run string, p policy.Probe, bound bool, companyDial ...companyproxy.D
 		path = "/"
 	}
 	if _, e = fmt.Fprintf(secure, "HEAD %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", path, u.Host); e != nil {
-		return errors.New("HTTPS probe write failed")
+		return newProbeFailure("http_write_failed", "HTTPS probe write failed")
 	}
 	response, e := http.ReadResponse(bufio.NewReader(io.LimitReader(secure, 32<<10)), &http.Request{Method: "HEAD"})
 	if e != nil {
-		return errors.New("HTTPS probe response missing")
+		return newProbeFailure("http_response_missing", "HTTPS probe response missing")
 	}
 	response.Body.Close()
-	return nil
+	return checkProbeStatus(p, response.StatusCode)
 }
 
-func openCompany(run string, company *companyRuntime) error {
+func openCompany(ctx context.Context, run string, company *companyRuntime) error {
+	ctx, cancel := context.WithTimeout(ctx, 6*time.Second)
+	defer cancel()
 	if e := company.ready(); e != nil {
 		return e
 	}
@@ -190,14 +224,21 @@ func openCompany(run string, company *companyRuntime) error {
 		return e
 	}
 	generation := s.VPN.Generation
+	probes := []policy.Probe{}
 	for _, p := range s.Manifest.Config.Probes {
 		if p.Channel == "company" {
-			if e = probe(run, p, true, company.dial); e != nil {
-				return e
-			}
+			probes = append(probes, p)
+		}
+	}
+	for _, observation := range runProbeBatch(ctx, probes, 6*time.Second, 4, func(work context.Context, p policy.Probe) error { return probe(work, run, p, true, company.dial) }) {
+		if observation.err != nil {
+			return observation.err
 		}
 	}
 	return update(run, func(s *State) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if e := guard(run, s); e != nil {
 			return e
 		}
@@ -209,7 +250,7 @@ func openCompany(run string, company *companyRuntime) error {
 				return errors.New("company lease expired before opening")
 			}
 		}
-		return api(run, "PUT", "/proxies/CORP", map[string]string{"name": "CORP-BOUND"}, nil)
+		return apiContext(ctx, run, "PUT", "/proxies/CORP", map[string]string{"name": "CORP-BOUND"}, nil)
 	})
 }
 

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"netlaunch/internal/policy"
@@ -17,13 +18,21 @@ import (
 )
 
 type subscriptionCache struct {
-	Version     int                 `json:"version"`
-	Fingerprint string              `json:"fingerprint"`
-	Updated     time.Time           `json:"updated"`
-	Result      subscription.Result `json:"result"`
+	Version     int                    `json:"version"`
+	Fingerprint string                 `json:"fingerprint"`
+	Updated     time.Time              `json:"updated"`
+	Result      subscription.Result    `json:"result"`
+	Snapshot    *subscription.Snapshot `json:"snapshot,omitempty"`
 }
 
 func sourceConfig(profile string) (subscription.Sources, bool, error) {
+	cfg, e := readPolicy(profile)
+	if e != nil {
+		return subscription.Sources{}, false, e
+	}
+	return sourceConfigWithPolicy(profile, cfg)
+}
+func sourceConfigWithPolicy(profile string, cfg policy.Config) (subscription.Sources, bool, error) {
 	path := filepath.Join(profile, "sources.json")
 	if _, e := os.Lstat(path); errors.Is(e, os.ErrNotExist) {
 		return subscription.Sources{}, false, nil
@@ -33,10 +42,6 @@ func sourceConfig(profile string) (subscription.Sources, bool, error) {
 		return subscription.Sources{}, false, errors.New("private subscription sources unreadable")
 	}
 	// Reuse bootstrap validation, including URL and target restrictions.
-	cfg, e := readPolicy(profile)
-	if e != nil {
-		return subscription.Sources{}, false, e
-	}
 	raw, _ := json.Marshal(map[string]any{"version": 1, "policy": cfg, "subscriptions": json.RawMessage(data)})
 	b, e := subscription.Decode(raw, profile)
 	return b.Subscriptions, true, e
@@ -51,9 +56,36 @@ func fingerprint(cfg policy.Config, s subscription.Sources) string {
 }
 func cachedSubscription(profile string, cfg policy.Config, s subscription.Sources) (subscriptionCache, error) {
 	var cache subscriptionCache
-	raw, e := securefile.Read(filepath.Join(profile, "subscription-cache.json"), 16<<20, true)
-	if e != nil || json.Unmarshal(raw, &cache) != nil || cache.Version != 1 || cache.Fingerprint != fingerprint(cfg, s) {
+	// Nine bounded sources can occupy 48 MiB after JSON base64 encoding, plus
+	// parsed nodes/rules. Publish all of it atomically as one private envelope.
+	raw, e := securefile.Read(filepath.Join(profile, "subscription-cache.json"), 64<<20, true)
+	if e != nil || json.Unmarshal(raw, &cache) != nil {
 		return cache, errors.New("no matching validated subscription cache; run sync")
+	}
+	switch cache.Version {
+	case 1:
+		// Legacy caches have no source bytes or independent source identity.
+		// Never claim an edited policy matches them; one sync upgrades to v2.
+		if cache.Fingerprint != fingerprint(cfg, s) {
+			return cache, errors.New("legacy subscription cache requires one sync before offline policy edits")
+		}
+	case 2:
+		if cache.Snapshot == nil {
+			return cache, errors.New("subscription content missing; run sync")
+		}
+		fp, err := cache.Snapshot.Fingerprint(s)
+		if err != nil {
+			return cache, err
+		}
+		if cache.Fingerprint != fp {
+			cache.Result, e = cache.Snapshot.Parse(s)
+			if e != nil {
+				return cache, e
+			}
+			cache.Fingerprint = fp
+		}
+	default:
+		return cache, errors.New("unsupported subscription cache version; run sync")
 	}
 	if _, _, e = effectiveResult(cfg, cache.Result); e != nil {
 		return cache, e
@@ -96,7 +128,7 @@ func (c CLI) syncSubscriptions(o options, cfg policy.Config, force bool) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	result, e := subscription.Fetch(ctx, sources)
+	snapshot, result, e := subscription.FetchSnapshot(ctx, sources)
 	if e == nil {
 		_, _, e = effectiveResult(cfg, result)
 	}
@@ -107,15 +139,31 @@ func (c CLI) syncSubscriptions(o options, cfg policy.Config, force bool) error {
 		}
 		return errors.New("subscription update failed; previous cache retained, source details omitted")
 	}
-	cache := subscriptionCache{1, fingerprint(cfg, sources), time.Now(), result}
+	fp, e := snapshot.Fingerprint(sources)
+	if e != nil {
+		return e
+	}
+	cache := subscriptionCache{Version: 2, Fingerprint: fp, Updated: time.Now(), Result: result, Snapshot: &snapshot}
 	if e = securefile.Write(filepath.Join(o.profile, "subscription-cache.json"), cache); e != nil {
 		return e
 	}
 	fmt.Fprintf(c.Out, "Updated private cache: %d nodes, %d personal rules; skipped %d nodes and %d unsupported/unmapped rules. Applies to the next start.\n", len(result.Nodes), len(result.Rules), result.SkippedNodes, result.SkippedRules)
+	counts := map[string]int{}
+	for _, issue := range result.Issues {
+		counts[issue.Kind+":"+issue.Reason]++
+	}
+	keys := make([]string, 0, len(counts))
+	for key := range counts {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		fmt.Fprintf(c.Out, "Skipped %s: %d.\n", key, counts[key])
+	}
 	return nil
 }
 func effectiveProfile(profile string, cfg policy.Config) (policy.Config, []policy.Node, error) {
-	s, present, e := sourceConfig(profile)
+	s, present, e := sourceConfigWithPolicy(profile, cfg)
 	if e != nil {
 		return cfg, nil, e
 	}

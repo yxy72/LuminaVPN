@@ -40,11 +40,14 @@ func verifyPersonalSelection(ctx context.Context, client *http.Client, probes []
 		}
 		r, e := client.Do(req)
 		if e != nil {
-			return describeProbeFailure(p, tlsProbeFailure(e))
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return describeProbeFailure(p, requestProbeFailure(e))
 		}
 		r.Body.Close()
-		if r.StatusCode < 200 || r.StatusCode >= 400 {
-			return describeProbeFailure(p, errors.New("selected personal node returned an unsuccessful HTTP status"))
+		if e := checkProbeStatus(p, r.StatusCode); e != nil {
+			return describeProbeFailure(p, e)
 		}
 	}
 	if !checked {

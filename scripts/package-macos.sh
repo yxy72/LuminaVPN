@@ -8,7 +8,8 @@ if [ "$(uname -s)" != Darwin ] || [ "$(uname -m)" != arm64 ]; then
 fi
 cmp runtime/manifest.json scripts/runtime-manifest.macos-arm64.json
 NETLAUNCH_TEST_RUNTIME="$PWD/runtime" "$NETLAUNCH_BUILD_GO" test ./internal/app -run TestBundledCoreWithoutTUN -count=1
-NETLAUNCH_PACKAGE="$PWD/dist/NetLaunch-macOS-arm64-0.1.0-preview.1"
+NETLAUNCH_VERSION=$("$NETLAUNCH_BUILD_GO" run ./cmd/netlaunch version)
+NETLAUNCH_PACKAGE="$PWD/dist/NetLaunch-macOS-arm64-$NETLAUNCH_VERSION"
 mkdir -p "$NETLAUNCH_PACKAGE/runtime/bin" "$NETLAUNCH_PACKAGE/runtime/lib" "$NETLAUNCH_PACKAGE/runtime/notices" "$NETLAUNCH_PACKAGE/examples" "$NETLAUNCH_PACKAGE/licenses"
 "$NETLAUNCH_BUILD_GO" build -trimpath -o "$NETLAUNCH_PACKAGE/netlaunch" ./cmd/netlaunch
 cp -f README.md THIRD_PARTY.md "$NETLAUNCH_PACKAGE/"

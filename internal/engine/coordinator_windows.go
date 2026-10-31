@@ -80,6 +80,9 @@ func initialize(run string) (State, error) {
 	}
 	m.Executable = frozenSelf(run)
 	s := State{Version: 1, Manifest: m, Runner: runner, Phase: "preparing", Heartbeat: time.Now(), Personal: selector.Reject, Windows: &WindowsState{BootID: boot, PublicRun: run, Physical: physical, AdapterBefore: before}}
+	if e = initializeStateStorage(run, &s); e != nil {
+		return s, e
+	}
 	if e = save(run, &s); e != nil {
 		return s, e
 	}
@@ -152,8 +155,8 @@ func privateLog(run, name string) (*os.File, error) {
 }
 
 type windowsChildren struct {
-	jobs  map[string]*winproc.Job
-	exits map[string]*windowsChildExit
+	jobs map[string]*winproc.Job
+	childExitTracker
 }
 
 func (g *windowsChildren) close() {
@@ -170,7 +173,13 @@ func (g *windowsChildren) launch(run, role string, args, environment []string, c
 		return Child{}, e
 	}
 	g.jobs[role] = job
-	log, e := privateLog(run, role)
+	logID, e := nonce()
+	if e != nil {
+		job.Close()
+		return Child{}, e
+	}
+	logRole := role + "-" + logID
+	log, e := privateLog(run, logRole)
 	if e != nil {
 		job.Close()
 		return Child{}, e
@@ -199,7 +208,7 @@ func (g *windowsChildren) launch(run, role string, args, environment []string, c
 			return e
 		}
 		p, e := job.Start(winproc.Spec{Args: args, Directory: private(run), Environment: environment, Stdin: in, Stdout: log, Stderr: log}, func(id platform.Identity) error {
-			result = Child{Role: role, PID: id.PID, Birth: id.Birth, Native: &id, Released: true}
+			result = Child{Role: role, PID: id.PID, Birth: id.Birth, Native: &id, Released: true, LogName: logRole + "-private.log"}
 			s.Children = append(s.Children, result)
 			return save(run, s)
 		})
@@ -213,7 +222,17 @@ func (g *windowsChildren) launch(run, role string, args, environment []string, c
 		}
 		return Child{}, e
 	}
-	g.trackExit(role, process.Identity, process.Wait)
+	g.trackExitReason(role, process.Identity, func() (uint32, string, error) {
+		code, err := process.Wait()
+		reason := "vpn_process_exited"
+		if role == "vpn" {
+			reason = vpnAttemptFailure(run, result)
+			// Exit 2 is confirmed with the pinned Windows client independently
+			// of localized/private output. It takes precedence over log hints.
+			reason = windowsVPNExitReason(role, code, err, reason)
+		}
+		return code, reason, err
+	})
 	if writer != nil {
 		// The child is already running and consuming stdin. Bound the pipe write;
 		// a stalled child must not block coordinator cancellation indefinitely.
@@ -295,12 +314,8 @@ func startVPN(run string, g *windowsChildren) (Child, error) {
 	if e = winRead(run, "auth.json", &session); e != nil {
 		return Child{}, e
 	}
-	if e = session.Validate(s.Manifest.Config.VPN); e != nil {
+	if e = requireVPNAuthentication(session, s.Manifest.Config.VPN, time.Now()); e != nil {
 		return Child{}, e
-	}
-	age := time.Since(session.Created)
-	if age < 0 || age > auth.MaxAge {
-		return Child{}, errors.New("VPN session expired; run auth")
 	}
 	token, e := nonce()
 	if e != nil {
@@ -524,6 +539,7 @@ func startFrozenCoordinator(run string) error {
 				return e
 			}
 			s.Runner = id
+			s.Heartbeat = time.Now() // new identity gets its own startup allowance
 			if s.Manifest.ValidationTimeout != 0 {
 				if !s.Windows.ValidationDeadline.IsZero() {
 					return errors.New("validation deadline cannot be renewed")
@@ -602,7 +618,7 @@ func runFrozen(run string) (returned error) {
 			reason = "authentication_required"
 		}
 		if returned != nil {
-			_ = update(run, func(s *State) error { s.Error = "startup_or_runtime_failed"; return nil })
+			_ = update(run, func(s *State) error { s.Error = runtimeFailureReason(returned); return nil })
 		}
 		_ = recoverRun(run, reason)
 	}()
@@ -678,7 +694,7 @@ func runFrozen(run string) (returned error) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if pulse(run) != nil {
+				if alivePulse(run) != nil {
 					cancel()
 					return
 				}
@@ -693,7 +709,7 @@ func runFrozen(run string) (returned error) {
 	if e != nil {
 		return e
 	}
-	if e = wait(ctx, run, 12*time.Second, func() error {
+	if e = wait(ctx, run, 12*time.Second, func(ctx context.Context) error {
 		ok, e := alive(coreChild)
 		if e != nil {
 			return e
@@ -701,18 +717,18 @@ func runFrozen(run string) (returned error) {
 		if !ok {
 			return errors.New("core exited")
 		}
-		return api(run, "GET", "/configs", nil, &map[string]any{})
+		return apiContext(ctx, run, "GET", "/configs", nil, &map[string]any{})
 	}); e != nil {
 		return e
 	}
-	if e = wait(ctx, run, 12*time.Second, func() error { return discoverTUN(run) }); e != nil {
+	if e = wait(ctx, run, 12*time.Second, func(ctx context.Context) error { return discoverTUN(run) }); e != nil {
 		return e
 	}
 	vpnChild, e := startVPN(run, children)
 	if e != nil {
 		return e
 	}
-	if e = wait(ctx, run, 50*time.Second, func() error {
+	if e = wait(ctx, run, 50*time.Second, func(ctx context.Context) error {
 		if children.vpnAuthenticationRejected() {
 			return &terminalReadinessError{errVPNAuthenticationRequired}
 		}
@@ -726,7 +742,7 @@ func runFrozen(run string) (returned error) {
 	}); e != nil {
 		return e
 	}
-	if e = openCompany(run, company); e != nil {
+	if e = openCompany(ctx, run, company); e != nil {
 		company.diagnostic("bootstrap_bound", e)
 		return e
 	}
@@ -735,8 +751,8 @@ func runFrozen(run string) (returned error) {
 		names = append(names, n["name"].(string))
 	}
 	selection := selector.New(names)
-	if e = wait(ctx, run, 45*time.Second, func() error {
-		if e := choose(run, selection); e != nil {
+	if e = wait(ctx, run, 45*time.Second, func(ctx context.Context) error {
+		if e := choose(ctx, run, selection); e != nil {
 			return e
 		}
 		if selection.Current == selector.Reject {
@@ -746,29 +762,25 @@ func runFrozen(run string) (returned error) {
 	}); e != nil {
 		return e
 	}
-	if e = wait(ctx, run, 12*time.Second, func() error { return capture(run) }); e != nil {
+	if e = wait(ctx, run, 12*time.Second, func(ctx context.Context) error { return capture(run) }); e != nil {
 		return e
 	}
 	if e = takeoverDNS(run); e != nil {
 		return e
 	}
-	if e = wait(ctx, run, 60*time.Second, func() error {
-		if e := ensurePersonalSelection(run, selection); e != nil {
+	if e = wait(ctx, run, 60*time.Second, func(ctx context.Context) error {
+		if e := ensurePersonalSelection(ctx, run, selection); e != nil {
 			return e
 		}
-		if e := openCompany(run, company); e != nil {
+		if e := openCompany(ctx, run, company); e != nil {
 			return e
 		}
-		for _, p := range s.Manifest.Config.Probes {
-			if e := probe(run, p, false); e != nil {
-				company.diagnostic("startup_system_"+p.Channel, e)
-				if p.Channel == "personal" {
-					if rejectErr := rejectPersonal(run, selection, selection.Current, e); rejectErr != nil {
-						return rejectErr
-					}
-				}
-				return e
-			}
+		ready, err := checkSystemChannels(ctx, run, s.Manifest.Config.Probes, selection, company.ready() == nil, false)
+		if err != nil {
+			return err
+		}
+		if !ready {
+			return errors.New("system channel verification failed")
 		}
 		return nil
 	}); e != nil {
@@ -780,11 +792,16 @@ func runFrozen(run string) (returned error) {
 	return windowsLoop(ctx, run, children, company, coreChild, nodes, secret, selection, names)
 }
 func windowsLoop(ctx context.Context, run string, g *windowsChildren, company *companyRuntime, core Child, nodes []policy.Node, secret string, selection *selector.Policy, names []string) error {
-	lastHealth, lastProbe, lastAttempt := time.Now(), time.Now(), time.Now()
+	sampling := &personalSampling{}
+	defer sampling.close()
+	lastHealth, lastProbe := time.Now(), time.Now()
 	disconnected := false
-	authenticationRequired := false
+	retry := &vpnRetry{}
 	openedGeneration := ""
 	for ctx.Err() == nil {
+		if err := pulse(run); err != nil {
+			return err
+		}
 		select {
 		case <-company.done:
 			return errors.New("company ingress stopped")
@@ -809,10 +826,19 @@ func windowsLoop(ctx context.Context, run string, g *windowsChildren, company *c
 			_ = gate(run)
 			_ = selectPersonal(run, selector.Reject)
 			if !disconnected {
+				if child, ok := latestVPN(s); ok {
+					if reason, known := g.failure(child); known {
+						if err := retry.Failed(time.Now(), child, reason); err != nil {
+							return err
+						}
+					}
+				}
 				if e = stopVPN(run, g, company); e != nil {
 					return e
 				}
 				disconnected = true
+				delete(g.exits, "vpn") // intentional stop has no failure to retry
+				retry.NetworkChanged(time.Now())
 			}
 			if networkErr != nil || !awake {
 				_ = update(run, func(s *State) error { s.Phase = "network_unavailable"; s.Personal = selector.Reject; return nil })
@@ -844,7 +870,7 @@ func windowsLoop(ctx context.Context, run string, g *windowsChildren, company *c
 				if e = saveCore(run, config); e != nil {
 					return e
 				}
-				if e = api(run, "PUT", "/configs?force=true", map[string]string{"path": filepath.Join(private(run), "core.json")}, nil); e != nil {
+				if e = apiContext(ctx, run, "PUT", "/configs?force=true", map[string]string{"path": filepath.Join(private(run), "core.json")}, nil); e != nil {
 					return e
 				}
 				if e = capture(run); e != nil {
@@ -855,14 +881,18 @@ func windowsLoop(ctx context.Context, run string, g *windowsChildren, company *c
 				}
 			}
 			selection = selector.New(names)
-			lastHealth, lastProbe, lastAttempt = time.Time{}, time.Time{}, time.Time{}
+			lastHealth, lastProbe = time.Time{}, time.Time{}
+		}
+		s, e = load(run)
+		if e != nil {
+			return e
 		}
 		if _, e = os.Lstat(filepath.Join(run, "auth-refresh.json")); e == nil {
 			var fresh auth.Session
 			if e = readJSON(filepath.Join(run, "auth-refresh.json"), &fresh); e != nil {
 				return e
 			}
-			if e = fresh.Validate(s.Manifest.Config.VPN); e != nil {
+			if e = requireVPNAuthentication(fresh, s.Manifest.Config.VPN, time.Now()); e != nil {
 				return e
 			}
 			if e = stopVPN(run, g, company); e != nil {
@@ -872,39 +902,41 @@ func windowsLoop(ctx context.Context, run string, g *windowsChildren, company *c
 			if e = winWrite(run, "auth.json", fresh); e != nil {
 				return e
 			}
-			authenticationRequired = false
+			retry.FreshAuthentication(time.Now())
 			delete(g.exits, "vpn")
 			if e = os.Remove(filepath.Join(run, "auth-refresh.json")); e != nil {
 				return e
 			}
-			lastAttempt = time.Time{}
 		}
 		vpnAlive := false
-		for _, c := range s.Children {
-			if c.Role == "vpn" {
-				ok, e := alive(c)
-				if e != nil {
-					return e
-				}
-				vpnAlive = vpnAlive || ok
+		currentVPN, hasVPN := latestVPN(s)
+		if hasVPN {
+			vpnAlive, e = alive(currentVPN)
+			if e != nil {
+				return e
 			}
 		}
-		if !vpnAlive && !authenticationRequired && g.vpnAuthenticationRejected() {
+		exitKnown := false
+		if !vpnAlive && hasVPN {
+			if reason, known := g.failure(currentVPN); known {
+				exitKnown = true
+				if e = retry.Failed(time.Now(), currentVPN, reason); e != nil {
+					return e
+				}
+			}
+		}
+		if !vpnAlive && !disconnected {
 			if e = stopVPN(run, g, company); e != nil {
 				return e
 			}
-			authenticationRequired = true
+			disconnected = true
 		}
-		if authenticationRequired && s.Phase != "authentication_required" {
-			if e = update(run, func(s *State) error {
-				s.Phase = "authentication_required"
-				s.Error = "VPN session rejected; run auth"
-				return nil
-			}); e != nil {
+		if (!vpnAlive || disconnected || retry.AuthenticationRequired) && s.Phase != vpnRecoveryPhase(retry) {
+			if e = update(run, func(s *State) error { markVPNRecovery(s, retry); return nil }); e != nil {
 				return e
 			}
 		}
-		if !authenticationRequired && (!vpnAlive || disconnected) && time.Since(lastAttempt) > 10*time.Second {
+		if (!vpnAlive || disconnected) && (exitKnown || g.exits["vpn"] == nil) && retry.Due(time.Now()) {
 			if e = stopVPN(run, g, company); e != nil {
 				return e
 			}
@@ -912,16 +944,24 @@ func windowsLoop(ctx context.Context, run string, g *windowsChildren, company *c
 				return e
 			}
 			_, e = startVPN(run, g)
-			lastAttempt = time.Now()
-			disconnected = false
 			if e != nil {
-				_ = update(run, func(s *State) error { s.Phase = "authentication_required"; return nil })
+				if !errors.Is(e, errVPNAuthenticationRequired) {
+					return e
+				}
+				retry.AuthenticationRequired = true
+				if e = update(run, func(s *State) error { markVPNRecovery(s, retry); return nil }); e != nil {
+					return e
+				}
+			} else {
+				retry.Attempted(time.Now())
+				disconnected = false
 			}
 			time.Sleep(time.Second)
 			continue
 		}
-		if vpnAlive && (s.Phase != "ready" || s.VPN.Generation != openedGeneration || company.ready() != nil) {
-			if e = openCompany(run, company); e != nil {
+		retry.Ready(time.Now(), vpnAlive && company.ready() == nil)
+		if vpnAlive && !retry.AuthenticationRequired && (channelView(s, "company", time.Now()).State != "ready" || s.VPN.Generation != openedGeneration || company.ready() != nil) {
+			if e = openCompany(ctx, run, company); e != nil {
 				company.diagnostic("runtime_bound", e)
 				_ = gate(run)
 				_ = update(run, func(s *State) error { s.Phase = "company_unavailable"; return nil })
@@ -931,38 +971,28 @@ func windowsLoop(ctx context.Context, run string, g *windowsChildren, company *c
 			}
 		}
 		if time.Since(lastHealth) > 15*time.Second {
-			if e = choose(run, selection); e != nil {
-				return e
+			done, err := sampling.refresh(ctx, run, selection)
+			if err != nil {
+				return err
 			}
-			lastHealth = time.Now()
+			if done {
+				lastHealth = time.Now()
+			}
 		}
 		if time.Since(lastProbe) > 30*time.Second {
-			readyErr := company.ready()
-			ready := readyErr == nil
-			if readyErr != nil {
-				company.diagnostic("readiness", readyErr)
+			ready, err := checkSystemChannels(ctx, run, s.Manifest.Config.Probes, selection, company.ready() == nil, retry.AuthenticationRequired || !vpnAlive)
+			if err != nil {
+				return err
 			}
-			for _, p := range s.Manifest.Config.Probes {
-				if authenticationRequired && p.Channel == "company" {
-					continue
-				}
-				if e = probe(run, p, false); e != nil {
-					company.diagnostic("probe_"+p.Channel, e)
-					ready = false
-					if p.Channel == "personal" {
-						if rejectErr := rejectPersonal(run, selection, selection.Current, e); rejectErr != nil {
-							return rejectErr
-						}
-						lastHealth = time.Time{}
-					}
-				}
+			if selection.Current == selector.Reject {
+				lastHealth = time.Time{}
 			}
 			_ = update(run, func(s *State) error {
 				if ready {
 					s.Phase = "ready"
 					s.LastReady = time.Now()
 					s.Error = ""
-				} else if s.Phase != "authentication_required" {
+				} else if s.Phase != "authentication_required" && s.Phase != "reconnecting" {
 					s.Phase = "degraded"
 				}
 				return nil

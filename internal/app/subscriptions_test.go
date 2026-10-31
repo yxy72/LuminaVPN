@@ -86,11 +86,97 @@ dns: {nameserver: ["evil"]}
 		t.Fatal("credential disclosed")
 	}
 	cfg.Company.Domains = append(cfg.Company.Domains, "new.corp.example.com")
-	if _, e := cachedSubscription(profile, cfg, sources); e == nil {
-		t.Fatal("stale fingerprint accepted")
+	if _, e := cachedSubscription(profile, cfg, sources); e != nil {
+		t.Fatal("offline policy edit unnecessarily invalidated source cache", e)
+	}
+	if e := securefile.Write(filepath.Join(profile, "policy.json"), cfg); e != nil {
+		t.Fatal(e)
+	}
+	if e := cli.Run([]string{"plan", "--profile", profile}); e != nil {
+		t.Fatal("offline policy plan failed", e)
+	}
+	if e := cli.syncSubscriptions(options{profile: profile}, cfg, false); e != nil {
+		t.Fatal("offline policy could not reuse expired validated content", e)
+	}
+	conflict := cfg
+	conflict.Company.CIDRs = []string{"203.0.113.7/32"}
+	if _, e := cachedSubscription(profile, conflict, sources); e == nil {
+		t.Fatal("policy edit bypassed cached node endpoint authorization")
+	}
+	changedSource := sources
+	changedSource.Nodes.File = filepath.Join(root, "different.yaml")
+	if _, e := cachedSubscription(profile, cfg, changedSource); e == nil {
+		t.Fatal("new source reused unrelated contents")
 	}
 	if e := cli.Run([]string{"import", "--file", source, "--profile", profile}); e == nil {
 		t.Fatal("manual import bypassed subscription cache")
+	}
+}
+
+func TestSubscriptionCacheReparsesLocallyAndSupportsLegacy(t *testing.T) {
+	profile := testutil.PrivateTempDir(t)
+	cfg, err := policy.Decode([]byte(Example))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(profile, "source.yaml")
+	if err := os.WriteFile(source, []byte(`proxies: [{type: vless, server: 203.0.113.7, port: 443, uuid: "fixture-secret", tls: true}]
+rules: ["DOMAIN,local.example.org,Custom"]`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	sources := subscription.Sources{Nodes: subscription.Source{File: source, UseRules: true, Groups: map[string]string{"Custom": "personal"}}, IntervalMinutes: 60}
+	if err := securefile.Write(filepath.Join(profile, "policy.json"), cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := securefile.Write(filepath.Join(profile, "sources.json"), sources); err != nil {
+		t.Fatal(err)
+	}
+	cli := CLI{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}
+	if err := cli.syncSubscriptions(options{profile: profile}, cfg, true); err != nil {
+		t.Fatal(err)
+	}
+	sources, _, err = sourceConfig(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err := cachedSubscription(profile, cfg, sources)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(source); err != nil {
+		t.Fatal(err)
+	}
+	sources.Nodes.Groups = map[string]string{"Custom": "reject"}
+	sources.IntervalMinutes = 120
+	reparsed, err := cachedSubscription(profile, cfg, sources)
+	if err != nil || len(reparsed.Result.Rules) != 1 || reparsed.Result.Rules[0].Target != "reject" {
+		t.Fatal("mapping did not reparse cached source", err)
+	}
+	if !reparsed.Updated.Equal(original.Updated) {
+		t.Fatal("local parse changed download freshness")
+	}
+	// A parser-version mismatch must also reparse rather than trust stored results.
+	original.Fingerprint = "old-parser"
+	original.Result.Rules[0].Target = "direct"
+	path := filepath.Join(profile, "subscription-cache.json")
+	if err := securefile.Write(path, original); err != nil {
+		t.Fatal(err)
+	}
+	reparsed, err = cachedSubscription(profile, cfg, sources)
+	if err != nil || reparsed.Result.Rules[0].Target != "reject" {
+		t.Fatal("parser update did not reparse", err)
+	}
+	// Legacy data remains readable only with the exact old policy + sources.
+	legacy := subscriptionCache{Version: 1, Fingerprint: fingerprint(cfg, sources), Updated: original.Updated, Result: reparsed.Result}
+	if err := securefile.Write(path, legacy); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cachedSubscription(profile, cfg, sources); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Company.Domains = append(cfg.Company.Domains, "new.corp.example.com")
+	if _, err := cachedSubscription(profile, cfg, sources); err == nil {
+		t.Fatal("legacy cache silently assumed source identity")
 	}
 }
 func TestInitPreservesOrphanedSourceConfiguration(t *testing.T) {

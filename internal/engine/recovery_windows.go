@@ -69,15 +69,20 @@ func watch(run string) error {
 			epoch = now
 			grace = time.Now().Add(35 * time.Second)
 		}
-		if awake && time.Since(s.Heartbeat) > 35*time.Second && !time.Now().Before(grace) {
-			reason = "coordinator_unresponsive"
+		monitor, monitorErr := readMonitor(run, s)
+		if reason == "" && awake && !time.Now().Before(grace) {
+			if monitorErr != nil {
+				reason = "coordinator_monitor_invalid"
+			} else {
+				reason = monitorFailure(s, monitor, time.Now())
+			}
 		}
 		if reason != "" {
 			return recoverRun(run, reason)
 		}
 		// A stalled coordinator cannot leave expired native grants indefinitely.
 		// The independent watchdog stops the owned jobs before rolling them back.
-		if awake && leaseExpired(s) && time.Since(s.Heartbeat) > 5*time.Second {
+		if awake && leaseExpired(s) && (monitorErr != nil || time.Since(monitor.AliveAt) > 5*time.Second) {
 			return recoverRun(run, "lease_guard_expired")
 		}
 		time.Sleep(time.Second)
@@ -137,6 +142,23 @@ func recoverRun(run, reason string) error {
 	if s.Phase == "stopped" {
 		return nil
 	}
+	// STOP is durable and recovery.lock is held. Stop the exact published
+	// coordinator before taking state.lock: a stalled coordinator may own it.
+	// Native intent journals remain available after its kill-on-close jobs exit.
+	if s.Runner.PID > 0 && s.Runner.PID != os.Getpid() {
+		current, err := platform.Process(s.Runner.PID)
+		if err != nil {
+			return err
+		}
+		if sameProcess(s.Runner, current) {
+			if err := platform.StopIdentity(s.Runner); err != nil {
+				return err
+			}
+			if err := awaitProcessExit(s.Runner, 12*time.Second); err != nil {
+				return err
+			}
+		}
+	}
 	if e = update(run, func(s *State) error {
 		s.Phase = "stopping"
 		s.VPN.Bootstrap = false
@@ -153,20 +175,6 @@ func recoverRun(run, reason string) error {
 			return nil
 		})
 		return err
-	}
-	if s.Runner.PID != os.Getpid() {
-		current, e := platform.Process(s.Runner.PID)
-		if e != nil {
-			return failed(e)
-		}
-		if sameProcess(s.Runner, current) {
-			if e = platform.StopIdentity(s.Runner); e != nil {
-				return failed(e)
-			}
-			if e = awaitProcessExit(s.Runner, 12*time.Second); e != nil {
-				return failed(e)
-			}
-		}
 	}
 	// Coordinator exit closes both kill-on-close jobs, including OpenConnect's
 	// script descendants. Per-child handles/identities provide bounded readback.

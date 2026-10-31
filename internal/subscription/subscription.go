@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -20,12 +21,13 @@ import (
 )
 
 type Source struct {
-	URL      string            `json:"url,omitempty"`
-	File     string            `json:"file,omitempty"`
-	Format   string            `json:"format,omitempty"`
-	Target   string            `json:"target,omitempty"`
-	Groups   map[string]string `json:"groups,omitempty"`
-	UseRules bool              `json:"use_rules,omitempty"`
+	URL         string            `json:"url,omitempty"`
+	File        string            `json:"file,omitempty"`
+	Format      string            `json:"format,omitempty"`
+	Target      string            `json:"target,omitempty"`
+	Groups      map[string]string `json:"groups,omitempty"`
+	UseRules    bool              `json:"use_rules,omitempty"`
+	StrictRules bool              `json:"strict_rules,omitempty"`
 }
 type Sources struct {
 	Nodes           Source   `json:"nodes"`
@@ -42,6 +44,30 @@ type Result struct {
 	Rules        []policy.Rule `json:"rules"`
 	SkippedNodes int           `json:"skipped_nodes"`
 	SkippedRules int           `json:"skipped_rules"`
+	RuleOrigins  []RuleOrigin  `json:"rule_origins,omitempty"`
+	Issues       []ImportIssue `json:"issues,omitempty"`
+}
+
+// Source labels and one-based entry indexes are safe to report. Raw URLs,
+// subscription lines and node credentials are deliberately excluded.
+type RuleOrigin struct {
+	Source string `json:"source"`
+	Index  int    `json:"index"`
+}
+type ImportIssue struct {
+	Source string `json:"source"`
+	Kind   string `json:"kind"`
+	Index  int    `json:"index"`
+	Reason string `json:"reason"`
+}
+type RuleIssue struct {
+	Index  int    `json:"index"`
+	Reason string `json:"reason"`
+}
+type RuleReport struct {
+	Rules   []policy.Rule
+	Indexes []int
+	Issues  []RuleIssue
 }
 
 func Decode(data []byte, base string) (Bootstrap, error) {
@@ -152,6 +178,10 @@ func readHTTPS(ctx context.Context, s Source, transport http.RoundTripper) ([]by
 }
 func Fetch(ctx context.Context, s Sources) (Result, error) { return FetchWith(ctx, s, Read) }
 func FetchWith(ctx context.Context, s Sources, read func(context.Context, Source) ([]byte, error)) (Result, error) {
+	_, result, err := fetchSnapshotWith(ctx, s, read)
+	return result, err
+}
+func parseWith(ctx context.Context, s Sources, read func(context.Context, Source) ([]byte, error)) (Result, error) {
 	var out Result
 	data, e := read(ctx, s.Nodes)
 	if e != nil {
@@ -163,6 +193,9 @@ func FetchWith(ctx context.Context, s Sources, read func(context.Context, Source
 	}
 	out.Nodes = nodes
 	out.SkippedNodes = len(issues)
+	for _, issue := range issues {
+		out.Issues = append(out.Issues, ImportIssue{Source: "nodes", Kind: "node", Index: issue.Index, Reason: "unsupported_or_invalid_node"})
+	}
 	sources := s.Rules
 	if s.Nodes.UseRules {
 		sources = append([]Source{s.Nodes}, sources...)
@@ -176,15 +209,26 @@ func FetchWith(ctx context.Context, s Sources, read func(context.Context, Source
 				return Result{}, e
 			}
 		}
-		rules, skipped, e := ParseRules(raw, source)
+		report, e := ParseRulesDetailed(raw, source)
 		if e != nil {
 			return Result{}, e
 		}
-		out.SkippedRules += skipped
-		for _, rule := range rules {
+		label := fmt.Sprintf("rules[%d]", i)
+		if s.Nodes.UseRules {
+			label = fmt.Sprintf("rules[%d]", i-1)
+			if i == 0 {
+				label = "nodes"
+			}
+		}
+		out.SkippedRules += len(report.Issues)
+		for _, issue := range report.Issues {
+			out.Issues = append(out.Issues, ImportIssue{Source: label, Kind: "rule", Index: issue.Index, Reason: issue.Reason})
+		}
+		for index, rule := range report.Rules {
 			if !seen[rule] {
 				seen[rule] = true
 				out.Rules = append(out.Rules, rule)
+				out.RuleOrigins = append(out.RuleOrigins, RuleOrigin{Source: label, Index: report.Indexes[index]})
 			}
 		}
 	}
@@ -194,23 +238,29 @@ func FetchWith(ctx context.Context, s Sources, read func(context.Context, Source
 	return out, nil
 }
 func ParseRules(data []byte, s Source) ([]policy.Rule, int, error) {
+	report, err := ParseRulesDetailed(data, s)
+	return report.Rules, len(report.Issues), err
+}
+func ParseRulesDetailed(data []byte, s Source) (RuleReport, error) {
+	var report RuleReport
 	var doc struct {
 		Rules   []string `yaml:"rules"`
 		Payload []string `yaml:"payload"`
 	}
 	if len(data) > 4<<20 || yaml.Unmarshal(data, &doc) != nil {
-		return nil, 0, errors.New("invalid rule subscription")
+		return report, errors.New("invalid rule subscription")
 	}
 	lines := doc.Rules
 	if len(lines) == 0 {
 		lines = doc.Payload
 	}
 	if len(lines) == 0 || len(lines) > 20000 {
-		return nil, 0, errors.New("rule subscription is empty or too large")
+		return report, errors.New("rule subscription is empty or too large")
 	}
-	rules := []policy.Rule{}
-	skipped := 0
-	for _, line := range lines {
+	for index, line := range lines {
+		skip := func(reason string) {
+			report.Issues = append(report.Issues, RuleIssue{Index: index + 1, Reason: reason})
+		}
 		r := policy.Rule{Target: s.Target}
 		if r.Target == "" {
 			r.Target = "personal"
@@ -232,35 +282,43 @@ func ParseRules(data []byte, s Source) ([]policy.Rule, int, error) {
 				parts[i] = strings.TrimSpace(parts[i])
 			}
 			if len(parts) < 2 || len(parts) > 4 {
-				skipped++
+				skip("unsupported_syntax")
 				continue
 			}
 			r.Type = strings.ToUpper(parts[0])
 			r.Value = strings.ToLower(parts[1])
+			if r.Type != "DOMAIN" && r.Type != "DOMAIN-SUFFIX" && r.Type != "IP-CIDR" {
+				skip("unsupported_rule_type")
+				continue
+			}
 			if len(parts) >= 3 && parts[2] != "no-resolve" {
 				mapped, ok := s.Groups[parts[2]]
 				if !ok {
 					mapped, ok = map[string]string{"PROXY": "personal", "PERSONAL": "personal", "DIRECT": "direct", "REJECT": "reject"}[parts[2]]
 				}
 				if !ok {
-					skipped++
+					skip("unmapped_group")
 					continue
 				}
 				r.Target = mapped
 			}
 			if (len(parts) >= 3 && parts[2] == "no-resolve" && (r.Type != "IP-CIDR" || len(parts) != 3)) || (len(parts) == 4 && (r.Type != "IP-CIDR" || parts[3] != "no-resolve")) {
-				skipped++
+				skip("unsupported_options")
 				continue
 			}
 		}
 		if policy.ValidateRules([]policy.Rule{r}) != nil {
-			skipped++
+			skip("invalid_or_unauthorized_rule")
 			continue
 		}
-		rules = append(rules, r)
+		report.Rules = append(report.Rules, r)
+		report.Indexes = append(report.Indexes, index+1)
 	}
-	if len(rules) == 0 {
-		return nil, skipped, errors.New("rule subscription has no supported rules")
+	if len(report.Rules) == 0 {
+		return report, errors.New("rule subscription has no supported rules")
 	}
-	return rules, skipped, nil
+	if s.StrictRules && len(report.Issues) != 0 {
+		return report, errors.New("rule subscription omitted entries in strict mode")
+	}
+	return report, nil
 }

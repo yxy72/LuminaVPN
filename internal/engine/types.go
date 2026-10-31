@@ -33,6 +33,7 @@ type Child struct {
 	GateArgs []string           `json:"gate_args"`
 	Released bool               `json:"released"`
 	Native   *platform.Identity `json:"native,omitempty"`
+	LogName  string             `json:"log_name,omitempty"`
 }
 type OwnedRoute struct {
 	Route          platform.Route `json:"route"`
@@ -53,33 +54,37 @@ type VPNSession struct {
 	WakeEpoch  string `json:"wake_epoch,omitempty"`
 }
 type State struct {
-	Version        int                  `json:"version"`
-	Windows        *WindowsState        `json:"windows,omitempty"`
-	Phase          string               `json:"phase"`
-	Updated        time.Time            `json:"updated"`
-	Heartbeat      time.Time            `json:"heartbeat"`
-	Runner         platform.Identity    `json:"runner"`
-	Watcher        platform.Identity    `json:"watcher"`
-	Manifest       Manifest             `json:"manifest"`
-	Children       []Child              `json:"children"`
-	Routes         []OwnedRoute         `json:"routes"`
-	DNS            map[string]DNSChange `json:"dns"`
-	VPN            VPNSession           `json:"vpn"`
-	Leases         []dnswire.Answer     `json:"leases"`
-	Personal       string               `json:"personal"`
-	Error          string               `json:"error,omitempty"`
-	LastReady      time.Time            `json:"last_ready"`
-	RecoveryReason string               `json:"recovery_reason,omitempty"`
+	RunSpecDigest  string                   `json:"run_spec_digest,omitempty"`
+	Channels       map[string]ChannelHealth `json:"channels,omitempty"`
+	Version        int                      `json:"version"`
+	Windows        *WindowsState            `json:"windows,omitempty"`
+	Phase          string                   `json:"phase"`
+	Updated        time.Time                `json:"updated"`
+	Heartbeat      time.Time                `json:"heartbeat"`
+	Runner         platform.Identity        `json:"runner"`
+	Watcher        platform.Identity        `json:"watcher"`
+	Manifest       Manifest                 `json:"manifest"`
+	Children       []Child                  `json:"children"`
+	Routes         []OwnedRoute             `json:"routes"`
+	DNS            map[string]DNSChange     `json:"dns"`
+	VPN            VPNSession               `json:"vpn"`
+	Leases         []dnswire.Answer         `json:"leases"`
+	Personal       string                   `json:"personal"`
+	Error          string                   `json:"error,omitempty"`
+	LastReady      time.Time                `json:"last_ready"`
+	RecoveryReason string                   `json:"recovery_reason,omitempty"`
 }
 type Status struct {
-	Phase          string    `json:"phase"`
-	Updated        time.Time `json:"updated"`
-	Company        string    `json:"company"`
-	Personal       string    `json:"personal"`
-	LastReady      time.Time `json:"last_ready"`
-	Error          string    `json:"error,omitempty"`
-	RecoveryReason string    `json:"recovery_reason,omitempty"`
-	Experimental   bool      `json:"experimental"`
+	Channels       map[string]ChannelStatus `json:"channels,omitempty"`
+	Lifecycle      string                   `json:"lifecycle,omitempty"`
+	Phase          string                   `json:"phase"`
+	Updated        time.Time                `json:"updated"`
+	Company        string                   `json:"company"`
+	Personal       string                   `json:"personal"`
+	LastReady      time.Time                `json:"last_ready"`
+	Error          string                   `json:"error,omitempty"`
+	RecoveryReason string                   `json:"recovery_reason,omitempty"`
+	Experimental   bool                     `json:"experimental"`
 }
 
 func ReadManifest(run string) (Manifest, error) {

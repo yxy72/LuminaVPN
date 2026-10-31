@@ -21,6 +21,9 @@ import (
 func private(run string) string {
 	return filepath.Join("/Library/Application Support/NetLaunch", filepath.Base(run))
 }
+func readVPNLog(run, name string) ([]byte, error) {
+	return securefile.ReadTail(filepath.Join(private(run), name), 128<<10, true)
+}
 func validateRoot(run string) error {
 	if os.Geteuid() != 0 {
 		return errors.New("native administrator authorization is required")
@@ -41,28 +44,40 @@ func validateRoot(run string) error {
 	return nil
 }
 func load(run string) (State, error) {
-	var s State
 	if e := validateRoot(run); e != nil {
-		return s, e
+		return State{}, e
 	}
-	e := readJSON(filepath.Join(private(run), "state.json"), &s)
-	return s, e
+	raw, e := readRunFile(run, "state.json", 4<<20)
+	if e != nil {
+		return State{}, e
+	}
+	return decodeState(raw, func() ([]byte, error) { return readRunFile(run, "run-spec.json", 2<<20) })
 }
 func save(run string, s *State) error {
 	s.Updated = time.Now()
-	if e := securefile.Write(filepath.Join(private(run), "state.json"), s); e != nil {
+	record, e := stateRecord(s)
+	if e != nil {
 		return e
 	}
-	company := "unavailable"
-	if s.Phase == "ready" {
-		company = "ready"
+	if e := securefile.Write(filepath.Join(private(run), "state.json"), record); e != nil {
+		return e
 	}
-	out := Status{s.Phase, s.Updated, company, s.Personal, s.LastReady, s.Error, s.RecoveryReason, true}
+	out := publicStatus(*s, s.Updated)
 	p := filepath.Join(run, "status.json")
 	if e := securefile.Write(p, out); e != nil {
 		return e
 	}
 	return os.Chown(p, s.Manifest.Owner, -1)
+}
+
+func readRunFile(run, name string, limit int64) ([]byte, error) {
+	return securefile.Read(filepath.Join(private(run), name), limit, true)
+}
+func writeRunFile(run, name string, value any) error {
+	return securefile.Write(filepath.Join(private(run), name), value)
+}
+func lockRunFile(run, name string, limit time.Duration) (func(), error) {
+	return securefile.Lock(filepath.Join(private(run), name), limit)
 }
 func update(run string, fn func(*State) error) error {
 	if e := validateRoot(run); e != nil {
@@ -77,9 +92,11 @@ func update(run string, fn func(*State) error) error {
 	if e != nil {
 		return e
 	}
+	before := s
 	if e = fn(&s); e != nil {
 		return e
 	}
+	invalidateChannelHealth(before, &s)
 	return save(run, &s)
 }
 func guard(run string, s *State) error {
@@ -88,7 +105,7 @@ func guard(run string, s *State) error {
 	}
 	return nil
 }
-func pulse(run string) error {
+func legacyPulse(run string) error {
 	return update(run, func(s *State) error {
 		if e := guard(run, s); e != nil {
 			return e
@@ -102,6 +119,20 @@ func pulse(run string) error {
 		s.Heartbeat = time.Now()
 		return nil
 	})
+}
+
+func verifyPulseProcesses(s State) error {
+	me, err := platform.Process(os.Getpid())
+	if err != nil || me != s.Runner {
+		return errors.New("unpublished coordinator cannot update heartbeat")
+	}
+	if s.Watcher.PID > 0 {
+		actual, err := platform.Process(s.Watcher.PID)
+		if err != nil || actual != s.Watcher {
+			return errors.New("independent watchdog disappeared")
+		}
+	}
+	return nil
 }
 
 func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
@@ -139,7 +170,7 @@ func Launch(action, run string) error {
 	return nil
 }
 
-func spawn(run, role string, args []string) (Child, error) {
+func spawn(run, role string, args []string, exits *childExitTracker) (Child, error) {
 	var result Child
 	e := update(run, func(s *State) error {
 		if e := guard(run, s); e != nil {
@@ -148,7 +179,8 @@ func spawn(run, role string, args []string) (Child, error) {
 		index := len(s.Children)
 		m := s.Manifest
 		gateArgs := []string{m.Executable, "_child", "--run", run, "--index", strconv.Itoa(index)}
-		log, e := os.OpenFile(filepath.Join(private(run), role+"-private.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+		logName := fmt.Sprintf("%s-%d-private.log", role, index)
+		log, e := os.OpenFile(filepath.Join(private(run), logName), os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0600)
 		if e != nil {
 			return e
 		}
@@ -161,12 +193,26 @@ func spawn(run, role string, args []string) (Child, error) {
 		if e = cmd.Start(); e != nil {
 			return errors.New("child launch failed")
 		}
-		go func() { _ = cmd.Wait() }()
 		id, e := platform.Process(cmd.Process.Pid)
 		if e != nil || id.PID == 0 {
+			go func() { _ = cmd.Wait() }()
 			return errors.New("child identity unavailable")
 		}
-		result = Child{Role: role, PID: id.PID, Birth: id.Birth, Args: args, GateArgs: gateArgs, Released: false}
+		result = Child{Role: role, PID: id.PID, Birth: id.Birth, Args: args, GateArgs: gateArgs, Released: false, LogName: logName}
+		launched := result
+		exits.trackExitReason(role, id, func() (uint32, string, error) {
+			err := cmd.Wait()
+			var exit *exec.ExitError
+			var code uint32
+			if errors.As(err, &exit) {
+				code, err = uint32(exit.ExitCode()), nil
+			}
+			reason := "vpn_process_exited"
+			if role == "vpn" {
+				reason = vpnAttemptFailure(run, launched)
+			}
+			return code, reason, err
+		})
 		s.Children = append(s.Children, result)
 		return nil
 	})
@@ -275,6 +321,42 @@ func stopChild(c Child) error {
 		time.Sleep(100 * time.Millisecond)
 	}
 	return fmt.Errorf("owned %s did not exit; no forced kill used", c.Role)
+}
+
+// Called only after acquiring recovery.lock. The recovering coordinator itself
+// is excluded; another process is killed only after full recorded identity checks.
+func stopCoordinator(expected platform.Identity) error {
+	if expected.PID == os.Getpid() {
+		return nil
+	}
+	if expected.PID < 2 || expected.Birth == "" || expected.Command == "" || expected.Executable == "" {
+		return errors.New("coordinator identity is incomplete")
+	}
+	actual, err := platform.Process(expected.PID)
+	if err != nil {
+		return err
+	}
+	if actual.PID == 0 || actual.Birth != expected.Birth {
+		return nil
+	}
+	if actual != expected {
+		return errors.New("coordinator identity changed; recovery did not signal it")
+	}
+	if err := syscall.Kill(expected.PID, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return err
+	}
+	deadline := time.Now().Add(12 * time.Second)
+	for time.Now().Before(deadline) {
+		actual, err = platform.Process(expected.PID)
+		if err != nil {
+			return err
+		}
+		if actual.PID == 0 || actual.Birth != expected.Birth {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return errors.New("owned coordinator did not exit; preserve recovery files")
 }
 func Internal(action, run string) error {
 	if os.Geteuid() != 0 {

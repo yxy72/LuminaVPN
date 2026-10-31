@@ -73,14 +73,28 @@ func TestPersonalSelectionUsesMixedIngressAndVerifiesTLS(t *testing.T) {
 	roots := x509.NewCertPool()
 	roots.AddCert(certificate)
 	client.Transport.(*http.Transport).TLSClientConfig.RootCAs = roots
-	for _, code := range []int{http.StatusNoContent, http.StatusFound, http.StatusForbidden} {
-		status.Store(int32(code))
+	cases := []struct {
+		code     int
+		purpose  string
+		expected []int
+		pass     bool
+	}{
+		{204, "", nil, true}, {302, "", nil, true}, {403, "", nil, false},
+		{503, "path", nil, true}, {503, "service", nil, false},
+		{401, "service", []int{204, 401}, true}, {200, "service", []int{204}, false},
+	}
+	for _, tc := range cases {
+		status.Store(int32(tc.code))
+		probes[1].Purpose, probes[1].ExpectedStatus = tc.purpose, tc.expected
 		e := verifyPersonalSelection(context.Background(), client, probes)
-		if (e == nil) != (code < 400) {
-			t.Fatal("wrong personal status result", code, e)
+		if (e == nil) != tc.pass {
+			t.Fatal("wrong personal status result", tc, e)
+		}
+		if e != nil && (probeReason(e) != "http_status_rejected" || nodeProbeFailure(e)) {
+			t.Fatal("service failure blamed node", e)
 		}
 	}
-	if requests.Load() != 3 || connects.Load() != 4 {
+	if requests.Load() != int32(len(cases)) || connects.Load() != int32(len(cases)+1) {
 		t.Fatal("requests were reused, redirected or sent to a non-personal target", requests.Load(), connects.Load())
 	}
 }

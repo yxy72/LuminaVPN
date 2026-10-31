@@ -50,6 +50,13 @@ func winRead(run, name string, value any) error {
 	}
 	return nil
 }
+func readVPNLog(run, name string) ([]byte, error) {
+	files, id, err := winFiles(run)
+	if err != nil {
+		return nil, err
+	}
+	return files.ReadTail(filepath.Join(id, name), 128<<10)
+}
 func winWrite(run, name string, value any) error {
 	files, id, e := winFiles(run)
 	if e != nil {
@@ -58,11 +65,15 @@ func winWrite(run, name string, value any) error {
 	return files.Write(filepath.Join(id, name), value)
 }
 func load(run string) (State, error) {
-	var s State
-	if e := winRead(run, "state.json", &s); e != nil {
+	raw, e := readRunFile(run, "state.json", 4<<20)
+	if e != nil {
+		return State{}, e
+	}
+	s, e := decodeState(raw, func() ([]byte, error) { return readRunFile(run, "run-spec.json", 2<<20) })
+	if e != nil {
 		return s, e
 	}
-	if s.Version != 1 || s.Windows == nil || s.Windows.PublicRun != run || s.Windows.BootID == "" {
+	if s.Windows == nil || s.Windows.PublicRun != run || s.Windows.BootID == "" {
 		return s, errors.New("administrator run identity mismatch")
 	}
 	if e := validateOwner(run, s.Manifest); e != nil {
@@ -72,14 +83,30 @@ func load(run string) (State, error) {
 }
 func save(run string, s *State) error {
 	s.Updated = time.Now()
-	if e := winWrite(run, "state.json", s); e != nil {
+	record, e := stateRecord(s)
+	if e != nil {
 		return e
 	}
-	company := "unavailable"
-	if s.Phase == "ready" {
-		company = "ready"
+	if e := winWrite(run, "state.json", record); e != nil {
+		return e
 	}
-	return securefile.Write(filepath.Join(run, "status.json"), Status{Phase: s.Phase, Updated: s.Updated, Company: company, Personal: s.Personal, LastReady: s.LastReady, Error: s.Error, RecoveryReason: s.RecoveryReason, Experimental: true})
+	return securefile.Write(filepath.Join(run, "status.json"), publicStatus(*s, s.Updated))
+}
+
+func readRunFile(run, name string, limit int64) ([]byte, error) {
+	files, id, err := winFiles(run)
+	if err != nil {
+		return nil, err
+	}
+	return files.Read(filepath.Join(id, name), limit)
+}
+func writeRunFile(run, name string, value any) error { return winWrite(run, name, value) }
+func lockRunFile(run, name string, limit time.Duration) (func(), error) {
+	files, id, err := winFiles(run)
+	if err != nil {
+		return nil, err
+	}
+	return files.Lock(filepath.Join(id, name), limit)
 }
 func update(run string, fn func(*State) error) error {
 	files, id, e := winFiles(run)
@@ -95,9 +122,11 @@ func update(run string, fn func(*State) error) error {
 	if e != nil {
 		return e
 	}
+	before := s
 	if e = fn(&s); e != nil {
 		return e
 	}
+	invalidateChannelHealth(before, &s)
 	return save(run, &s)
 }
 func guard(run string, s *State) error {
@@ -130,7 +159,7 @@ func watcherReady(run string, s State) error {
 	return nil
 }
 
-func pulse(run string) error {
+func legacyPulse(run string) error {
 	return update(run, func(s *State) error {
 		if e := guard(run, s); e != nil {
 			return e
@@ -144,6 +173,20 @@ func pulse(run string) error {
 		s.Heartbeat = time.Now()
 		return nil
 	})
+}
+
+func verifyPulseProcesses(s State) error {
+	me, err := platform.Process(os.Getpid())
+	if err != nil || !sameProcess(s.Runner, me) {
+		return errors.New("unpublished coordinator cannot update heartbeat")
+	}
+	if s.Watcher.PID > 0 {
+		actual, err := platform.Process(s.Watcher.PID)
+		if err != nil || !sameProcess(s.Watcher, actual) {
+			return errors.New("independent watchdog disappeared")
+		}
+	}
+	return nil
 }
 func sameProcess(a, b platform.Identity) bool {
 	return a.PID > 0 && a.PID == b.PID && a.Birth != "" && a.Birth == b.Birth && a.OwnerSID != "" && a.OwnerSID == b.OwnerSID && strings.EqualFold(a.Executable, b.Executable)

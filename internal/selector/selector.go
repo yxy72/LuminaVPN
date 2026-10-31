@@ -17,6 +17,8 @@ func Defaults() Options { return Options{150, 3, 60 * time.Second, 10 * time.Sec
 type health struct {
 	Successes int
 	FailedAt  time.Time
+	Observed  time.Time
+	Latency   int
 }
 type Policy struct {
 	Nodes         []string
@@ -26,6 +28,7 @@ type Policy struct {
 	proposal      string
 	confirmations int
 	health        map[string]health
+	cursor        int
 }
 
 func New(nodes []string) *Policy {
@@ -47,19 +50,51 @@ func (p *Policy) ReportFailure(node string, now time.Time) {
 // Negative latency denotes failure of all approved probes for this node.
 // Commit is separate: failed API writes must not count as completed switches.
 func (p *Policy) Decide(now time.Time, latency map[string]int) (string, string) {
+	complete := make(map[string]int, len(p.Nodes))
+	for _, n := range p.Nodes {
+		ms, ok := latency[n]
+		if !ok {
+			ms = -1
+		}
+		complete[n] = ms
+	}
+	return p.DecideSamples(now, complete)
+}
+
+// DecideSamples treats omitted measurements as unknown. Earlier positive
+// measurements expire; cancellation never manufactures a node failure.
+func (p *Policy) DecideSamples(now time.Time, latency map[string]int) (string, string) {
+	return p.DecideSamplesSince(now, now, latency)
+}
+
+// A round started before a newer real request failure cannot clear that failure.
+func (p *Policy) DecideSamplesSince(now, started time.Time, latency map[string]int) (string, string) {
+	filtered := make(map[string]int, len(latency))
+	for n, ms := range latency {
+		h := p.health[n]
+		if !h.FailedAt.After(started) && !h.Observed.After(started) {
+			filtered[n] = ms
+		}
+	}
+	latency = filtered
 	best := ""
 	bestMS := int(^uint(0) >> 1)
 	for _, n := range p.Nodes {
 		h := p.health[n]
-		ms, exists := latency[n]
-		if !exists || ms < 0 {
-			h.Successes = 0
-			h.FailedAt = now
-		} else {
-			h.Successes++
+		ms, measured := latency[n]
+		if measured {
+			h.Observed, h.Latency = now, ms
+			if ms < 0 {
+				h.Successes = 0
+				h.FailedAt = now
+			} else {
+				h.Successes++
+			}
+			p.health[n] = h
 		}
-		p.health[n] = h
-		eligible := exists && ms >= 0 && (h.FailedAt.IsZero() || (h.Successes >= p.Options.RecoverySuccesses && now.Sub(h.FailedAt) >= p.Options.RecoveryHold))
+		ms = h.Latency
+		fresh := !h.Observed.IsZero() && !now.Before(h.Observed) && now.Sub(h.Observed) < 45*time.Second
+		eligible := fresh && ms >= 0 && (h.FailedAt.IsZero() || (h.Successes >= p.Options.RecoverySuccesses && now.Sub(h.FailedAt) >= p.Options.RecoveryHold))
 		if eligible && ms < bestMS {
 			best = n
 			bestMS = ms
@@ -70,7 +105,9 @@ func (p *Policy) Decide(now time.Time, latency map[string]int) (string, string) 
 		p.confirmations = 0
 		return Reject, "no_healthy_node"
 	}
-	currentMS, healthy := latency[p.Current]
+	current := p.health[p.Current]
+	currentMS := current.Latency
+	healthy := !current.Observed.IsZero() && !now.Before(current.Observed) && now.Sub(current.Observed) < 45*time.Second && (current.FailedAt.IsZero() || (current.Successes >= p.Options.RecoverySuccesses && now.Sub(current.FailedAt) >= p.Options.RecoveryHold))
 	if p.Current == Reject || !healthy || currentMS < 0 {
 		p.proposal = ""
 		p.confirmations = 0
@@ -83,6 +120,12 @@ func (p *Policy) Decide(now time.Time, latency map[string]int) (string, string) 
 		p.proposal = ""
 		p.confirmations = 0
 		return p.Current, "no_clear_advantage"
+	}
+	if _, sampled := latency[best]; !sampled {
+		return p.Current, "awaiting_candidate_sample"
+	}
+	if _, sampled := latency[p.Current]; !sampled {
+		return p.Current, "awaiting_current_sample"
 	}
 	if p.proposal == best {
 		p.confirmations++
@@ -104,4 +147,31 @@ func (p *Policy) Commit(node string, now time.Time) {
 	}
 	p.proposal = ""
 	p.confirmations = 0
+}
+
+// NextBatch always revisits the selected node and rotates other candidates.
+func (p *Policy) NextBatch(limit int) []string {
+	if limit < 1 || len(p.Nodes) == 0 {
+		return nil
+	}
+	result := []string{}
+	if p.Current != Reject {
+		for _, n := range p.Nodes {
+			if n == p.Current {
+				result = append(result, n)
+				break
+			}
+		}
+	}
+	if p.proposal != "" && p.proposal != p.Current && len(result) < limit {
+		result = append(result, p.proposal)
+	}
+	for visited := 0; visited < len(p.Nodes) && len(result) < limit; visited++ {
+		n := p.Nodes[p.cursor%len(p.Nodes)]
+		p.cursor = (p.cursor + 1) % len(p.Nodes)
+		if n != p.Current && n != p.proposal {
+			result = append(result, n)
+		}
+	}
+	return result
 }
