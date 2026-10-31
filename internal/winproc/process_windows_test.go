@@ -6,10 +6,65 @@ import (
 	"errors"
 	"golang.org/x/sys/windows"
 	"netlaunch/internal/platform"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
+	"unsafe"
 )
+
+func TestIndependentNestedChild(t *testing.T) {
+	if os.Getenv("NETLAUNCH_TEST_NESTED_CHILD") == "1" {
+		var inside uint32
+		ok, _, err := windows.NewLazySystemDLL("kernel32.dll").NewProc("IsProcessInJob").Call(uintptr(windows.CurrentProcess()), 0, uintptr(unsafe.Pointer(&inside)))
+		var limits windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+		var size uint32
+		query := windows.QueryInformationJobObject(0, windows.JobObjectExtendedLimitInformation, uintptr(unsafe.Pointer(&limits)), uint32(unsafe.Sizeof(limits)), &size)
+		t.Logf("native job query ok=%d in_job=%d error=%v limits_error=%v flags=%x", ok, inside, err, query, limits.BasicLimitInformation.LimitFlags)
+		published := false
+		p, e := StartIndependent(Spec{Args: fixtureCommand(t)}, func(platform.Identity) error { published = true; return nil })
+		// Some hosts place a detached process in another non-breakaway job.
+		// In that case the API must fail closed before publishing/running a
+		// child; it must never silently retry without independent lifetime.
+		if ok != 0 && inside != 0 && query == nil && limits.BasicLimitInformation.LimitFlags&(windows.JOB_OBJECT_LIMIT_BREAKAWAY_OK|windows.JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK) == 0 {
+			if !errors.Is(e, windows.ERROR_ACCESS_DENIED) || p != nil || published {
+				t.Fatal("non-breakaway job did not fail closed", e)
+			}
+			return
+		}
+		if e != nil {
+			t.Fatal(e)
+		}
+		code, e := p.Wait()
+		if e != nil || code != 17 {
+			t.Fatal(code, e)
+		}
+		return
+	}
+	exe, e := os.Executable()
+	if e != nil {
+		t.Fatal(e)
+	}
+	out, e := os.Create(filepath.Join(t.TempDir(), "nested.log"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer out.Close()
+	in, e := os.Open(os.DevNull)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer in.Close()
+	p, e := StartIndependent(Spec{Args: []string{exe, "-test.run=^TestIndependentNestedChild$", "-test.v"}, Environment: append(os.Environ(), "NETLAUNCH_TEST_NESTED_CHILD=1"), Stdin: in, Stdout: out, Stderr: out}, func(platform.Identity) error { return nil })
+	if e != nil {
+		t.Fatal(e)
+	}
+	code, e := p.Wait()
+	if e != nil || code != 0 {
+		b, _ := os.ReadFile(out.Name())
+		t.Fatalf("nested independent launch: %d %v %s", code, e, b)
+	}
+}
 
 func fixtureCommand(t *testing.T) []string {
 	t.Helper()

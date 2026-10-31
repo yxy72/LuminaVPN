@@ -42,7 +42,7 @@ type Backend interface {
 	Add(winnet.Route) (winnet.Route, error)
 	Delete(winnet.Route) error
 	Adapter(string) (winnet.Adapter, error)
-	DNS(winnet.Adapter) (winnet.DNSSettings, error)
+	DNS(winnet.Adapter, bool) (winnet.DNSSettings, error)
 	SetDNS(winnet.Adapter, winnet.DNSSettings) error
 }
 type Manager struct {
@@ -64,7 +64,7 @@ func (m Manager) load() (Journal, error) {
 		}
 	}
 	for _, d := range j.DNS {
-		if !validState(d.State) || d.Adapter.GUID == "" || d.Before.Validate() != nil || d.After.Validate() != nil {
+		if !validState(d.State) || d.Adapter.GUID == "" || d.Before.IPv6 != d.After.IPv6 || d.Before.Validate() != nil || d.After.Validate() != nil {
 			return j, errors.New("invalid DNS journal state")
 		}
 	}
@@ -182,7 +182,7 @@ func (m Manager) SetDNS(adapter winnet.Adapter, desired winnet.DNSSettings) erro
 	if live.Index != adapter.Index || live.LUID != adapter.LUID || !live.Up {
 		return errors.New("DNS adapter changed before takeover")
 	}
-	current, e := m.Native.DNS(live)
+	current, e := m.Native.DNS(live, desired.IPv6)
 	if e != nil {
 		return e
 	}
@@ -193,7 +193,7 @@ func (m Manager) SetDNS(adapter winnet.Adapter, desired winnet.DNSSettings) erro
 	}
 	index := -1
 	for i, d := range j.DNS {
-		if d.State == "restored" || d.Adapter.GUID != adapter.GUID {
+		if d.State == "restored" || d.Adapter.GUID != adapter.GUID || d.After.IPv6 != desired.IPv6 {
 			continue
 		}
 		if !winnet.SameDNS(current, d.After) && !winnet.SameDNS(current, d.Before) {
@@ -221,7 +221,7 @@ func (m Manager) SetDNS(adapter winnet.Adapter, desired winnet.DNSSettings) erro
 	if e = m.active(j); e != nil {
 		return e
 	}
-	before, e := m.Native.DNS(live)
+	before, e := m.Native.DNS(live, desired.IPv6)
 	if e != nil {
 		return e
 	}
@@ -231,7 +231,7 @@ func (m Manager) SetDNS(adapter winnet.Adapter, desired winnet.DNSSettings) erro
 	if e = m.Native.SetDNS(live, desired); e != nil {
 		return e
 	}
-	actual, e := m.Native.DNS(live)
+	actual, e := m.Native.DNS(live, desired.IPv6)
 	if e != nil {
 		return e
 	}
@@ -272,7 +272,7 @@ func (m Manager) Recover() error {
 		live, e := m.Native.Adapter(d.Adapter.GUID)
 		if e == nil {
 			var current winnet.DNSSettings
-			current, e = m.Native.DNS(live)
+			current, e = m.Native.DNS(live, d.After.IPv6)
 			if e == nil && !winnet.SameDNS(current, d.Before) {
 				if !winnet.SameDNS(current, d.After) {
 					e = errors.New("DNS changed externally; restoration refused")
@@ -281,7 +281,7 @@ func (m Manager) Recover() error {
 				}
 			}
 			if e == nil {
-				current, e = m.Native.DNS(live)
+				current, e = m.Native.DNS(live, d.Before.IPv6)
 				if e == nil && !winnet.SameDNS(current, d.Before) {
 					e = errors.New("DNS restoration readback differs")
 				}

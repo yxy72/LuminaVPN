@@ -21,3 +21,19 @@ func TestDNSRecoveryPreservesAutomaticAndProfileSettings(t *testing.T) {
 		}
 	}
 }
+
+func TestDNSFamilyIdentity(t *testing.T) {
+	if SameDNS(DNSSettings{}, DNSSettings{IPv6: true}) {
+		t.Fatal("families merged")
+	}
+	a := DNSSettings{IPv6: true, NameServers: "0:0:0:0:0:0:0:1,2001:db8::53"}
+	b := DNSSettings{IPv6: true, NameServers: "::1 2001:db8::53"}
+	if !SameDNS(a, b) {
+		t.Fatal("IPv6 normalization failed")
+	}
+	for _, s := range []string{"127.0.0.1", "::ffff:127.0.0.1", "::", "ff02::1"} {
+		if (DNSSettings{IPv6: true, NameServers: s}).Validate() == nil {
+			t.Fatal("invalid IPv6 DNS accepted")
+		}
+	}
+}

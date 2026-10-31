@@ -8,9 +8,33 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
+
+func TestAtomicRenameVariablePathLengths(t *testing.T) {
+	dir := filepath.Join(tree(t), "rename")
+	if e := Dir(dir); e != nil {
+		t.Fatal(e)
+	}
+	for n := 1; n <= 32; n++ {
+		path := filepath.Join(dir, strings.Repeat("x", n)+"-缓存.json")
+		for _, want := range []string{"initial", "replacement"} {
+			if e := Bytes(path, []byte(want)); e != nil {
+				t.Fatalf("length %d: %v", n, e)
+			}
+			got, e := Read(path, 128, true)
+			if e != nil || string(got) != want {
+				t.Fatalf("length %d: expected exact target contents; read error: %v", n, e)
+			}
+		}
+	}
+	rows, e := os.ReadDir(dir)
+	if e != nil || len(rows) != 32 {
+		t.Fatalf("unexpected rename artifacts: count=%d error=%v", len(rows), e)
+	}
+}
 
 func TestIOPrivateRoundTrip(t *testing.T) {
 	dir := filepath.Join(tree(t), "io")

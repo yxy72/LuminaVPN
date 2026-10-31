@@ -212,6 +212,11 @@ func (m Manager) applyPairRoute(j *Journal, r *RouteChange) error {
 		if !winnet.OwnedEqual(*actual, r.Route) {
 			return errors.New("company route changed externally")
 		}
+		// Renewal must still re-read native ownership, but an already committed
+		// route has no new recovery intent to flush to disk.
+		if r.State == "applied" {
+			return nil
+		}
 	} else {
 		if r.State != "planned" {
 			return errors.New("applied company route disappeared")
@@ -295,6 +300,24 @@ func (m Manager) EnsureCompanyRoute(spec winwfp.Spec, tun winnet.Adapter, prefix
 			return e
 		}
 		return m.pairScope(*p, spec)
+	}
+	if p.Capture.State == "applied" && p.VPN.State == "applied" {
+		// No native mutation is needed. Recheck both owned rows and effective
+		// metrics between fresh guard checks, without the intermediate barriers
+		// needed when installing capture and then granting a new VPN route.
+		if e = m.pairScope(*p, spec); e != nil {
+			return e
+		}
+		for _, r := range []winnet.Route{p.Capture.Route, p.VPN.Route} {
+			actual, err := m.Native.Lookup(r)
+			if err != nil {
+				return err
+			}
+			if actual == nil || !winnet.OwnedEqual(*actual, r) {
+				return errors.New("company route pair is no longer owned")
+			}
+		}
+		return check()
 	}
 	if e = check(); e != nil {
 		return e

@@ -86,3 +86,49 @@ func TestStaticGrantsDoNotExpandDomainAuthorization(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestNativePreparationHasSeparateBudgetWithoutExtendingTTL(t *testing.T) {
+	_, s, c := setup(t)
+	a := answer(c, host, "192.0.2.8", 30)
+	err := s.RefreshPrepared(context.Background(), host, func(ctx context.Context, _ string) ([]dnswire.Answer, error) {
+		deadline, ok := ctx.Deadline()
+		if !ok || time.Until(deadline) > 3*time.Second {
+			t.Fatal("resolver budget increased")
+		}
+		return []dnswire.Answer{a}, nil
+	}, func(ctx context.Context, _ string, _ []dnswire.Answer) error {
+		select {
+		case <-time.After(3100 * time.Millisecond):
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	})
+	if err != nil {
+		t.Fatal("native work inherited resolver deadline", err)
+	}
+	got, err := s.Lookup(host)
+	if err != nil || len(got) != 1 || !got[0].ExpiresAt.Equal(a.ExpiresAt) {
+		t.Fatal("TTL changed during preparation", err)
+	}
+}
+
+func TestPreparationTimeoutCannotGrantEvenIfCallbackIgnoresIt(t *testing.T) {
+	_, s, c := setup(t)
+	err := s.RefreshPrepared(context.Background(), host, func(context.Context, string) ([]dnswire.Answer, error) {
+		return []dnswire.Answer{answer(c, host, "192.0.2.8", 1)}, nil
+	}, func(ctx context.Context, _ string, _ []dnswire.Answer) error {
+		deadline, ok := ctx.Deadline()
+		if !ok || time.Until(deadline) > time.Second {
+			t.Fatal("preparation outlives answer TTL")
+		}
+		<-ctx.Done()
+		return nil
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal("ignored preparation deadline", err)
+	}
+	if _, err = s.Lookup(host); err == nil {
+		t.Fatal("expired preparation authorized")
+	}
+}

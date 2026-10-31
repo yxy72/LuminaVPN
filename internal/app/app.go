@@ -51,6 +51,8 @@ type options struct {
 	index                       int
 	force                       bool
 	prepareOnly                 bool
+	validationTimeout           time.Duration
+	sessionTimeout              time.Duration
 }
 
 func DefaultProfile() (string, error) { return defaultProfilePath() }
@@ -87,6 +89,8 @@ func (c CLI) Run(args []string) error {
 	fs.IntVar(&opts.index, "index", -1, "internal child journal index")
 	fs.BoolVar(&opts.force, "force", false, "refresh the local VPN session")
 	fs.BoolVar(&opts.prepareOnly, "prepare-only", false, "up: stage a private run without administrator authorization or network changes")
+	fs.DurationVar(&opts.validationTimeout, "validation-timeout", 0, "up: hard deadline, required in Windows validation builds (1s through 45m)")
+	fs.DurationVar(&opts.sessionTimeout, "session-timeout", 0, "up: Windows home preview session limit (default 8h, maximum 12h)")
 	if e = fs.Parse(args[1:]); e != nil {
 		return e
 	}
@@ -95,6 +99,24 @@ func (c CLI) Run(args []string) error {
 	}
 	if opts.prepareOnly && args[0] != "up" {
 		return errors.New("--prepare-only is only valid with up")
+	}
+	if opts.validationTimeout != 0 && (args[0] != "up" || !platform.WindowsValidationBuild) {
+		return errors.New("--validation-timeout requires up in a windows_validation build")
+	}
+	if args[0] == "up" && platform.WindowsValidationBuild && (opts.validationTimeout < time.Second || opts.validationTimeout > 45*time.Minute) {
+		return errors.New("Windows validation requires an explicit --validation-timeout between 1s and 45m")
+	}
+	if opts.sessionTimeout != 0 && (args[0] != "up" || !platform.WindowsHomeBuild || platform.WindowsValidationBuild) {
+		return errors.New("--session-timeout requires up in a windows_home build")
+	}
+	if args[0] == "up" && platform.WindowsHomeBuild {
+		if platform.WindowsValidationBuild {
+			return errors.New("windows_home and windows_validation build tags cannot be combined")
+		}
+		opts.validationTimeout, e = homeSessionTimeout(opts.sessionTimeout)
+		if e != nil {
+			return e
+		}
 	}
 	opts.profile, e = filepath.Abs(opts.profile)
 	if e != nil {
@@ -451,6 +473,7 @@ func (c CLI) up(o options, cfg policy.Config, nodes []policy.Node) error {
 		return e
 	}
 	m := engine.Manifest{Version: 1, Owner: owner, OwnerSID: ownerSID, Config: cfg, Binding: policy.Binding{Physical: network.Interface, VPN: vpn, TUN: tun, ControllerPort: port}, Network: network, Executable: staged, Created: time.Now()}
+	m.ValidationTimeout = o.validationTimeout
 	if e = securefile.Write(filepath.Join(run, "manifest.json"), m); e != nil {
 		return e
 	}

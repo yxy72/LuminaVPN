@@ -122,7 +122,7 @@ func (s *Session) RefreshPrepared(ctx context.Context, host string, resolve Reso
 	if e.cancel != nil {
 		e.cancel()
 	}
-	work, cancel := context.WithTimeout(ctx, 3*time.Second)
+	work, cancel := context.WithCancel(ctx)
 	stop := context.AfterFunc(s.ctx, cancel)
 	e.cancel = cancel
 	e.version++
@@ -130,7 +130,12 @@ func (s *Session) RefreshPrepared(ctx context.Context, host string, resolve Reso
 	s.mu.Unlock()
 	defer cancel()
 	defer stop()
-	answers, err := resolve(work, host)
+	query, finishQuery := context.WithTimeout(work, 3*time.Second)
+	answers, err := resolve(query, host)
+	if err == nil {
+		err = query.Err()
+	}
+	finishQuery()
 	if err != nil {
 		return err
 	}
@@ -157,7 +162,21 @@ func (s *Session) RefreshPrepared(ctx context.Context, host string, resolve Reso
 			e.answers = nil
 		}
 		s.mu.Unlock()
-		err = prepare(work, host, append([]dnswire.Answer(nil), answers...))
+		// Native route transactions may queue behind another domain's durable
+		// writes. They have their own bounded budget, without extending the
+		// resolver's three seconds or any answer's original TTL.
+		budget := 10 * time.Second
+		for _, a := range answers {
+			if remaining := a.ExpiresAt.Sub(s.now()); remaining < budget {
+				budget = remaining
+			}
+		}
+		prepared, finishPrepare := context.WithTimeout(work, budget)
+		err = prepare(prepared, host, append([]dnswire.Answer(nil), answers...))
+		if err == nil {
+			err = prepared.Err()
+		}
+		finishPrepare()
 		s.mu.Lock()
 		if e.version != version {
 			s.mu.Unlock()

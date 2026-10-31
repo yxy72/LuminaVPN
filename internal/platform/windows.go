@@ -9,8 +9,8 @@ import (
 	"netlaunch/internal/winnet"
 )
 
-// Native discovery is available; takeover stays gated pending native system validation.
-func Supported() bool { return false }
+// Ordinary builds remain gated. The home preview keeps a bounded lifecycle.
+func Supported() bool { return WindowsValidationBuild || WindowsHomeBuild }
 func Discover() (Network, error) {
 	n, e := winnet.Discover()
 	if e != nil {

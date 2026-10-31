@@ -17,6 +17,7 @@ type isolationNative struct {
 	spec                        winwfp.Spec
 	trace                       []string
 	failVPNDelete, guardChanged bool
+	guardReads, changeGuardAt   int
 }
 
 func routeKey(r winnet.Route) winnet.Route {
@@ -75,7 +76,8 @@ func (n *isolationNative) Delete(r winnet.Route) error {
 	return nil
 }
 func (n *isolationNative) InspectGuard(s winwfp.Spec) (winwfp.Status, error) {
-	if n.guardChanged {
+	n.guardReads++
+	if n.guardChanged || (n.changeGuardAt != 0 && n.guardReads >= n.changeGuardAt) {
 		return winwfp.Status{}, errors.New("external guard edit")
 	}
 	return n.guards[s.Sublayer], nil
@@ -137,6 +139,45 @@ func TestIsolationInstallAndRecoveryOrder(t *testing.T) {
 	}
 	if e := m.Recover(); e != nil {
 		t.Fatal(e)
+	}
+}
+
+func TestIsolationRenewalChecksNativeStateWithoutRewritingJournal(t *testing.T) {
+	for _, mode := range []string{"unchanged", "capture_missing", "vpn_changed", "guard_changed", "guard_changes_during_read", "metric_changed", "adapter_replaced"} {
+		t.Run(mode, func(t *testing.T) {
+			m, s, n, g := isolationFixture(t)
+			installPair(t, m, n, g)
+			j, _ := s.Load()
+			pair := j.Pairs[0]
+			switch mode {
+			case "capture_missing":
+				delete(n.owned, routeKey(pair.Capture.Route))
+			case "vpn_changed":
+				changed := n.owned[routeKey(pair.VPN.Route)]
+				changed.Metric++
+				n.owned[routeKey(pair.VPN.Route)] = changed
+			case "guard_changed":
+				n.guardChanged = true
+			case "guard_changes_during_read":
+				n.changeGuardAt = n.guardReads + 2
+			case "metric_changed":
+				changed := n.adapters[n.tun.GUID]
+				changed.Metric += 1000
+				n.adapters[n.tun.GUID] = changed
+			case "adapter_replaced":
+				changed := n.adapters[n.tun.GUID]
+				changed.LUID++
+				n.adapters[n.tun.GUID] = changed
+			}
+			writes, mutations := s.writes, len(n.trace)
+			err := m.EnsureCompanyRoute(g, n.tun, "192.0.2.5/32")
+			if (err == nil) != (mode == "unchanged") {
+				t.Fatal("unexpected renewal result", err)
+			}
+			if s.writes != writes || len(n.trace) != mutations {
+				t.Fatal("renewal wrote journal or mutated native state")
+			}
+		})
 	}
 }
 func TestIsolationEveryInstallCommitCrash(t *testing.T) {

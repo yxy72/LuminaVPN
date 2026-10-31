@@ -10,6 +10,7 @@ type fakeTunnel struct {
 	*fakeNative
 	addresses                            []winnet.Address
 	mtu                                  uint32
+	mtuError                             error
 	addressAdds, addressDeletes, mtuSets int
 }
 
@@ -49,7 +50,7 @@ func (n *fakeTunnel) DeleteAddress(a winnet.Address) error {
 	}
 	return nil
 }
-func (n *fakeTunnel) MTU(winnet.Adapter) (uint32, error) { return n.mtu, nil }
+func (n *fakeTunnel) MTU(winnet.Adapter) (uint32, error) { return n.mtu, n.mtuError }
 func (n *fakeTunnel) SetMTU(_ winnet.Adapter, before, after uint32) error {
 	if n.mtu != before {
 		return errors.New("external MTU")
@@ -186,6 +187,44 @@ func TestVPNMTURefusesPhysicalAndStaleAdapter(t *testing.T) {
 	}
 	if n.mtuSets != 0 {
 		t.Fatal("mutated MTU after validation failure")
+	}
+}
+
+func TestVPNMTURemovedIPv4Row(t *testing.T) {
+	for _, scenario := range []string{"same_down", "still_up", "new_generation", "new_boot", "other_error"} {
+		t.Run(scenario, func(t *testing.T) {
+			m, store, n, a := tunnelFixture(t)
+			if err := m.SetVPNMTU(a, 1280); err != nil {
+				t.Fatal(err)
+			}
+			n.adapter.Up = false
+			n.mtuError = winnet.ErrIPInterfaceAbsent
+			switch scenario {
+			case "still_up":
+				n.adapter.Up = true
+			case "new_generation":
+				n.adapter.LUID++
+			case "new_boot":
+				n.boot = "next-boot"
+			case "other_error":
+				n.mtuError = errors.New("access denied")
+			}
+			err := m.Recover()
+			wantSuccess := scenario == "same_down"
+			if (err == nil) != wantSuccess {
+				t.Fatalf("recovery success=%v, wanted %v", err == nil, wantSuccess)
+			}
+			if n.mtuSets != 1 {
+				t.Fatal("wrote an absent or unowned interface")
+			}
+			j, err := store.Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (j.MTU[0].State == "restored") != wantSuccess {
+				t.Fatal("incorrect durable recovery state")
+			}
+		})
 	}
 }
 func TestLiveVPNReleaseLeavesPhysicalRoutesAndDNS(t *testing.T) {

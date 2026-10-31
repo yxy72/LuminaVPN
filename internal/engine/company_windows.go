@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"net"
 	"net/netip"
@@ -15,6 +16,8 @@ import (
 	"netlaunch/internal/companyproxy"
 	"netlaunch/internal/dnswire"
 	"netlaunch/internal/lease"
+	"netlaunch/internal/platform"
+	"netlaunch/internal/policy"
 	"netlaunch/internal/socketbind"
 	"netlaunch/internal/winnet"
 )
@@ -108,7 +111,12 @@ func (c *companyRuntime) maintain(ctx context.Context) {
 		case <-ticker.C:
 		}
 		s, e := load(c.run)
-		if e != nil || guard(c.run, &s) != nil || !s.VPN.Bootstrap || !validVPN(s) {
+		if e != nil || guard(c.run, &s) != nil || !s.VPN.Bootstrap {
+			c.revoke()
+			continue
+		}
+		if e = validateVPN(s); e != nil {
+			c.diagnostic("native_validation", e)
 			c.revoke()
 			continue
 		}
@@ -120,6 +128,7 @@ func (c *companyRuntime) maintain(ctx context.Context) {
 		// Static grants and resolver routes must exist before any generation can
 		// accept a request, including a profile with no domain grants.
 		if e = c.prepare(ctx, s.VPN.Generation, "", nil); e != nil {
+			c.diagnostic("static_routes", e)
 			continue
 		}
 		c.mu.Lock()
@@ -137,16 +146,46 @@ func (c *companyRuntime) maintain(ctx context.Context) {
 				}
 				last = e
 			}
+			c.diagnostic("company_dns", last)
 			return nil, last
 		}, func(work context.Context, host string, a []dnswire.Answer) error {
-			return c.prepare(work, generation, host, a)
+			e := c.prepare(work, generation, host, a)
+			if e != nil {
+				c.diagnostic("domain_routes", e)
+			}
+			return e
 		})
 	}
 }
 
-func (c *companyRuntime) prepare(ctx context.Context, generation, host string, answers []dnswire.Answer) error {
+func (c *companyRuntime) diagnostic(stage string, err error) {
+	if platform.WindowsValidationBuild && err != nil {
+		// Native trial evidence stays in administrator storage; never publish
+		// resolver errors (which can contain private endpoints) in user status.
+		_ = winWrite(c.run, "company-diagnostic-"+stage+".json", map[string]any{"stage": stage, "error": err.Error(), "time": time.Now()})
+	}
+}
+
+func (c *companyRuntime) prepare(ctx context.Context, generation, host string, answers []dnswire.Answer) (result error) {
+	started := time.Now()
+	var lockWait, checks, routes time.Duration
+	routeCount := 0
+	defer func() {
+		if !platform.WindowsValidationBuild {
+			return
+		}
+		// Timing contains no domain, destination, or credential. Keep it local
+		// to the protected run, outside the state lock being measured.
+		if log, e := privateLog(c.run, "company-timing"); e == nil {
+			_ = json.NewEncoder(log).Encode(map[string]any{"time": time.Now(), "total_ms": time.Since(started).Milliseconds(), "lock_wait_ms": lockWait.Milliseconds(), "checks_ms": checks.Milliseconds(), "routes_ms": routes.Milliseconds(), "route_count": routeCount, "success": result == nil})
+			_ = log.Close()
+		}
+	}()
 	return update(c.run, func(s *State) error {
+		lockWait = time.Since(started)
 		check := func() error {
+			before := time.Now()
+			defer func() { checks += time.Since(before) }()
 			if e := ctx.Err(); e != nil {
 				return e
 			}
@@ -175,16 +214,7 @@ func (c *companyRuntime) prepare(ctx context.Context, generation, host string, a
 			next = append(next, a)
 		}
 		s.Leases = next
-		wanted := map[string]bool{}
-		for _, dns := range s.Manifest.Config.Company.DNS {
-			wanted[dns+"/32"] = true
-		}
-		for _, cidr := range s.Manifest.Config.Company.CIDRs {
-			wanted[cidr] = true
-		}
-		for _, a := range next {
-			wanted[a.IP+"/32"] = true
-		}
+		wanted, prepare := companyRouteSets(s.Manifest.Config.Company, next, answers, host == "")
 		m, e := networkManager(c.run)
 		if e != nil {
 			return e
@@ -207,16 +237,46 @@ func (c *companyRuntime) prepare(ctx context.Context, generation, host string, a
 				}
 			}
 		}
-		for prefix := range wanted {
+		for prefix := range prepare {
 			if e = check(); e != nil {
 				return e
 			}
-			if e = m.EnsureCompanyRoute(spec, s.Windows.TUNAdapter, prefix); e != nil {
+			before := time.Now()
+			e = m.EnsureCompanyRoute(spec, s.Windows.TUNAdapter, prefix)
+			routes += time.Since(before)
+			routeCount++
+			if e != nil {
 				return e
 			}
 		}
 		return check()
 	})
+}
+
+// Retention covers every live domain, including shared addresses. A renewal
+// prepares only its own RRset; other domains were prepared by their workers and
+// every new socket still validates its native route pair and guard independently.
+func companyRouteSets(company policy.Channel, live, refreshed []dnswire.Answer, bootstrap bool) (keep, prepare map[string]bool) {
+	keep, prepare = map[string]bool{}, map[string]bool{}
+	for _, dns := range company.DNS {
+		keep[dns+"/32"] = true
+	}
+	for _, cidr := range company.CIDRs {
+		keep[cidr] = true
+	}
+	for _, a := range live {
+		keep[a.IP+"/32"] = true
+	}
+	if bootstrap {
+		for prefix := range keep {
+			prepare[prefix] = true
+		}
+	} else {
+		for _, a := range refreshed {
+			prepare[a.IP+"/32"] = true
+		}
+	}
+	return
 }
 
 func (c *companyRuntime) state(generation string) (State, error) {
@@ -233,7 +293,8 @@ func (c *companyRuntime) state(generation string) (State, error) {
 	return s, nil
 }
 
-func (c *companyRuntime) dial(ctx context.Context, target string, port int) (net.Conn, error) {
+func (c *companyRuntime) dial(ctx context.Context, target string, port int) (conn net.Conn, result error) {
+	defer func() { c.diagnostic("dial", result) }()
 	session, generation := c.current()
 	if session == nil {
 		return nil, lease.ErrDenied
@@ -241,7 +302,7 @@ func (c *companyRuntime) dial(ctx context.Context, target string, port int) (net
 	if _, e := c.state(generation); e != nil {
 		return nil, e
 	}
-	return session.DialContext(ctx, target, port, func(ctx context.Context, network, address string) (net.Conn, error) {
+	return session.DialRenewingContext(ctx, target, port, func(ctx context.Context, network, address string) (net.Conn, error) {
 		s, e := c.state(generation)
 		if e != nil {
 			return nil, e

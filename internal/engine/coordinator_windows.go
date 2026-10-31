@@ -8,8 +8,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/url"
+	"netlaunch/internal/dnsloopback"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -36,6 +38,9 @@ func initialize(run string) (State, error) {
 	m, e := ReadManifest(run)
 	if e != nil {
 		return State{}, e
+	}
+	if windowsFlowIsolationReady && m.ValidationTimeout == 0 {
+		return State{}, errors.New("Windows validation manifest has no hard deadline")
 	}
 	files, id, e := winFiles(run)
 	if e != nil {
@@ -146,7 +151,10 @@ func privateLog(run, name string) (*os.File, error) {
 	return os.OpenFile(full, os.O_WRONLY|os.O_APPEND, 0600)
 }
 
-type windowsChildren struct{ jobs map[string]*winproc.Job }
+type windowsChildren struct {
+	jobs  map[string]*winproc.Job
+	exits map[string]*windowsChildExit
+}
 
 func (g *windowsChildren) close() {
 	for _, j := range g.jobs {
@@ -205,7 +213,7 @@ func (g *windowsChildren) launch(run, role string, args, environment []string, c
 		}
 		return Child{}, e
 	}
-	go func() { _, _ = process.Wait() }()
+	g.trackExit(role, process.Identity, process.Wait)
 	if writer != nil {
 		// The child is already running and consuming stdin. Bound the pipe write;
 		// a stalled child must not block coordinator cancellation indefinitely.
@@ -250,8 +258,33 @@ func startWatcher(run string) error {
 	if e != nil {
 		return e
 	}
-	go func() { _, _ = p.Wait() }()
-	return nil
+	done := make(chan error, 1)
+	go func() {
+		code, err := p.Wait()
+		if err == nil && code != 0 {
+			err = errors.New("independent watchdog exited before readiness")
+		}
+		done <- err
+	}()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		s, err := load(run)
+		if err != nil {
+			return err
+		}
+		if watcherReady(run, s) == nil {
+			return nil
+		}
+		select {
+		case err := <-done:
+			if err == nil {
+				err = errors.New("independent watchdog exited before readiness")
+			}
+			return err
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	return errors.New("independent watchdog readiness timed out")
 }
 func startVPN(run string, g *windowsChildren) (Child, error) {
 	s, e := load(run)
@@ -273,16 +306,36 @@ func startVPN(run string, g *windowsChildren) (Child, error) {
 	if e != nil {
 		return Child{}, e
 	}
+	// Wintun can retain the previous instance's name while its device is being
+	// removed. Reopening that name can fail after CSTP has accepted the cookie.
+	// Give each attempt a fresh name; old instances remain governed solely by
+	// their journaled GUID/LUID and process identities during cleanup.
+	nameID, e := nonce()
+	if e != nil {
+		return Child{}, e
+	}
+	vpnName := "NL-VPN-" + nameID[:16]
+	adapters, e := winnet.Adapters()
+	if e != nil {
+		return Child{}, e
+	}
+	for _, a := range adapters {
+		if strings.EqualFold(a.Name, vpnName) {
+			return Child{}, errors.New("VPN attempt interface already exists")
+		}
+	}
 	if e = update(run, func(s *State) error {
 		if e := guard(run, s); e != nil {
 			return e
 		}
 		s.Windows.LaunchToken = token
+		s.Manifest.Binding.VPN = vpnName
 		s.VPN.Bootstrap = false
 		return nil
 	}); e != nil {
 		return Child{}, e
 	}
+	s.Manifest.Binding.VPN = vpnName
 	files, id, e := winFiles(run)
 	if e != nil {
 		return Child{}, e
@@ -466,13 +519,25 @@ func startFrozenCoordinator(run string) error {
 		if !sameExecutable(id.Executable, frozenSelf(run)) {
 			return errors.New("frozen coordinator executable differs")
 		}
-		return update(run, func(s *State) error {
+		if e := update(run, func(s *State) error {
 			if e := guard(run, s); e != nil {
 				return e
 			}
 			s.Runner = id
+			if s.Manifest.ValidationTimeout != 0 {
+				if !s.Windows.ValidationDeadline.IsZero() {
+					return errors.New("validation deadline cannot be renewed")
+				}
+				s.Windows.ValidationDeadline = time.Now().Add(s.Manifest.ValidationTimeout)
+			}
 			return nil
-		})
+		}); e != nil {
+			return e
+		}
+		// The bootstrap creates both independent processes as siblings. A
+		// coordinator may itself be in a job that forbids nested breakaway.
+		// It remains suspended until the watcher has acknowledged readiness.
+		return startWatcher(run)
 	})
 	if e != nil {
 		return e
@@ -513,6 +578,9 @@ func runFrozen(run string) (returned error) {
 	if e = verifyFrozenRunner(run, s, me); e != nil {
 		return e
 	}
+	if windowsFlowIsolationReady && s.Windows.ValidationDeadline.IsZero() {
+		return errors.New("validation coordinator has no published deadline")
+	}
 	data, e := files.Read("active.json", 4096)
 	if e != nil {
 		return e
@@ -529,10 +597,14 @@ func runFrozen(run string) (returned error) {
 	defer func() {
 		cancel()
 		children.close()
+		reason := "coordinator_exit"
+		if errors.Is(returned, errVPNAuthenticationRequired) {
+			reason = "authentication_required"
+		}
 		if returned != nil {
 			_ = update(run, func(s *State) error { s.Error = "startup_or_runtime_failed"; return nil })
 		}
-		_ = recoverRun(run, "coordinator_exit")
+		_ = recoverRun(run, reason)
 	}()
 	power, e := winnet.WatchPower()
 	if e != nil {
@@ -570,6 +642,20 @@ func runFrozen(run string) (returned error) {
 	if e != nil {
 		return e
 	}
+	// Reserve IPv6 DNS before any takeover. Its lifetime is tied to the owner,
+	// while both DNS families are restored by the independent journal watcher.
+	dnsBridge, e := dnsloopback.Start(ctx, "[::1]:53", fmt.Sprintf("127.0.0.1:%d", s.Manifest.Config.Ports.DNS))
+	if e != nil {
+		return e
+	}
+	defer dnsBridge.Close()
+	go func() {
+		select {
+		case <-dnsBridge.Done:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
 	secret, e := nonce()
 	if e != nil {
 		return e
@@ -581,7 +667,7 @@ func runFrozen(run string) (returned error) {
 	if e = saveCore(run, config); e != nil {
 		return e
 	}
-	if e = startWatcher(run); e != nil {
+	if e = watcherReady(run, s); e != nil {
 		return e
 	}
 	go func() {
@@ -622,13 +708,26 @@ func runFrozen(run string) (returned error) {
 	if e = wait(ctx, run, 12*time.Second, func() error { return discoverTUN(run) }); e != nil {
 		return e
 	}
-	if _, e = startVPN(run, children); e != nil {
+	vpnChild, e := startVPN(run, children)
+	if e != nil {
 		return e
 	}
-	if e = wait(ctx, run, 50*time.Second, company.ready); e != nil {
+	if e = wait(ctx, run, 50*time.Second, func() error {
+		if children.vpnAuthenticationRejected() {
+			return &terminalReadinessError{errVPNAuthenticationRequired}
+		}
+		if live, err := alive(vpnChild); err != nil || !live {
+			if result, known := children.childExit("vpn"); known && result.identity == *vpnChild.Native {
+				return &terminalReadinessError{errors.New("VPN process exited before readiness")}
+			}
+			return errors.New("waiting for VPN process exit result")
+		}
+		return company.ready()
+	}); e != nil {
 		return e
 	}
 	if e = openCompany(run, company); e != nil {
+		company.diagnostic("bootstrap_bound", e)
 		return e
 	}
 	names := []string{}
@@ -662,6 +761,7 @@ func runFrozen(run string) (returned error) {
 		}
 		for _, p := range s.Manifest.Config.Probes {
 			if e := probe(run, p, false); e != nil {
+				company.diagnostic("startup_system_"+p.Channel, e)
 				if p.Channel == "personal" {
 					if rejectErr := rejectPersonal(run, selection, selection.Current, e); rejectErr != nil {
 						return rejectErr
@@ -682,6 +782,7 @@ func runFrozen(run string) (returned error) {
 func windowsLoop(ctx context.Context, run string, g *windowsChildren, company *companyRuntime, core Child, nodes []policy.Node, secret string, selection *selector.Policy, names []string) error {
 	lastHealth, lastProbe, lastAttempt := time.Now(), time.Now(), time.Now()
 	disconnected := false
+	authenticationRequired := false
 	openedGeneration := ""
 	for ctx.Err() == nil {
 		select {
@@ -771,6 +872,8 @@ func windowsLoop(ctx context.Context, run string, g *windowsChildren, company *c
 			if e = winWrite(run, "auth.json", fresh); e != nil {
 				return e
 			}
+			authenticationRequired = false
+			delete(g.exits, "vpn")
 			if e = os.Remove(filepath.Join(run, "auth-refresh.json")); e != nil {
 				return e
 			}
@@ -786,7 +889,22 @@ func windowsLoop(ctx context.Context, run string, g *windowsChildren, company *c
 				vpnAlive = vpnAlive || ok
 			}
 		}
-		if (!vpnAlive || disconnected) && time.Since(lastAttempt) > 10*time.Second {
+		if !vpnAlive && !authenticationRequired && g.vpnAuthenticationRejected() {
+			if e = stopVPN(run, g, company); e != nil {
+				return e
+			}
+			authenticationRequired = true
+		}
+		if authenticationRequired && s.Phase != "authentication_required" {
+			if e = update(run, func(s *State) error {
+				s.Phase = "authentication_required"
+				s.Error = "VPN session rejected; run auth"
+				return nil
+			}); e != nil {
+				return e
+			}
+		}
+		if !authenticationRequired && (!vpnAlive || disconnected) && time.Since(lastAttempt) > 10*time.Second {
 			if e = stopVPN(run, g, company); e != nil {
 				return e
 			}
@@ -804,6 +922,7 @@ func windowsLoop(ctx context.Context, run string, g *windowsChildren, company *c
 		}
 		if vpnAlive && (s.Phase != "ready" || s.VPN.Generation != openedGeneration || company.ready() != nil) {
 			if e = openCompany(run, company); e != nil {
+				company.diagnostic("runtime_bound", e)
 				_ = gate(run)
 				_ = update(run, func(s *State) error { s.Phase = "company_unavailable"; return nil })
 			} else {
@@ -818,9 +937,17 @@ func windowsLoop(ctx context.Context, run string, g *windowsChildren, company *c
 			lastHealth = time.Now()
 		}
 		if time.Since(lastProbe) > 30*time.Second {
-			ready := company.ready() == nil
+			readyErr := company.ready()
+			ready := readyErr == nil
+			if readyErr != nil {
+				company.diagnostic("readiness", readyErr)
+			}
 			for _, p := range s.Manifest.Config.Probes {
+				if authenticationRequired && p.Channel == "company" {
+					continue
+				}
 				if e = probe(run, p, false); e != nil {
+					company.diagnostic("probe_"+p.Channel, e)
 					ready = false
 					if p.Channel == "personal" {
 						if rejectErr := rejectPersonal(run, selection, selection.Current, e); rejectErr != nil {

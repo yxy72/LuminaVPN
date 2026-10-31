@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/netip"
 	"runtime"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -14,7 +15,7 @@ import (
 
 func Adapters() ([]Adapter, error) {
 	size := uint32(16 << 10)
-	for attempt := 0; attempt < 4; attempt++ {
+	for attempt := 0; attempt < 8; attempt++ {
 		if size > 16<<20 {
 			return nil, errors.New("adapter table exceeded limit")
 		}
@@ -31,9 +32,17 @@ func Adapters() ([]Adapter, error) {
 			return nil, e
 		}
 		var result []Adapter
+		changed := false
 		for p := head; p != nil; p = p.Next {
 			row := windows.MibIfRow2{InterfaceLuid: p.Luid, InterfaceIndex: p.IfIndex}
 			if e := windows.GetIfEntry2Ex(windows.MibIfTableNormalWithoutStatistics, &row); e != nil {
+				if errors.Is(e, windows.ERROR_FILE_NOT_FOUND) || errors.Is(e, windows.ERROR_NOT_FOUND) {
+					// Wintun can remove a device between the two native queries.
+					// Restart the whole snapshot rather than silently omit an
+					// unknown interface from ownership/conflict checks.
+					changed = true
+					break
+				}
 				return nil, e
 			}
 			if row.InterfaceLuid != p.Luid || row.InterfaceIndex != p.IfIndex {
@@ -55,6 +64,10 @@ func Adapters() ([]Adapter, error) {
 			result = append(result, a)
 		}
 		runtime.KeepAlive(buf)
+		if changed {
+			time.Sleep(25 * time.Millisecond)
+			continue
+		}
 		return result, nil
 	}
 	return nil, errors.New("adapter table changed repeatedly")

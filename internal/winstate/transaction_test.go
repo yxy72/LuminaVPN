@@ -37,6 +37,7 @@ type fakeNative struct {
 	routes              map[string]winnet.Route
 	adapter             winnet.Adapter
 	dns                 winnet.DNSSettings
+	dns6                winnet.DNSSettings
 	adds, deletes, sets int
 	dnsWriteFails       bool
 }
@@ -68,13 +69,24 @@ func (n *fakeNative) Adapter(g string) (winnet.Adapter, error) {
 	}
 	return n.adapter, nil
 }
-func (n *fakeNative) DNS(winnet.Adapter) (winnet.DNSSettings, error) { return n.dns, nil }
+func (n *fakeNative) DNS(_ winnet.Adapter, ipv6 bool) (winnet.DNSSettings, error) {
+	if ipv6 {
+		d := n.dns6
+		d.IPv6 = true
+		return d, nil
+	}
+	return n.dns, nil
+}
 func (n *fakeNative) SetDNS(_ winnet.Adapter, d winnet.DNSSettings) error {
 	n.sets++
 	if n.dnsWriteFails {
 		return errors.New("simulated DNS API failure")
 	}
-	n.dns = d
+	if d.IPv6 {
+		n.dns6 = d
+	} else {
+		n.dns = d
+	}
 	return nil
 }
 
@@ -90,6 +102,55 @@ func fixture(t *testing.T) (Manager, *memoryStore, *fakeNative, winnet.Route) {
 		t.Fatal(e)
 	}
 	return Manager{s, n}, s, n, r
+}
+
+func TestDNSFamiliesRecoverIndependentlyAfterCrash(t *testing.T) {
+	for _, external := range []bool{false, true} {
+		t.Run(map[bool]string{false: "crash", true: "external_ipv6"}[external], func(t *testing.T) {
+			m, s, n, _ := fixture(t)
+			if e := m.SetDNS(n.adapter, winnet.DNSSettings{NameServers: "127.0.0.1"}); e != nil {
+				t.Fatal(e)
+			}
+			s.failAt = s.writes + 2 // IPv6 applied in OS, durable planned intent only.
+			if e := m.SetDNS(n.adapter, winnet.DNSSettings{IPv6: true, NameServers: "::1"}); e == nil {
+				t.Fatal("expected crash")
+			}
+			j, _ := s.Load()
+			if len(j.DNS) != 2 || j.DNS[1].State != "planned" {
+				t.Fatal("separate intents missing")
+			}
+			s.failAt = 0
+			if external {
+				n.dns6.NameServers = "2001:db8::53"
+			}
+			e := m.Recover()
+			if (e != nil) != external {
+				t.Fatal("unexpected recovery", e)
+			}
+			if n.dns.NameServers != "" {
+				t.Fatal("IPv4 not restored")
+			}
+			if external {
+				if n.dns6.NameServers != "2001:db8::53" {
+					t.Fatal("external IPv6 overwritten")
+				}
+			} else if n.dns6.NameServers != "" {
+				t.Fatal("IPv6 not restored")
+			}
+		})
+	}
+}
+
+func TestDNSJournalCannotChangeFamily(t *testing.T) {
+	m, s, n, _ := fixture(t)
+	j, _ := s.Load()
+	j.DNS = []DNSChange{{Adapter: n.adapter, Before: winnet.DNSSettings{}, After: winnet.DNSSettings{IPv6: true, NameServers: "::1"}, State: "planned"}}
+	if e := s.Save(j); e != nil {
+		t.Fatal(e)
+	}
+	if e := m.Recover(); e == nil || n.sets != 0 {
+		t.Fatal("mixed-family journal accepted")
+	}
 }
 
 func TestRouteCrashBetweenMutationAndCommit(t *testing.T) {

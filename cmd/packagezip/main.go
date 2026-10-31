@@ -62,6 +62,13 @@ func archiveEntries(source, destination string, names []string) (err error) {
 			return e
 		}
 		h.Name = filepath.ToSlash(filepath.Join(filepath.Base(source), name))
+		// Archive permissions describe the target distribution, not the host
+		// filesystem (Windows does not retain Unix executable permission bits).
+		mode := os.FileMode(0644)
+		if name == "netlaunch" || name == "runtime/bin/mihomo" || name == "runtime/bin/openconnect" || strings.HasSuffix(name, ".command") {
+			mode = 0755
+		}
+		h.SetMode(mode)
 		h.Method = zip.Deflate
 		writer, e := z.CreateHeader(h)
 		if e != nil {

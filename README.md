@@ -111,6 +111,20 @@ Windows 的管理员恢复日志使用原生 ProgramData 目录下的 `NetLaunch
 
 模块边界：`subscription` 管理显式来源与受限规则导入，`policy` 管理授权与配置生成，`dnswire` 解析受限 DNS 报文，`lease` 管理地址有效期和连接代次，`selector` 管理个人节点优选，`auth/securefile` 管理本地会话与私有存储，`platform/socketbind` 管理系统适配，`engine` 管理生命周期与恢复，`app` 提供用户入口。
 
+Windows 开发时可用 `go build -o .local/winprobe.exe ./cmd/winprobe` 构建独立试验入口，并在管理员终端执行。`idle --timeout 60s` 只测试恢复进程；添加 `--stage adapter|native|pair|mutation --runtime <完整组件目录>` 后，会先冻结可执行文件和已校验的 Wintun 库、启动独立恢复进程，然后打印 ProgramData 下的本轮目录并等待。先确认该目录中的 `recover.cmd` 可离线访问，再从另一个管理员终端执行该目录的 `winprobe.exe begin --run <本轮目录名>`。超时范围为 1 秒至 2 分钟，从准备阶段开始计时；超时终止试验主进程后的非零退出码须结合 `probe-result.json` 判断恢复结果。
+
+`adapter` 仅创建本轮测试网卡；`native` 检查指定网卡的文档 IPv4 地址、路由、DNS、TCP/UDP 和链路本地 IPv6 保护；`pair` 检查两张测试网卡的成对路由；`mutation` 在成对路由的基础上修改测试路由的 metric，检查拒绝新连接、拒删外部变更及保留捕获/保护规则，再按独立的测试修改记录清理。它们不认证公司 VPN，也不接管默认流量。`pair` 可选 `--fault pair-planned|pair-capture-applied|pair-vpn-applied|pair-retiring|pair-vpn-restored`；`mutation` 可选 `--fault route-replaced`。故障点会立即退出，以检查独立恢复。恢复遇到错误会保留诊断并有限重试，仍按原有所有权检查执行。结果仅证明对应受控场景，不会启用标准构建的 Windows 网络启动开关。
+
+完整生命周期的开发试验需用 `go build -tags windows_validation -o .local/netlaunch-validation.exe ./cmd/netlaunch` 单独构建，并在 `up` 时显式提供 `--validation-timeout`（1 秒至 45 分钟，可搭配 `--prepare-only`）。该时间从管理员保护目录中的协调器发布时开始计时，不能续期；独立看门狗先就绪，再允许协调器执行，期限到达即撤销本轮资源。标准构建仍关闭 Windows 网络启动。切换既有客户端时，还需预先准备独立的本机恢复任务，负责恢复这些客户端；候选程序的资源日志仅负责自己的变更。验证构建并不表示整体验收完成。
+
+Windows 验证构建分别记录并接管物理网卡的 IPv4、IPv6 DNS，防止系统经另一协议栈解析而失去 TUN 所需的域名映射。IPv6 DNS 入口仅监听 `[::1]:53`，通过有并发和时间限制的 TCP/UDP 转发连接本机核心；端口冲突时拒绝启动。两类 DNS 各自保存原始自动或静态设置，恢复时分别检查外部改动，不修改全局 IPv6 开关或其他网卡的 DNS。
+
+Windows 每次尝试重连 VPN 都分配新的虚拟网卡名称，避免复用仍在移除中的 Wintun 实例；恢复仍按记录中的 GUID、LUID 和进程身份处理资源。公司精确域名租约到期时，请求可在原请求期限内最多等待 2 秒获取下一份有效租约；等待期间不授权旧地址，也不延长 DNS TTL。原始 IP、未授权域名、网卡或保护规则校验失败不会因此获得额外授权。
+
+Windows 遇到服务器拒绝缓存会话时，启动阶段立即回收资源并记录 `authentication_required`；运行中则撤回公司通道，等待显式 `auth` 更新后再尝试。退出结果绑定到当前子进程的启动尝试，旧进程的迟到结果不会覆盖新连接。
+
+已完成本机环境验证后，可用 `go build -tags windows_home -o netlaunch-home.exe ./cmd/netlaunch` 构建家用预览版。其 `up` 默认在 8 小时后自动回收，也可用 `--session-timeout` 指定 1 秒至 12 小时；期限写入后不能续期，`down` 可提前停止。该构建保留独立看门狗、所有权校验和恢复日志。启动前需要处理其他客户端冲突，并为原客户端准备独立恢复入口；它不会自动管理任意第三方 VPN 或代理。此构建与 `windows_validation` 不能合用，普通构建仍保持原来的平台开关。
+
 开发过程结果仅保存在 `.local/` 等 Git 忽略目录；不要提交验收文档、验收清单、验收报告或临时结果汇总。
 
 ## Git 与私密配置

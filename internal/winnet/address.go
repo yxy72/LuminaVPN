@@ -18,6 +18,7 @@ type Address struct {
 }
 
 var ErrAdapterAbsent = errors.New("adapter is absent")
+var ErrIPInterfaceAbsent = errors.New("IPv4 interface row is absent")
 
 func (a Address) Validate() error {
 	if a.InterfaceIndex == 0 || a.InterfaceLUID == 0 || !usableIPv4(a.IP) || a.PrefixLength != 32 || a.PrefixOrigin != 1 || a.SuffixOrigin != 1 || a.ValidLifetime != ^uint32(0) || a.PreferredLifetime != ^uint32(0) || a.SkipAsSource {

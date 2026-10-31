@@ -9,6 +9,32 @@ import (
 	"unsafe"
 )
 
+func TestSublayerAllowsBFEWeightNormalizationOnly(t *testing.T) {
+	a, e := encode(testSpec(t))
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer runtime.KeepAlive(a)
+	actual := a.sub
+	actual.Weight--
+	if !sublayerEqual(actual, a.sub) {
+		t.Fatal("BFE-assigned weight rejected")
+	}
+	for _, modify := range []func(*sublayer){
+		func(s *sublayer) { s.Key.Data1++ },
+		func(s *sublayer) { s.Flags = 1 },
+		func(s *sublayer) { s.Display.Description = nil },
+		func(s *sublayer) { s.Provider = &a.sub.Key },
+		func(s *sublayer) { s.ProviderData.Size = 1 },
+	} {
+		changed := actual
+		modify(&changed)
+		if sublayerEqual(changed, a.sub) {
+			t.Fatal("external sublayer modification accepted")
+		}
+	}
+}
+
 // These tests do not open the filtering engine or change firewall state.
 func TestNativeLayoutAndFilterScope(t *testing.T) {
 	if e := checkABI(); e != nil {

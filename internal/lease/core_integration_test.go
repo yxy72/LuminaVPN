@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"netlaunch/internal/companyproxy"
+	"netlaunch/internal/dnswire"
 	"netlaunch/internal/selector"
 )
 
@@ -29,17 +30,37 @@ import (
 // fixture addresses are mapped to net.Pipe instead of a native VPN adapter.
 // It never enables TUN or edits the host's DNS, routes or existing proxy.
 func TestCorePreservesDomainAcrossLeaseRotation(t *testing.T) {
-	t.Run("fake_ip", func(t *testing.T) { coreLeaseCase(t, false) })
-	t.Run("hosts_mapping_rejected", func(t *testing.T) { coreLeaseCase(t, true) })
+	t.Run("fake_ip", func(t *testing.T) { coreLeaseCase(t, false, false, false, false) })
+	t.Run("hosts_mapping_rejected", func(t *testing.T) { coreLeaseCase(t, true, false, false, false) })
+	t.Run("real_time_expiry", func(t *testing.T) { coreLeaseCase(t, false, true, false, false) })
+	t.Run("real_time_cname_expiry", func(t *testing.T) { coreLeaseCase(t, false, true, true, false) })
+	t.Run("request_waits_for_renewal", func(t *testing.T) { coreLeaseCase(t, false, true, true, true) })
 }
 
-func coreLeaseCase(t *testing.T, hostsMapping bool) {
+func coreLeaseCase(t *testing.T, hostsMapping, realTime, wireDNS, renewing bool) {
+	const host = "service.test"
 	core := os.Getenv("NETLAUNCH_TEST_CORE")
 	if core == "" {
 		t.Skip("set NETLAUNCH_TEST_CORE to a local Mihomo executable")
 	}
-	_, s, clock := setup(t)
-	publish(t, s, answer(clock, host, "10.1.2.3", 2))
+	_, s, clock := setup(t, host)
+	if realTime {
+		a, e := New([]string{host}, time.Now)
+		if e != nil {
+			t.Fatal(e)
+		}
+		t.Cleanup(a.Revoke)
+		s = a.Begin(context.Background())
+	}
+	grant := func(ip string) dnswire.Answer {
+		if wireDNS {
+			return cnameDNSGrant(t, host, ip)
+		}
+		if realTime {
+			return answer(&testClock{t: time.Now()}, host, ip, 2)
+		}
+		return answer(clock, host, ip, 2)
+	}
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -55,7 +76,11 @@ func coreLeaseCase(t *testing.T, hostsMapping bool) {
 			requests = append(requests, target)
 		}
 		mu.Unlock()
-		return s.DialContext(ctx, target, port, func(_ context.Context, network, address string) (net.Conn, error) {
+		dial := s.DialContext
+		if renewing {
+			dial = s.DialRenewingContext
+		}
+		return dial(ctx, target, port, func(_ context.Context, network, address string) (net.Conn, error) {
 			mu.Lock()
 			dials = append(dials, address)
 			mu.Unlock()
@@ -151,8 +176,14 @@ func coreLeaseCase(t *testing.T, hostsMapping bool) {
 				if actual.TUN.Enable {
 					t.Fatal("fixture enabled TUN")
 				}
-				ready = true
-				break
+				// The controller opens before the DNS and mixed listeners finish
+				// initialization. A configs response alone is not core readiness.
+				conn, dialErr := net.DialTimeout("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(proxyPort)), 100*time.Millisecond)
+				if dialErr == nil {
+					conn.Close()
+					ready = true
+					break
+				}
 			}
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -191,6 +222,9 @@ func coreLeaseCase(t *testing.T, hostsMapping bool) {
 		}
 		return string(b), e
 	}
+	// Start the short lease after core readiness; slow process startup must
+	// not consume the TTL before the first positive control can run.
+	publish(t, s, grant("10.1.2.3"))
 	if hostsMapping {
 		if got, e := request(); e == nil {
 			t.Fatal("domain-erasing hosts mapping was admitted", got)
@@ -213,11 +247,40 @@ func coreLeaseCase(t *testing.T, hostsMapping bool) {
 		mu.Unlock()
 		t.Fatal("initial lease", got, e)
 	}
-	clock.advance(2 * time.Second)
-	if got, e := request(); e == nil {
-		t.Fatal("expired lease still dialed", got)
+	if realTime {
+		time.Sleep(2 * time.Second)
+	} else {
+		clock.advance(2 * time.Second)
 	}
-	publish(t, s, answer(clock, host, "10.1.2.4", 2))
+	if renewing {
+		type result struct {
+			body string
+			err  error
+		}
+		pending := make(chan result, 1)
+		go func() { body, err := request(); pending <- result{body, err} }()
+		select {
+		case got := <-pending:
+			t.Fatal("request did not wait for new grant", got)
+		case <-time.After(150 * time.Millisecond):
+		}
+		mu.Lock()
+		count := len(dials)
+		mu.Unlock()
+		if count != 1 {
+			t.Fatal("pending request dialed the expired address")
+		}
+		publish(t, s, grant("10.1.2.4"))
+		got := <-pending
+		if got.err != nil || got.body != "10.1.2.4:8443" {
+			t.Fatal("pending request did not use refreshed address", got)
+		}
+	} else {
+		if got, e := request(); e == nil {
+			t.Fatal("expired lease still dialed", got)
+		}
+		publish(t, s, grant("10.1.2.4"))
+	}
 	if got, e := request(); e != nil || got != "10.1.2.4:8443" {
 		t.Fatal("first request after rotation used stale core address", got, e)
 	}

@@ -37,6 +37,9 @@ func Parse(data string, vpn policy.VPN) (Session, error) {
 	}
 	values := map[string]string{}
 	for _, line := range strings.Split(data, "\n") {
+		// Windows native stdout may use CRLF. Remove only the line ending;
+		// embedded control characters still fail normal session validation.
+		line = strings.TrimSuffix(line, "\r")
 		k, v, ok := strings.Cut(line, "=")
 		if !ok {
 			continue

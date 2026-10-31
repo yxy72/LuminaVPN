@@ -101,6 +101,9 @@ func update(run string, fn func(*State) error) error {
 	return save(run, &s)
 }
 func guard(run string, s *State) error {
+	if s.Windows != nil && !s.Windows.ValidationDeadline.IsZero() && !time.Now().Before(s.Windows.ValidationDeadline) {
+		return errors.New("validation deadline reached")
+	}
 	if _, e := os.Lstat(filepath.Join(run, "STOP")); e == nil || !errors.Is(e, os.ErrNotExist) {
 		return errors.New("stop requested or unreadable stop marker")
 	}
@@ -109,6 +112,24 @@ func guard(run string, s *State) error {
 	}
 	return nil
 }
+func watcherReady(run string, s State) error {
+	var ready platform.Identity
+	if e := winRead(run, "watcher-ready.json", &ready); e != nil {
+		return e
+	}
+	if !sameProcess(s.Watcher, ready) || !sameExecutable(ready.Executable, frozenSelf(run)) {
+		return errors.New("watchdog readiness identity differs")
+	}
+	actual, e := platform.Process(ready.PID)
+	if e != nil {
+		return e
+	}
+	if !sameProcess(ready, actual) {
+		return errors.New("ready watchdog is no longer alive")
+	}
+	return nil
+}
+
 func pulse(run string) error {
 	return update(run, func(s *State) error {
 		if e := guard(run, s); e != nil {

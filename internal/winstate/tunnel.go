@@ -384,7 +384,14 @@ func (m Manager) restoreTunnel(j *Journal, only *winnet.Adapter, boot string) er
 		} else if err == nil {
 			current, readErr := n.MTU(live)
 			err = readErr
-			if err == nil && current != v.Before {
+			if errors.Is(readErr, winnet.ErrIPInterfaceAbsent) && !live.Up && boot == j.BootID && winnet.SameAdapter(v.Adapter, live) {
+				// Wintun can retain its device record after the IPv4 interface
+				// is removed. There is no remaining MTU value to restore. Only
+				// the same, inactive adapter generation qualifies; never write
+				// a replacement interface or suppress other native errors.
+				err = nil
+			}
+			if readErr == nil && current != v.Before {
 				if boot != j.BootID || !winnet.SameAdapter(v.Adapter, live) {
 					err = errors.New("MTU adapter generation changed")
 				} else if current != v.After {

@@ -39,6 +39,9 @@ func TestPrivateCacheAndExpiry(t *testing.T) {
 		t.Fatal(e)
 	}
 	if _, ok := Load(dir, vpn); !ok {
+		if _, err := securefile.Read(filepath.Join(dir, "session.json"), 65536, true); err != nil {
+			t.Fatalf("cache read: %v", err)
+		}
 		t.Fatal("cache not reusable")
 	}
 	if _, e := securefile.Read(filepath.Join(dir, "session.json"), 65536, true); e != nil {
@@ -62,5 +65,18 @@ func TestPrivateCacheAndExpiry(t *testing.T) {
 	testutil.MakePublic(t, filepath.Join(dir, "session.json"))
 	if _, ok := Load(dir, vpn); ok {
 		t.Fatal("public cache used")
+	}
+}
+
+func TestAuthParserWindowsLineEndings(t *testing.T) {
+	for _, host := range []string{"vpn.example.com", "192.0.2.1"} {
+		if _, err := Parse(strings.ReplaceAll(output(host), "\n", "\r\n"), vpn); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, cookie := range []string{"test\rsession", "test\nsession", "test\x00session"} {
+		if _, err := Parse(strings.ReplaceAll(output("vpn.example.com"), "test-session", cookie), vpn); err == nil {
+			t.Fatal("embedded control character accepted")
+		}
 	}
 }

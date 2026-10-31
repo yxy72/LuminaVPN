@@ -4,6 +4,7 @@ package engine
 
 import (
 	"errors"
+	"golang.org/x/sys/windows"
 	"netlaunch/internal/platform"
 	"netlaunch/internal/securefile"
 	"netlaunch/internal/selector"
@@ -15,12 +16,30 @@ import (
 )
 
 func watch(run string) error {
+	s, e := load(run)
+	if e != nil {
+		return e
+	}
+	me, e := platform.Process(os.Getpid())
+	if e != nil {
+		return e
+	}
+	if !sameProcess(s.Watcher, me) || !sameExecutable(me.Executable, frozenSelf(run)) {
+		return errors.New("unpublished or mutable watchdog")
+	}
+	deadline := s.Windows.ValidationDeadline
+	if windowsFlowIsolationReady && deadline.IsZero() {
+		return errors.New("validation watchdog has no hard deadline")
+	}
 	power, e := winnet.WatchPower()
 	if e != nil {
 		return recoverRun(run, "watchdog_power_monitor_failed")
 	}
 	defer power.Close()
 	epoch, _ := power.Epoch()
+	if e = winWrite(run, "watcher-ready.json", me); e != nil {
+		return e
+	}
 	var grace time.Time
 	for {
 		s, e := load(run)
@@ -31,6 +50,11 @@ func watch(run string) error {
 			return nil
 		}
 		reason := ""
+		if !s.Windows.ValidationDeadline.Equal(deadline) {
+			reason = "validation_deadline_changed"
+		} else if !deadline.IsZero() && !time.Now().Before(deadline) {
+			reason = "validation_deadline"
+		}
 		if _, e = os.Lstat(filepath.Join(run, "STOP")); e == nil {
 			reason = "user_stop"
 		} else if !errors.Is(e, os.ErrNotExist) {
@@ -168,8 +192,21 @@ func recoverRun(run, reason string) error {
 		if !errors.Is(e, os.ErrNotExist) || s.Watcher.PID != 0 || len(s.Children) != 0 {
 			return failed(e)
 		}
-	} else if e = m.Recover(); e != nil {
-		return failed(e)
+	} else {
+		until := time.Now().Add(10 * time.Second)
+		for {
+			e = m.Recover()
+			if e == nil {
+				break
+			}
+			// Windows can still enumerate a disappearing Wintun device after
+			// its IPv4 row has gone. Retry exact journal recovery; never treat
+			// a missing row as permission to skip ownership verification.
+			if time.Now().After(until) || (!errors.Is(e, windows.ERROR_NOT_FOUND) && !errors.Is(e, windows.ERROR_FILE_NOT_FOUND)) {
+				return failed(e)
+			}
+			time.Sleep(time.Second)
+		}
 	}
 	if e = VerifyOwnedInterfaces(run); e != nil {
 		return failed(e)

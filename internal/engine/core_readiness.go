@@ -14,6 +14,8 @@ import (
 
 type terminalReadinessError struct{ error }
 
+func (e *terminalReadinessError) Unwrap() error { return e.error }
+
 func wait(ctx context.Context, run string, limit time.Duration, check func() error) error {
 	deadline := time.Now().Add(limit)
 	var last error

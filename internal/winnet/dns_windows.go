@@ -48,6 +48,10 @@ func dnsGUID(a Adapter) (windows.GUID, error) {
 }
 
 func ConfiguredDNS(a Adapter) (DNSSettings, error) {
+	return ConfiguredDNSFamily(a, false)
+}
+
+func ConfiguredDNSFamily(a Adapter, ipv6 bool) (DNSSettings, error) {
 	guid, e := dnsGUID(a)
 	if e != nil {
 		return DNSSettings{}, e
@@ -61,6 +65,9 @@ func ConfiguredDNS(a Adapter) (DNSSettings, error) {
 		return DNSSettings{}, e
 	}
 	native := dnsInterfaceSettings{Version: 1}
+	if ipv6 {
+		native.Flags = 1
+	}
 	code, _, _ := get.Call(uintptr(unsafe.Pointer(&guid)), uintptr(unsafe.Pointer(&native)))
 	if code != 0 {
 		return DNSSettings{}, fmt.Errorf("read configured DNS: %w", windows.Errno(code))
@@ -70,11 +77,11 @@ func ConfiguredDNS(a Adapter) (DNSSettings, error) {
 	if native.Flags&0x3000 != 0 {
 		return DNSSettings{}, errors.New("configured DoH requires extended DNS recovery support")
 	}
-	d := DNSSettings{windows.UTF16PtrToString(native.NameServer), windows.UTF16PtrToString(native.ProfileNameServer)}
+	d := DNSSettings{IPv6: ipv6, NameServers: windows.UTF16PtrToString(native.NameServer), ProfileNameServers: windows.UTF16PtrToString(native.ProfileNameServer)}
 	return d, d.Validate()
 }
 
-// SetConfiguredDNS changes only the static IPv4 server list. Its caller must
+// SetConfiguredDNS changes only one family's static server list. Its caller must
 // first persist Before/After and re-read Before. Profile DNS is never altered.
 func SetConfiguredDNS(a Adapter, desired DNSSettings) error {
 	if e := desired.Validate(); e != nil {
@@ -84,11 +91,11 @@ func SetConfiguredDNS(a Adapter, desired DNSSettings) error {
 	if e != nil {
 		return e
 	}
-	current, e := ConfiguredDNS(a)
+	current, e := ConfiguredDNSFamily(a, desired.IPv6)
 	if e != nil {
 		return e
 	}
-	if !SameDNS(DNSSettings{ProfileNameServers: current.ProfileNameServers}, DNSSettings{ProfileNameServers: desired.ProfileNameServers}) {
+	if !SameDNS(DNSSettings{IPv6: desired.IPv6, ProfileNameServers: current.ProfileNameServers}, DNSSettings{IPv6: desired.IPv6, ProfileNameServers: desired.ProfileNameServers}) {
 		return errors.New("profile DNS changed outside this run")
 	}
 	value, e := windows.UTF16PtrFromString(desired.NameServers)
@@ -96,6 +103,9 @@ func SetConfiguredDNS(a Adapter, desired DNSSettings) error {
 		return e
 	}
 	native := dnsInterfaceSettings{Version: 1, Flags: 2, NameServer: value}
+	if desired.IPv6 {
+		native.Flags |= 1
+	}
 	set := ipHelper.NewProc("SetInterfaceDnsSettings")
 	if e = set.Find(); e != nil {
 		return e
@@ -105,7 +115,7 @@ func SetConfiguredDNS(a Adapter, desired DNSSettings) error {
 	if code != 0 {
 		return fmt.Errorf("set configured DNS: %w", windows.Errno(code))
 	}
-	actual, e := ConfiguredDNS(a)
+	actual, e := ConfiguredDNSFamily(a, desired.IPv6)
 	if e != nil {
 		return e
 	}

@@ -200,7 +200,10 @@ func bytesAs(path string, data []byte, user string, dir func(string) error) erro
 		return errors.New("private atomic replacement requires 64-bit Windows")
 	}
 	target = target[:len(target)-1]
-	info := make([]byte, 20+2*len(target))
+	// The Win32 path conversion also consumes a NUL-terminated FileName.
+	// Keep the terminator and structure tail padding outside FileNameLength;
+	// otherwise some path lengths read beyond the buffer and rename elsewhere.
+	info := make([]byte, 24+2*len(target))
 	binary.LittleEndian.PutUint32(info, 3) // REPLACE_IF_EXISTS | POSIX_SEMANTICS
 	binary.LittleEndian.PutUint32(info[16:], uint32(2*len(target)))
 	for i, ch := range target {

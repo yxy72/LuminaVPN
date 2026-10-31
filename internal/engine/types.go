@@ -15,14 +15,15 @@ import (
 )
 
 type Manifest struct {
-	Version    int              `json:"version"`
-	Owner      int              `json:"owner"`
-	OwnerSID   string           `json:"owner_sid,omitempty"`
-	Config     policy.Config    `json:"config"`
-	Binding    policy.Binding   `json:"binding"`
-	Network    platform.Network `json:"network"`
-	Executable string           `json:"executable"`
-	Created    time.Time        `json:"created"`
+	Version           int              `json:"version"`
+	Owner             int              `json:"owner"`
+	OwnerSID          string           `json:"owner_sid,omitempty"`
+	Config            policy.Config    `json:"config"`
+	Binding           policy.Binding   `json:"binding"`
+	Network           platform.Network `json:"network"`
+	Executable        string           `json:"executable"`
+	Created           time.Time        `json:"created"`
+	ValidationTimeout time.Duration    `json:"validation_timeout,omitempty"`
 }
 type Child struct {
 	Role     string             `json:"role"`
@@ -92,6 +93,9 @@ func ReadManifest(run string) (Manifest, error) {
 	}
 	if json.Unmarshal(b, &m) != nil || m.Version != 1 {
 		return m, errors.New("invalid run manifest")
+	}
+	if m.ValidationTimeout != 0 && (m.ValidationTimeout < time.Second || m.ValidationTimeout > 12*time.Hour) {
+		return m, errors.New("invalid validation timeout")
 	}
 	if e := validateOwner(run, m); e != nil {
 		return m, e

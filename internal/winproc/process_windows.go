@@ -6,6 +6,7 @@ package winproc
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -191,7 +192,7 @@ func start(spec Spec, publish func(platform.Identity) error, job windows.Handle,
 	}
 	var info windows.ProcessInformation
 	if e = windows.CreateProcess(app, line, nil, nil, inherit, flags, env, cwd, &startup.StartupInfo, &info); e != nil {
-		return nil, e
+		return nil, fmt.Errorf("create suspended child: %w", e)
 	}
 	runtime.KeepAlive(block)
 	defer windows.CloseHandle(info.Thread)

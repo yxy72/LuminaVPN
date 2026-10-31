@@ -180,6 +180,9 @@ func adapterRow(a Adapter) (windows.MibIpInterfaceRow, error) {
 	}
 	row := windows.MibIpInterfaceRow{Family: windows.AF_INET, InterfaceLuid: a.LUID, InterfaceIndex: a.Index}
 	if e = windows.GetIpInterfaceEntry(&row); e != nil {
+		if errors.Is(e, windows.ERROR_NOT_FOUND) {
+			return row, ErrIPInterfaceAbsent
+		}
 		return row, e
 	}
 	if row.InterfaceIndex != a.Index || row.InterfaceLuid != a.LUID {

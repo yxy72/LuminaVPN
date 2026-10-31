@@ -5,6 +5,7 @@ package engine
 import (
 	"crypto/subtle"
 	"errors"
+	"fmt"
 	"netlaunch/internal/platform"
 	"netlaunch/internal/policy"
 	"netlaunch/internal/winnet"
@@ -13,28 +14,34 @@ import (
 	"strconv"
 )
 
-const windowsFlowIsolationReady = false
+const windowsFlowIsolationReady = platform.WindowsValidationBuild || platform.WindowsHomeBuild
 
 var windowsPower *winnet.PowerWatch // Set once, before company workers start.
 func validVPN(s State) bool {
+	return validateVPN(s) == nil
+}
+func validateVPN(s State) error {
 	if windowsPower == nil || s.Windows == nil || !s.VPN.Bootstrap {
-		return false
+		return errors.New("VPN bootstrap is not active")
 	}
 	epoch, awake := windowsPower.Epoch()
 	if !awake || epoch != s.Windows.Epoch {
-		return false
+		return errors.New("VPN power epoch changed")
 	}
 	if e := winnet.ValidateAdapter(s.Windows.VPNAdapter, s.VPN.Address); e != nil {
-		return false
+		return fmt.Errorf("VPN adapter validation: %w", e)
 	}
 	if s.Windows.Guard == nil || !winnet.SameAdapter(s.Windows.Guard.Adapter, s.Windows.VPNAdapter) {
-		return false
+		return errors.New("VPN isolation adapter differs")
 	}
 	m, e := networkManager(s.Windows.PublicRun)
-	if e != nil || m.CheckCompanyGuard(*s.Windows.Guard) != nil {
-		return false
+	if e != nil {
+		return e
 	}
-	return winnet.AddressReady(s.Windows.VPNAddress) == nil
+	if e = m.CheckCompanyGuard(*s.Windows.Guard); e != nil {
+		return fmt.Errorf("VPN isolation readback: %w", e)
+	}
+	return winnet.AddressReady(s.Windows.VPNAddress)
 }
 func takeoverDNS(run string) error {
 	return update(run, func(s *State) error {
@@ -45,10 +52,29 @@ func takeoverDNS(run string) error {
 		if e != nil {
 			return e
 		}
-		return m.SetDNS(s.Windows.Physical.Adapter, winnet.DNSSettings{NameServers: "127.0.0.1"})
+		// Each family has its own durable intent, so a crash between the two
+		// native calls can restore either family without overwriting the other.
+		if e = m.SetDNS(s.Windows.Physical.Adapter, winnet.DNSSettings{NameServers: "127.0.0.1"}); e != nil {
+			return e
+		}
+		return m.SetDNS(s.Windows.Physical.Adapter, winnet.DNSSettings{IPv6: true, NameServers: "::1"})
 	})
 }
-func hook(run string) error {
+func hook(run string) (returned error) {
+	stage := "authorize"
+	defer func() {
+		if returned == nil {
+			return
+		}
+		returned = fmt.Errorf("VPN callback %s: %w", stage, returned)
+		// Script-host stderr is not reliably inherited by OpenConnect. Keep
+		// the failure in protected storage without logging callback environment
+		// variables, which include the launch capability and VPN parameters.
+		if log, err := privateLog(run, "hook"); err == nil {
+			_, _ = fmt.Fprintln(log, returned)
+			_ = log.Close()
+		}
+	}()
 	token := os.Getenv("NETLAUNCH_HOOK_TOKEN")
 	return update(run, func(s *State) error {
 		if e := guard(run, s); e != nil {
@@ -84,6 +110,7 @@ func hook(run string) error {
 			return errors.New("unsupported VPN callback reason")
 		}
 		name := os.Getenv("TUNDEV")
+		stage = "interface_parameters"
 		if name != s.Manifest.Binding.VPN {
 			return errors.New("VPN callback interface differs")
 		}
@@ -105,6 +132,7 @@ func hook(run string) error {
 		if !winnet.ValidVPNMTU(uint32(mtu)) {
 			return errors.New("VPN MTU outside supported range")
 		}
+		stage = "adapter_identity"
 		all, e := winnet.Adapters()
 		if e != nil {
 			return e
@@ -123,6 +151,7 @@ func hook(run string) error {
 				return errors.New("VPN callback selected a pre-existing adapter")
 			}
 		}
+		stage = "isolation"
 		m, e := networkManager(run)
 		if e != nil {
 			return e
@@ -156,13 +185,16 @@ func hook(run string) error {
 		if e = m.EnsureGuard(spec); e != nil {
 			return e
 		}
+		stage = "address"
 		address, e := m.EnsureVPNAddress(adapter, ip)
 		if e != nil {
 			return e
 		}
+		stage = "mtu"
 		if e = m.SetVPNMTU(adapter, uint32(mtu)); e != nil {
 			return e
 		}
+		stage = "resolver_routes"
 		for _, dns := range s.Manifest.Config.Company.DNS {
 			if e = m.EnsureCompanyRoute(spec, tun, dns+"/32"); e != nil {
 				return e

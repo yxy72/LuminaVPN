@@ -27,4 +27,15 @@ func TestConfiguredDNSReadOnly(t *testing.T) {
 		t.Fatal("DNS changed during readonly snapshot")
 	}
 	t.Logf("configured DNS: automatic=%t profile_override=%t", a.NameServers == "", a.ProfileNameServers != "")
+	a6, e := ConfiguredDNSFamily(p.Adapter, true)
+	if e != nil {
+		t.Fatal(e)
+	}
+	b6, e := ConfiguredDNSFamily(p.Adapter, true)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if !a6.IPv6 || !SameDNS(a6, b6) {
+		t.Fatal("IPv6 DNS snapshot unstable")
+	}
 }

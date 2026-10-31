@@ -221,6 +221,15 @@ func blobEqual(a, b blob) bool {
 func displayEqual(a, b display) bool {
 	return windows.UTF16PtrToString(a.Name) == windows.UTF16PtrToString(b.Name) && windows.UTF16PtrToString(a.Description) == windows.UTF16PtrToString(b.Description)
 }
+
+func sublayerEqual(actual, wanted sublayer) bool {
+	// BFE assigns the closest available sublayer weight. It is an ordering
+	// hint, not the caller's ownership key (Microsoft's Installing a Provider
+	// example explicitly relies on this normalization). Retain exact identity,
+	// display, flags and provider checks; filter conditions/actions are checked
+	// separately and must still match exactly.
+	return actual.Key == wanted.Key && displayEqual(actual.Display, wanted.Display) && actual.Flags == wanted.Flags && actual.Provider == nil && actual.ProviderData.Size == 0
+}
 func conditionEqual(a, b condition) bool {
 	if a.Key != b.Key || a.Match != b.Match || a.Value.Type != b.Value.Type {
 		return false
@@ -280,7 +289,7 @@ func (e *engine) inspect(s Spec) (Status, error) {
 		if sub == nil {
 			return result, errors.New("missing WFP sublayer response")
 		}
-		ok := sub.Key == wanted.sub.Key && displayEqual(sub.Display, wanted.sub.Display) && sub.Flags == 0 && sub.Provider == nil && sub.ProviderData.Size == 0 && sub.Weight == wanted.sub.Weight
+		ok := sublayerEqual(*sub, wanted.sub)
 		dll.NewProc("FwpmFreeMemory0").Call(uintptr(unsafe.Pointer(&sub)))
 		if !ok {
 			return result, errors.New("WFP sublayer changed externally")

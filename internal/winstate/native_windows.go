@@ -31,8 +31,8 @@ func (NativeBackend) Adapter(guid string) (winnet.Adapter, error) {
 	}
 	return winnet.Adapter{}, winnet.ErrAdapterAbsent
 }
-func (NativeBackend) DNS(a winnet.Adapter) (winnet.DNSSettings, error) {
-	return winnet.ConfiguredDNS(a)
+func (NativeBackend) DNS(a winnet.Adapter, ipv6 bool) (winnet.DNSSettings, error) {
+	return winnet.ConfiguredDNSFamily(a, ipv6)
 }
 func (NativeBackend) SetDNS(a winnet.Adapter, d winnet.DNSSettings) error {
 	return winnet.SetConfiguredDNS(a, d)
