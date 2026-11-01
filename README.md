@@ -134,11 +134,19 @@ macOS 的 `doctor` 会在 `port_checks` 中区分当前用户可绑定的端口�
 
 恢复入口不依赖网络，也不重新要求公司认证。运行目录与管理员恢复记录会保留到重启之后；本版尚未安装开机恢复服务，异常重启后需手动运行恢复入口。它仅恢复 NetLaunch 的改动，不负责重启此前手动关闭的其他软件。若报告恢复不完整，保留运行目录并再次执行 `down`；不要手工删除日志或路由。
 
+### 历史运行清理
+
+在管理员终端中执行 `netlaunch runs cleanup --profile DIR --run DIR/runs/netlaunch-ID` 预览可清理的文件数和字节数，确认后用同一命令加 `--apply` 执行。macOS 使用 `sudo ./netlaunch` 并明确传入普通用户的配置目录。命令只处理指定的一个历史运行，不按目录年龄批量删除，也不会停止进程或修改网络。
+
+只有管理员状态已记录恢复完成、所有记录的进程 ID 均不在使用、Windows 资源日志全部恢复时才允许清理。当前配置引用和 Windows 全局引用的运行、缺失恢复记录、未启动的 prepared 运行都会保留。清理删除两侧的 runtime 副本、日志和残留节点/会话/core 配置；冻结启动器、状态/配置快照、STOP、恢复入口和锁文件继续保留，目录本身不会删除。默认预览只建立互斥锁，不删除内容。中途失败可重试；不要手动删除剩余恢复记录。
+
 ## 工程开发
 
 新运行使用 v2 恢复存储：管理员目录中的 `run-spec.json` 保存一次不可变配置与启动身份，`state.json` 保存当前网络绑定、进程和资源恢复记录，并用摘要绑定该配置。每秒心跳改写独立的 `heartbeat.json`，不再重写完整配置或占用原生状态锁；`status.updated` 表示最近一次状态快照更新，不是实时心跳。旧 v1 运行继续按原格式恢复，不原地迁移；请保留每个运行自己的冻结程序、配置记录和日志，不要用旧程序直接处理 v2 状态。
 
 心跳分别记录进程存活与控制循环进展。运行就绪后，后台心跳不能掩盖超过 35 秒未推进的主循环；首次启动阶段给原生准备保留 90 秒进展窗口，原有睡眠唤醒宽限和 Windows 硬期限继续保留。独立恢复先验证并停止本次拥有的协调进程，再取得状态锁恢复资源，避免卡住的进程长期占锁；Mac 外部恢复会对完整身份匹配的协调进程使用 SIGKILL，子进程和网络资源仍依原有恢复日志处理，该原生变化需在 Mac 实机验收。任何原生变更仍必须先同步保存恢复意图，心跳拆分没有把这些记录改为异步写入。
+
+`status` 的旧 `stale` 键保留为 `snapshot_stale` 的兼容别名，并明确输出 `stale_scope: saved_snapshot`、`snapshot_age_seconds` 和 `runtime_liveness: not_checked`。它只标识非 stopped/prepared 快照是否超过 40 秒或时间无效，不能据此断言协调器卡住。进程与主循环超时仍由独立看门狗读取心跳判断；普通状态命令不会为读取管理员心跳弹出授权窗口。
 
 探针状态还带 `probe_scope`：`system_tun` 表示系统入口检查，`mixed_ingress` 表示本地代理入口检查。后者不能证明系统 TUN 接管已通过。固定核心的测速接口兼容性由 `TestPinnedCoreSeparatesPathLatencyFromServiceStatus` 检查；设置 `NETLAUNCH_TEST_RUNTIME` 后运行 engine 测试可执行回环 fixture。对应接口契约可查 [Mihomo v1.19.32 delay API](https://github.com/MetaCubeX/mihomo/blob/v1.19.32/hub/route/proxies.go)；组件升级需要重新运行实际 fixture，不能仅凭编译成功判断兼容。
 

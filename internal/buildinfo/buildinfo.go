@@ -8,7 +8,7 @@ import (
 )
 
 // Version is the single source for the CLI and distribution package names.
-const Version = "0.2.0-preview.1"
+const Version = "0.2.0-preview.2"
 
 type Info struct {
 	Version   string `json:"version"`

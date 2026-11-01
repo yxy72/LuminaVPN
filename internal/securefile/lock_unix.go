@@ -10,7 +10,17 @@ import (
 )
 
 func Lock(path string, timeout time.Duration) (func(), error) {
-	fd, err := syscall.Open(path, syscall.O_CREAT|syscall.O_RDWR|syscall.O_NOFOLLOW, 0600)
+	return lockUnix(path, timeout, syscall.O_CREAT)
+}
+
+// LockExisting avoids creating a root-owned lock in a user's profile when
+// an administrator performs maintenance. Normal startup creates that lock.
+func LockExisting(path string, timeout time.Duration) (func(), error) {
+	return lockUnix(path, timeout, 0)
+}
+
+func lockUnix(path string, timeout time.Duration, create int) (func(), error) {
+	fd, err := syscall.Open(path, create|syscall.O_RDWR|syscall.O_NOFOLLOW, 0600)
 	if err != nil {
 		return nil, err
 	}

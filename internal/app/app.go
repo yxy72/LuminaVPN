@@ -65,7 +65,7 @@ func (c CLI) Run(args []string) error {
 		c.Err = io.Discard
 	}
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" {
-		fmt.Fprintln(c.Out, "NetLaunch "+Version+"\nCommands: init, import, sync, plan, config validate|diff|apply|rollback|history, rules explain TARGET, doctor, check-runtime, auth, up, status, down, version, diagnostics export\nOptions: --profile DIR --runtime DIR; init --file POLICY_OR_BOOTSTRAP.json; import --file FILE; config validate|diff|apply --file POLICY.json; config apply|rollback --restart; config rollback --revision SHA256; up --prepare-only; version --json\nmacOS network lifecycle is experimental; config apply/rollback changes the next-start policy unless --restart is specified. Diagnostics exports allowlisted saved status to stdout; it does not check live network health.")
+		fmt.Fprintln(c.Out, "NetLaunch "+Version+"\nCommands: init, import, sync, plan, config validate|diff|apply|rollback|history, rules explain TARGET, doctor, check-runtime, auth, up, status, down, version, diagnostics export, runs cleanup\nOptions: --profile DIR --runtime DIR; init --file POLICY_OR_BOOTSTRAP.json; import --file FILE; config validate|diff|apply --file POLICY.json; config apply|rollback --restart; config rollback --revision SHA256; up --prepare-only; version --json; runs cleanup --profile DIR --run DIR [--apply] (administrator terminal)\nmacOS network lifecycle is experimental; config apply/rollback changes the next-start policy unless --restart is specified. Diagnostics exports allowlisted saved status to stdout; it does not check live network health.")
 		return nil
 	}
 	if args[0] == "version" {
@@ -73,6 +73,9 @@ func (c CLI) Run(args []string) error {
 	}
 	if args[0] == "diagnostics" {
 		return c.diagnostics(args[1:])
+	}
+	if args[0] == "runs" {
+		return c.cleanup(args[1:])
 	}
 	if args[0] == "config" || args[0] == "rules" {
 		return c.maintenance(args)
@@ -362,7 +365,7 @@ func (c CLI) status(o options) error {
 	if e != nil {
 		return e
 	}
-	return c.json(map[string]any{"run": run, "status": s, "stale": s.Phase != "stopped" && s.Phase != "prepared" && time.Since(s.Updated) > 40*time.Second})
+	return c.json(savedStatus(run, s, time.Now()))
 }
 func (c CLI) down(o options) error {
 	if !platform.Supported() {

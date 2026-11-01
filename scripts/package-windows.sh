@@ -28,5 +28,15 @@ cp -f "$NETLAUNCH_WIN_RUNTIME/certs/ca-bundle.crt" "$NETLAUNCH_PACKAGE/runtime/c
 cp -f "$NETLAUNCH_WIN_RUNTIME/notices/Go-LICENSE" "$NETLAUNCH_WIN_RUNTIME/notices/mihomo-LICENSE" "$NETLAUNCH_WIN_RUNTIME/notices/yaml-LICENSE" "$NETLAUNCH_WIN_RUNTIME/notices/windows-components.txt" "$NETLAUNCH_PACKAGE/runtime/notices/"
 cp -f "$NETLAUNCH_WIN_RUNTIME/notices/openconnect/COPYING.LGPL" "$NETLAUNCH_PACKAGE/runtime/notices/openconnect/"
 "$NETLAUNCH_BUILD_GO" run ./cmd/packagezip "$NETLAUNCH_PACKAGE" "$NETLAUNCH_PACKAGE.zip" windows
-(cd "$NETLAUNCH_PACKAGE/.." && shasum -a 256 "$(basename "$NETLAUNCH_PACKAGE").zip") > "$NETLAUNCH_PACKAGE.zip.sha256"
+(
+  cd "$NETLAUNCH_PACKAGE/.."
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$(basename "$NETLAUNCH_PACKAGE").zip"
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$(basename "$NETLAUNCH_PACKAGE").zip"
+  else
+    echo 'A SHA-256 checksum tool (shasum or sha256sum) is required.' >&2
+    exit 1
+  fi
+) > "$NETLAUNCH_PACKAGE.zip.sha256"
 echo "$NETLAUNCH_PACKAGE.zip"
