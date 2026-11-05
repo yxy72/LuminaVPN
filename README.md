@@ -4,6 +4,26 @@ macOS 与 Windows 的白名单网络 CLI 工程预览版本。CLI 与本机配�
 
 本版为工程预览：Mac 提供原生网络生命周期；Windows 普通构建只提供离线维护，`windows_home` 和 `windows_validation` 构建分别提供有限时长的家用与开发验证生命周期。用 `version --json` 确认手中程序的模式。当前架构改造的 Mac 原生运行验收尚待完成，交叉编译通过不能替代实机验证。使用前先用 `config validate`、`plan`、`doctor` 检查配置和环境。
 
+## 桌面工程预览
+
+`desktop/` 提供 Electron、React 和 TypeScript 客户端，采用 Jade Workspace 界面。当前阶段可以读取已有 CLI 配置、保存的三通道状态、下次启动的节点库存、分页规则、订阅摘要和运行组件检查。网络进程存活显示为尚未检查；检查证据超过 90 秒会自动过期。库存编号不代表冻结运行中的节点身份。
+
+本阶段连接、认证、导入、订阅同步和规则写入尚未开放；仍通过既有 CLI 操作。配置目录不存在时不会自动创建。通过工作空间设置的原生目录对话框选择已有 profile；活动或未确认运行须先完成停止与恢复，再选择其它配置。支持原生恢复的构建可在诊断页显示应用之外、绑定当前 profile 的独立恢复入口，显示入口不会执行恢复。Windows 离线桌面包不执行停止与恢复；请使用创建该运行的原 CLI 或运行目录中的冻结恢复入口，恢复完成前保留该目录。
+
+开发需要 Node.js 22.12+ 与 Go 1.26+；运行打包应用不需要安装开发工具。在 `desktop/` 执行：
+
+```sh
+npm ci
+npm run dev
+npm run package:mac
+```
+
+Go 不在 PATH 时，通过 `NETLAUNCH_GO` 指定构建工具。构建只读取固定 runtime；Windows 交叉打包使用 `LUMINA_BUILD_RUNTIME` 指向符合固定清单的 Windows runtime，再执行 `npm run package:win`。这些变量仅用于构建，发货应用不接受执行路径或页面 URL 覆盖。Windows 默认后端为离线模式，NSIS 安装向导默认选择当前用户安装。
+
+`npm run test:electron` 使用虚构配置检查只读桌面行为，并在本机实包存在时验证打包资源和窗口崩溃恢复。Windows 默认检查 `win-unpacked/LuminaVPN.exe`；验证已安装程序时，可将 `LUMINA_TEST_WINDOWS_EXE` 设为该程序的绝对路径。测试仅为新建的配置对象设置私有权限，不修改已有配置或系统网络。
+
+Mac `.app` 输出到已忽略的 `.local/desktop-packages/mac-arm64/`。使用 `scripts/check-desktop-package.py APP_PATH` 检查 ASAR 内容、运行组件摘要和恢复资源。`npm run sign:preview:mac` 验证运行组件签名并对 Electron 包做本地 ad hoc 签名；不会改变已校验的 runtime 字节，也不提供正式发布签名、公证或系统信任保证。当前关闭窗口隐藏到菜单栏；退出界面保留由 CLI 建立的网络运行。
+
 ## 网络规则
 
 - 公司精确域名与明确 IPv4 网段经公司 VPN。公司 DNS 也经公司 VPN。

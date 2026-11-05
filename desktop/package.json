@@ -1,0 +1,37 @@
+{
+  "name": "luminavpn-desktop",
+  "version": "0.2.0-preview.2",
+  "description": "LuminaVPN Jade Workspace desktop preview",
+  "private": true,
+  "main": "out/main/index.js",
+  "scripts": {
+    "build:backend": "node scripts/build-backend.mjs",
+    "build:ui": "electron-vite build",
+    "build": "npm run typecheck && npm run build:backend && npm run build:ui",
+    "typecheck": "tsc --noEmit",
+    "dev": "npm run build && electron .",
+    "start": "electron .",
+    "test": "vitest run",
+    "test:electron": "playwright test",
+    "package:mac": "npm run build && electron-builder --mac dir --arm64",
+    "sign:preview:mac": "sh ../scripts/sign-desktop-preview-macos.sh ../.local/desktop-packages/mac-arm64/LuminaVPN.app",
+    "package:win": "npm run typecheck && node scripts/build-backend.mjs --target windows/amd64 && npm run build:ui && electron-builder --win nsis --x64"
+  },
+  "dependencies": {
+    "lucide-react": "1.66.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.1",
+    "@types/node": "22.20.5",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "electron": "45.2.1",
+    "electron-builder": "26.18.0",
+    "electron-vite": "6.0.0",
+    "typescript": "7.0.2",
+    "vite": "8.3.5",
+    "vitest": "5.0.5"
+  }
+}

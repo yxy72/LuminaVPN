@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://luminavpn.example.com/desktop/protocol-1.json",
+  "title": "LuminaVPN read-only desktop protocol request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "method", "params"],
+  "properties": {
+    "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "method": { "enum": ["session.hello", "state.get", "profile.inspect", "nodes.list", "config.get", "subscriptions.summary", "environment.check", "recovery.describe"] },
+    "params": { "type": "object" }
+  },
+  "allOf": [
+    { "if": { "properties": { "method": { "const": "session.hello" } } }, "then": { "properties": { "params": { "type": "object", "additionalProperties": false, "required": ["protocol_major", "app_version"], "properties": { "protocol_major": { "const": 1 }, "app_version": { "type": "string", "maxLength": 64 } } } } } },
+    { "if": { "properties": { "method": { "enum": ["nodes.list", "config.get"] } } }, "then": { "properties": { "params": { "type": "object", "additionalProperties": false, "properties": { "offset": { "type": "integer", "minimum": 0, "maximum": 50000 }, "limit": { "type": "integer", "minimum": 1, "maximum": 100 } } } } }, "else": { "if": { "properties": { "method": { "not": { "const": "session.hello" } } } }, "then": { "properties": { "params": { "maxProperties": 0 } } } } }
+  ]
+}

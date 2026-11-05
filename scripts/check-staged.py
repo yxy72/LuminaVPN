@@ -15,11 +15,46 @@ def git(*args, check=True):
 
 def allowed_path(name):
     p = PurePosixPath(name)
+    if not p.parts:
+        return False
     if any(part.startswith('.') and part not in {'.gitignore', '.githooks'} for part in p.parts):
         return False
     if any(part in {'private', 'profiles', 'runtime', 'dist', '__pycache__'} for part in p.parts):
         return False
     if '.private.' in p.name or p.name.startswith('.env'):
+        return False
+    if p.parts[0] == 'desktop':
+        # Product source and fixed build/protocol files only. A desktop
+        # subtree is not permission to commit profiles, bundles or QA output.
+        excluded = {
+            'node_modules', 'resources', 'out', 'cache', 'test-results',
+            'test_results', 'playwright-report', 'coverage', 'reports',
+            'report', 'results', 'result', 'acceptance', 'acceptance-report',
+            'acceptance_report', '验收文档', '验收清单', '验收报告',
+        }
+        if any(part.lower() in excluded for part in p.parts):
+            return False
+        if re.match(r'^(?:acceptance(?:[-_.].*)?|验收.*|(?:test[-_])?(?:results?|reports?)(?:[-_.].*)?|coverage(?:[-_.].*)?)$', p.stem, re.I):
+            return False
+        fixed = {
+            'desktop/package.json', 'desktop/package-lock.json',
+            'desktop/tsconfig.json', 'desktop/electron.vite.config.ts',
+            'desktop/vitest.config.ts', 'desktop/playwright.config.ts',
+            'desktop/electron-builder.yml', 'desktop/scripts/build-backend.mjs',
+            'desktop/scripts/generate-icons.mjs', 'desktop/assets/icon.svg',
+            'desktop/protocol/types.ts', 'desktop/protocol/validation.ts',
+            'desktop/protocol/schema.json', 'desktop/protocol/fixtures.json',
+        }
+        if name in fixed:
+            return True
+        if len(p.parts) >= 4 and p.parts[:3] == ('desktop', 'src', 'renderer'):
+            return p.suffix in {'.ts', '.tsx', '.css', '.html'}
+        if len(p.parts) >= 4 and p.parts[:3] in {
+            ('desktop', 'src', 'main'), ('desktop', 'src', 'preload'),
+        }:
+            return p.suffix == '.ts'
+        if len(p.parts) >= 3 and p.parts[:2] == ('desktop', 'tests'):
+            return p.name.endswith(('.test.ts', '.electron.ts'))
         return False
     if name in {'.gitignore', 'README.md', 'THIRD_PARTY.md', 'LICENSE', 'LICENSE.md', 'AGENTS.md', 'go.mod', 'go.sum', '.githooks/pre-commit'}:
         return True

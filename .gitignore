@@ -21,3 +21,15 @@ profiles/
 *.zip
 coverage*
 __pycache__/
+
+# Desktop dependencies, compiled resources and local verification artifacts.
+node_modules/
+desktop/out/
+desktop/resources/
+desktop/.cache/
+desktop/.vite/
+*.map
+*.tsbuildinfo
+test-results/
+playwright-report/
+reports/

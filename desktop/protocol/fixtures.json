@@ -1,0 +1,16 @@
+{
+  "hello_request": { "id": "contract-1", "method": "session.hello", "params": { "protocol_major": 1, "app_version": "0.2.0-preview.2" } },
+  "state": {
+    "profile_configured": true,
+    "run_ref": "run-0123456789abcdef",
+    "status": {
+      "phase": "ready", "lifecycle": "running", "updated": "2026-11-02T04:00:00Z", "last_ready": "2026-11-02T03:59:00Z", "personal": "P001",
+      "channels": {
+        "company": { "state": "ready", "reason": "path_verified", "checked_at": "2026-11-02T04:00:00Z", "path_state": "verified", "service_state": "not_checked" },
+        "personal": { "state": "ready", "reason": "service_healthy", "checked_at": "2026-11-02T04:00:00Z", "path_state": "verified", "service_state": "healthy" },
+        "direct": { "state": "unknown", "reason": "probe_budget_expired", "checked_at": null, "path_state": "unknown", "service_state": "not_checked" }
+      }
+    },
+    "snapshot_stale": false, "snapshot_age_seconds": 0, "runtime_liveness": "not_checked", "recovery_required": false, "stop_requested": false, "observed_at": "2026-11-02T04:00:00Z"
+  }
+}

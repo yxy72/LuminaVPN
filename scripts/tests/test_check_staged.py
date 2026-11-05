@@ -11,6 +11,61 @@ spec.loader.exec_module(check)
 
 
 class SourceBoundaryTests(unittest.TestCase):
+    def test_desktop_icon_is_vector_source_with_a_fixed_build_script(self):
+        for name in ['desktop/assets/icon.svg', 'desktop/scripts/generate-icons.mjs']:
+            self.assertFalse(check.scan([(name, '100644', b'public product source')], set()))
+        for name in ['desktop/assets/icon.png', 'desktop/assets/private.svg', 'desktop/scripts/local-copy.mjs']:
+            self.assertTrue(check.scan([(name, '100644', b'local artifact')], set()))
+    def test_desktop_product_source_and_fixed_build_files_are_allowed(self):
+        names = [
+            'desktop/package.json', 'desktop/package-lock.json',
+            'desktop/tsconfig.json', 'desktop/electron.vite.config.ts',
+            'desktop/vitest.config.ts', 'desktop/playwright.config.ts',
+            'desktop/electron-builder.yml', 'desktop/scripts/build-backend.mjs',
+            'desktop/protocol/types.ts', 'desktop/protocol/validation.ts',
+            'desktop/protocol/schema.json', 'desktop/protocol/fixtures.json',
+            'desktop/src/main/bridge.ts', 'desktop/src/preload/index.ts',
+            'desktop/src/renderer/index.html', 'desktop/src/renderer/src/App.tsx',
+            'desktop/src/renderer/src/styles.css',
+            'desktop/src/renderer/src/evidence.ts',
+            'desktop/tests/protocol.test.ts', 'desktop/tests/app.electron.ts',
+        ]
+        for name in names:
+            with self.subTest(name=name):
+                self.assertFalse(check.scan([(name, '100644', b'public source')], set()))
+
+    def test_desktop_does_not_allow_arbitrary_subtrees_or_data_files(self):
+        names = [
+            'desktop/unexpected.json', 'desktop/protocol/local.json',
+            'desktop/tsconfig.private.json', 'desktop/profiles/policy.json',
+            'desktop/resources/backend/netlaunch', 'desktop/out/main/index.ts',
+            'desktop/node_modules/module/index.ts', 'desktop/.env',
+            'desktop/src/renderer/profile.json', 'desktop/src/renderer/logo.png',
+            'desktop/src/main/bridge.js', 'desktop/src/preload/index.html',
+            'desktop/tests/fixtures.json', 'desktop/tests/helper.ts',
+            'desktop/scripts/unexpected.mjs',
+        ]
+        for name in names:
+            with self.subTest(name=name):
+                self.assertTrue(check.scan([(name, '100644', b'local artifact')], set()))
+
+    def test_desktop_reports_cannot_masquerade_as_product_source(self):
+        names = [
+            'desktop/src/renderer/acceptance_report.ts',
+            'desktop/src/main/acceptance-report.ts',
+            'desktop/src/renderer/验收报告.tsx',
+            'desktop/src/renderer/report.ts',
+            'desktop/src/renderer/test_results.ts',
+            'desktop/src/renderer/reports/summary.ts',
+            'desktop/src/renderer/results/summary.ts',
+            'desktop/src/main/test-results/trace.ts',
+            'desktop/tests/acceptance_report.test.ts',
+            'desktop/tests/playwright-report/summary.electron.ts',
+        ]
+        for name in names:
+            with self.subTest(name=name):
+                self.assertTrue(check.scan([(name, '100644', b'local result')], set()))
+
     def test_public_windows_entries_have_a_narrow_allowlist(self):
         for name in ['scripts/package-windows.ps1', 'scripts/entries-windows/启动.cmd', 'scripts/entries-windows/诊断导出.cmd']:
             self.assertFalse(check.scan([(name, '100644', b'public launcher')], set()))

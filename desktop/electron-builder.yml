@@ -1,0 +1,35 @@
+appId: app.luminavpn.desktop
+productName: LuminaVPN
+asar: true
+directories:
+  output: ../.local/desktop-packages
+files:
+  - out/**/*
+  - package.json
+  - '!**/*.map'
+extraResources:
+  - from: resources/backend
+    to: backend
+  - from: resources/runtime
+    to: runtime
+  - from: resources/recovery
+    to: recovery
+  - from: resources/legal
+    to: legal
+mac:
+  icon: resources/icon.icns
+  category: public.app-category.utilities
+  identity: null
+  target:
+    - target: dir
+      arch: arm64
+win:
+  icon: resources/icon.ico
+  target:
+    - target: nsis
+      arch: x64
+nsis:
+  oneClick: false
+  perMachine: false
+  selectPerMachineByDefault: false
+  allowToChangeInstallationDirectory: true

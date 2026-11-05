@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="jade" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2f8067"/>
+      <stop offset="1" stop-color="#17614a"/>
+    </linearGradient>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="196" fill="url(#jade)"/>
+  <g fill="none" stroke="#fff" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M512 222 242 726h540L512 222Z" stroke-width="36"/>
+    <path d="m512 420-126 234h252L512 420Z" stroke-width="28"/>
+    <path d="M512 546v270M332 834h360" stroke-width="22"/>
+  </g>
+</svg>
