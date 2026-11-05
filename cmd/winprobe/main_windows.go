@@ -47,60 +47,85 @@ func manager(files securefile.AdminStore, id string) winstate.Manager {
 	return winstate.Manager{Store: probeStore{winstate.NativeStorage{Files: files, RunID: id}}, Native: winstate.NativeBackend{}}
 }
 
-func recoverProbe(files securefile.AdminStore, id, reason string) error {
+func recoverProbe(files securefile.AdminStore, id, reason string) (resultErr error) {
 	unlock, e := files.Lock(filepath.Join(id, "probe-recovery.lock"), 15*time.Second)
 	if e != nil {
 		return e
 	}
 	defer unlock()
-	var p plan
-	if e = read(files, id, "probe-plan.json", &p); e != nil {
-		return e
-	}
-	if p.Owner.PID == os.Getpid() {
-		return errors.New("recovery must run independently")
-	}
-	// Kill only the published native identity, and await exit before rollback:
-	// a stalled writer cannot resume and install changes after recovery.
-	actual, e := platform.Process(p.Owner.PID)
-	if e != nil {
-		return e
-	}
-	if actual == p.Owner {
-		if e = platform.StopIdentity(p.Owner); e != nil {
-			return e
-		}
-	}
-	until := time.Now().Add(10 * time.Second)
-	for {
-		actual, err := platform.Process(p.Owner.PID)
-		if err != nil {
-			return err
-		}
-		if actual != p.Owner {
-			break
-		}
-		if time.Now().After(until) {
-			return errors.New("probe owner did not exit")
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	if e = restoreRouteMutation(files, id); e != nil {
-		return fmt.Errorf("restore fixture mutation: %w", e)
-	}
-	if e = manager(files, id).Recover(); e != nil {
-		return fmt.Errorf("recover network journal: %w", e)
-	}
-	if e = releaseAdapter(files, id); e != nil {
-		return fmt.Errorf("release probe adapter: %w", e)
-	}
-	// Repeated manual verification must not erase the original timeout/exit
-	// evidence. Recovery above still rechecks the journal and adapter closure.
-	var previous map[string]any
-	if read(files, id, "probe-result.json", &previous) == nil && previous["recovered"] == true {
-		return nil
-	}
-	return files.Write(filepath.Join(id, "probe-result.json"), map[string]any{"recovered": true, "reason": reason, "finished": time.Now()})
+	started := time.Now()
+	return withProbeRecoveryHistory(func() (map[string]any, error) {
+		var previous map[string]any
+		err := read(files, id, "probe-result.json", &previous)
+		return previous, err
+	}, func(previous map[string]any, historyErr error) error {
+		return withProbeCleanupDiagnostics(func() (*probeEvents, error) {
+			return newProbeEvents(files, id, "recover")
+		}, func(log *probeEvents) (resultErr error) {
+			defer func() {
+				// Optional stopping diagnostics never gate resource cleanup, but
+				// their retained errors do gate the final validation outcome.
+				resultErr = errors.Join(resultErr, checkProbeDiagnosticFailures(files, id))
+				finished := time.Now()
+				resultErr = errors.Join(resultErr, historyErr)
+				resultErr = log.finish("recovery", resultErr)
+				attempt := map[string]any{"reason": reason, "started": started, "finished": finished, "recovered": resultErr == nil}
+				if resultErr != nil {
+					attempt["error"] = resultErr.Error()
+				}
+				// Each attempt gets its own durable file, including later manual runs.
+				attemptPath := filepath.Join(id, fmt.Sprintf("probe-recovery-%d-%d.json", os.Getpid(), started.UnixNano()))
+				resultErr = errors.Join(resultErr, files.Write(attemptPath, attempt))
+				if historyErr == nil {
+					merged := mergeRecoveryResult(previous, reason, resultErr, finished)
+					resultErr = errors.Join(resultErr, files.Write(filepath.Join(id, "probe-result.json"), merged))
+				} // Preserve an unreadable original; this unique attempt holds the failure.
+
+			}()
+			var p plan
+			if e = read(files, id, "probe-plan.json", &p); e != nil {
+				return e
+			}
+			if p.Owner.PID == os.Getpid() {
+				return errors.New("recovery must run independently")
+			}
+			// Kill only the published native identity, and await exit before rollback:
+			// a stalled writer cannot resume and install changes after recovery.
+			actual, e := platform.Process(p.Owner.PID)
+			if e != nil {
+				return e
+			}
+			if actual == p.Owner {
+				if e = platform.StopIdentity(p.Owner); e != nil {
+					return e
+				}
+			}
+			until := time.Now().Add(10 * time.Second)
+			for {
+				actual, err := platform.Process(p.Owner.PID)
+				if err != nil {
+					return err
+				}
+				if actual != p.Owner {
+					break
+				}
+				if time.Now().After(until) {
+					return errors.New("probe owner did not exit")
+				}
+				time.Sleep(50 * time.Millisecond)
+			}
+			if e = restoreRouteMutation(files, id); e != nil {
+				return fmt.Errorf("restore fixture mutation: %w", e)
+			}
+			if e = manager(files, id).Recover(); e != nil {
+				return fmt.Errorf("recover network journal: %w", e)
+			}
+			if e = releaseAdapter(files, id); e != nil {
+				return fmt.Errorf("release probe adapter: %w", e)
+			}
+			return nil
+		})
+	})
 }
 
 func watch(files securefile.AdminStore, id string) error {
@@ -124,50 +149,68 @@ func watch(files securefile.AdminStore, id string) error {
 	}
 	timer := time.NewTimer(duration)
 	defer timer.Stop()
+	log, e := newProbeEvents(files, id, "watch")
+	if e != nil {
+		return e
+	}
 	// Publication is the barrier: no experiment may start before this file.
 	if e = files.Write(filepath.Join(id, "probe-ready.json"), true); e != nil {
 		return e
 	}
 	tick := time.NewTicker(100 * time.Millisecond)
 	defer tick.Stop()
-	for {
-		select {
-		case <-timer.C:
-			return automaticRecover(files, id, "deadline")
-		case <-tick.C:
-			var result map[string]any
-			if read(files, id, "probe-result.json", &result) == nil && result["recovered"] == true {
-				return nil
-			}
-			actual, err := platform.Process(p.Owner.PID)
-			if err != nil {
-				return err
-			}
-			if actual != p.Owner {
-				return automaticRecover(files, id, "owner_exited")
-			}
+	lastQueryError := ""
+	return monitorProbeOwner(p.Owner, timer.C, tick.C, func() bool {
+		var result map[string]any
+		return read(files, id, "probe-result.json", &result) == nil && result["recovered"] == true
+	}, platform.Process, func(reason string) error {
+		return automaticRecover(files, id, reason)
+	}, func(err error) {
+		if err.Error() != lastQueryError {
+			_ = log.add("query_owner", "error", map[string]any{"error": err.Error(), "deadline_remains_armed": true})
+			lastQueryError = err.Error()
 		}
-	}
+	})
 }
 
 // Native resource disappearance can lag process exit. Preserve the first
 // failure and retry the same ownership-checked recovery once, independently
 // of the launching session. A retry never broadens cleanup authority.
-func automaticRecover(files securefile.AdminStore, id, reason string) error {
-	for attempt := 1; attempt <= 2; attempt++ {
-		e := recoverProbe(files, id, reason)
-		if e == nil {
-			return nil
+func automaticRecover(files securefile.AdminStore, id, reason string) (automaticErr error) {
+	resourcesRecovered := false
+	defer func() {
+		// Every failed attempt disqualifies clean automatic validation, even
+		// if a concurrent watcher or a later retry has finished resource cleanup.
+		var current map[string]any
+		if err := read(files, id, "probe-result.json", &current); err != nil {
+			automaticErr = errors.Join(automaticErr, err)
+		} else {
+			automaticErr = automaticRecoveryQualification(current, automaticErr)
 		}
-		writeErr := files.Write(filepath.Join(id, fmt.Sprintf("probe-recovery-attempt-%d.json", attempt)), map[string]any{
-			"reason": reason, "attempt": attempt, "error": e.Error(), "time": time.Now(),
+		candidate := mergeRecoveryResult(nil, reason, automaticErr, time.Now())
+		candidate["resources_recovered"] = resourcesRecovered
+		original, err := publishFirstAutomaticResult(func() (func(), error) {
+			return files.Lock(filepath.Join(id, "probe-automatic-result.lock"), 5*time.Second)
+		}, func() (map[string]any, error) {
+			var result map[string]any
+			err := read(files, id, "probe-automatic-result.json", &result)
+			return result, err
+		}, func(result map[string]any) error {
+			return files.Write(filepath.Join(id, "probe-automatic-result.json"), result)
+		}, candidate)
+		automaticErr = errors.Join(automaticErr, err)
+		if err == nil && original["recovered"] != true {
+			automaticErr = errors.Join(automaticErr, errAutomaticRecoveryPreviouslyFailed)
+		}
+	}()
+	resourcesRecovered, automaticErr = runAutomaticRecoveryAttempts(func() error {
+		return recoverProbe(files, id, reason)
+	}, func(attempt int, err error) error {
+		return files.Write(filepath.Join(id, fmt.Sprintf("probe-recovery-attempt-%d.json", attempt)), map[string]any{
+			"reason": reason, "attempt": attempt, "error": err.Error(), "time": time.Now(),
 		})
-		if writeErr != nil || attempt == 2 {
-			return errors.Join(e, writeErr)
-		}
-		time.Sleep(time.Second)
-	}
-	return nil
+	}, func() { time.Sleep(time.Second) })
+	return automaticErr
 }
 
 func idle(files securefile.AdminStore, ttl time.Duration, earlyExit bool, stage, runtimeRoot, fault string) error {

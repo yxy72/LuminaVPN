@@ -220,6 +220,8 @@ Windows 开发时可用 `go build -o .local/winprobe.exe ./cmd/winprobe` 构建�
 
 `adapter` 仅创建本轮测试网卡；`native` 检查指定网卡的文档 IPv4 地址、路由、DNS、TCP/UDP 和链路本地 IPv6 保护；`pair` 检查两张测试网卡的成对路由；`mutation` 在成对路由的基础上修改测试路由的 metric，检查拒绝新连接、拒删外部变更及保留捕获/保护规则，再按独立的测试修改记录清理。它们不认证公司 VPN，也不接管默认流量。`pair` 可选 `--fault pair-planned|pair-capture-applied|pair-vpn-applied|pair-retiring|pair-vpn-restored`；`mutation` 可选 `--fault route-replaced`。故障点会立即退出，以检查独立恢复。恢复遇到错误会保留诊断并有限重试，仍按原有所有权检查执行。结果仅证明对应受控场景，不会启用标准构建的 Windows 网络启动开关。
 
+探针的 `probe-automatic-result.json` 保留首次自动恢复结论，`probe-result.json` 记录最近恢复结果并保留首次失败；后续手动恢复成功不会改写首次自动结论。资源最终已清理与限时正常关闭是两个独立结果。每轮私有目录还保存 Wintun 生命周期、精确网卡身份和 holder 结局；网卡处于 Down、进程退出或查询失败均不代表设备已移除。
+
 完整生命周期的开发试验需用 `go build -tags windows_validation -o .local/netlaunch-validation.exe ./cmd/netlaunch` 单独构建，并在 `up` 时显式提供 `--validation-timeout`（1 秒至 45 分钟，可搭配 `--prepare-only`）。该时间从管理员保护目录中的协调器发布时开始计时，不能续期；独立看门狗先就绪，再允许协调器执行，期限到达即撤销本轮资源。标准构建仍关闭 Windows 网络启动。切换既有客户端时，还需预先准备独立的本机恢复任务，负责恢复这些客户端；候选程序的资源日志仅负责自己的变更。验证构建并不表示整体验收完成。
 
 Windows 验证构建分别记录并接管物理网卡的 IPv4、IPv6 DNS，防止系统经另一协议栈解析而失去 TUN 所需的域名映射。IPv6 DNS 入口仅监听 `[::1]:53`，通过有并发和时间限制的 TCP/UDP 转发连接本机核心；端口冲突时拒绝启动。两类 DNS 各自保存原始自动或静态设置，恢复时分别检查外部改动，不修改全局 IPv6 开关或其他网卡的 DNS。

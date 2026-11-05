@@ -47,14 +47,16 @@ func pairFaultMatches(fault string, pair winstate.PairChange) bool {
 }
 
 func (s probeStore) Save(j winstate.Journal) error {
-	if e := s.NativeStorage.Save(j); e != nil {
-		return e
-	}
+	return saveProbeJournalWithDiagnostics(j, s.NativeStorage.Save, s.saveTransitions, func(err error) {
+		recordProbeDiagnosticFailure(s.Files, s.RunID, err)
+	})
+}
+
+func appendProbeTransitions(j winstate.Journal, load func() ([]transition, error), save func([]transition) error) error {
 	if len(j.Pairs) == 0 {
 		return nil
 	}
-	var events []transition
-	e := read(s.Files, s.RunID, "probe-transitions.json", &events)
+	events, e := load()
 	if e != nil && !errors.Is(e, os.ErrNotExist) {
 		return e
 	}
@@ -64,17 +66,33 @@ func (s probeStore) Save(j winstate.Journal) error {
 	for _, p := range j.Pairs {
 		events = append(events, transition{p.Capture.State, p.VPN.State, p.Retiring})
 	}
-	if e = s.Files.Write(filepath.Join(s.RunID, "probe-transitions.json"), events); e != nil {
+	return save(events)
+}
+
+func (s probeStore) saveTransitions(j winstate.Journal) error {
+	if len(j.Pairs) == 0 {
+		return nil
+	}
+	if e := appendProbeTransitions(j, func() ([]transition, error) {
+		var events []transition
+		err := read(s.Files, s.RunID, "probe-transitions.json", &events)
+		return events, err
+	}, func(events []transition) error {
+		return s.Files.Write(filepath.Join(s.RunID, "probe-transitions.json"), events)
+	}); e != nil {
 		return e
+	}
+	if j.Stopping {
+		return nil // Recovery does not execute owner fault-injection hooks.
 	}
 	var p plan
-	if e = read(s.Files, s.RunID, "probe-plan.json", &p); e != nil {
+	if e := read(s.Files, s.RunID, "probe-plan.json", &p); e != nil {
 		return e
 	}
-	if !j.Stopping && p.Owner.PID == os.Getpid() && validPairFault(p.Fault) {
+	if p.Owner.PID == os.Getpid() && validPairFault(p.Fault) {
 		for _, pair := range j.Pairs {
 			if pairFaultMatches(p.Fault, pair) {
-				if e = s.Files.Write(filepath.Join(s.RunID, "probe-fault-triggered.json"), map[string]any{"fault": p.Fault, "time": time.Now()}); e != nil {
+				if e := s.Files.Write(filepath.Join(s.RunID, "probe-fault-triggered.json"), map[string]any{"fault": p.Fault, "time": time.Now()}); e != nil {
 					return e
 				}
 				os.Exit(42) // Deliberate abrupt exit: no deferred cleanup.
@@ -85,17 +103,7 @@ func (s probeStore) Save(j winstate.Journal) error {
 }
 
 func secondAdapter(files securefile.AdminStore, id string) (winnet.Adapter, error) {
-	var a winnet.Adapter
-	until := time.Now().Add(15 * time.Second)
-	for {
-		if read(files, id, "probe-adapter-tun.json", &a) == nil {
-			return a, nil
-		}
-		if time.Now().After(until) {
-			return a, errors.New("second adapter timeout")
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
+	return readyProbeAdapter(files, id, "-tun")
 }
 
 func exercisePair(files securefile.AdminStore, id string, vpn winnet.Adapter) error {
