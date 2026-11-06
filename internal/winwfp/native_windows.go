@@ -92,9 +92,16 @@ func call(name string, args ...uintptr) error {
 	if e := p.Find(); e != nil {
 		return e
 	}
-	code, _, _ := p.Call(args...)
+	raw, _, _ := p.Call(args...)
+	return wfpCallResult(name, raw)
+}
+
+// FWPM status returns are DWORDs. On x64 the unused upper register bits are
+// undefined, so normalize before both the success check and Errno wrapping.
+func wfpCallResult(name string, raw uintptr) error {
+	code := windows.Errno(uint32(raw))
 	if code != 0 {
-		return fmt.Errorf("%s: %w", name, windows.Errno(code))
+		return fmt.Errorf("%s: status=0x%08x raw=0x%016x: %w", name, uint32(code), raw, code)
 	}
 	return nil
 }

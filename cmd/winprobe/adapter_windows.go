@@ -16,7 +16,6 @@ import (
 	"netlaunch/internal/winwfp"
 	"os"
 	"path/filepath"
-	"runtime"
 	"syscall"
 	"time"
 	"unsafe"
@@ -115,7 +114,11 @@ func holdAdapterResources(files securefile.AdminStore, id, role string, log *pro
 	if e != nil {
 		return e
 	}
-	defer func() { resultErr = errors.Join(resultErr, dll.Release()) }()
+	// Wintun 0.14.1 queues DLL-backed orphan cleanup after Create/Close and
+	// provides no join API. This dedicated holder retains the module reference
+	// until process exit; FreeLibrary here can unload a queued callback's code
+	// and heap. The OS releases the module when this bounded holder exits;
+	// adapter disappearance is checked separately below.
 	create, e := dll.FindProc("WintunCreateAdapter")
 	if e != nil {
 		return e
@@ -154,7 +157,8 @@ func holdAdapterResources(files securefile.AdminStore, id, role string, log *pro
 		return 0
 	})
 	setLogger.Call(callback)
-	defer func() { setLogger.Call(0); runtime.KeepAlive(callback) }()
+	// Keep the logger registered for the same process lifetime as the module,
+	// including its queued cleanup. NewCallback retains its Go function.
 	n, _ := windows.UTF16PtrFromString(name)
 	kind, _ := windows.UTF16PtrFromString("LuminaProbe")
 	guid, e := windows.GenerateGUID()
@@ -162,6 +166,7 @@ func holdAdapterResources(files securefile.AdminStore, id, role string, log *pro
 		return e
 	}
 	intent := winnet.Adapter{Name: name, GUID: guid.String()}
+	expected := intent
 	if e = files.Write(filepath.Join(id, "probe-adapter-intent"+role+".json"), struct {
 		winnet.Adapter
 		CreationStarted time.Time `json:"creation_started"`
@@ -176,9 +181,9 @@ func holdAdapterResources(files securefile.AdminStore, id, role string, log *pro
 		return log.finish("CreateAdapter", fmt.Errorf("create probe adapter: %w", err))
 	}
 	defer func() {
-		beginErr := log.add("CloseAdapter", "begin", nil)
-		closeAdapter.Call(h) // VOID: a returned call is not proof of removal.
-		resultErr = errors.Join(resultErr, beginErr, log.add("CloseAdapter", "returned", map[string]any{"returns_void": true}))
+		resultErr = errors.Join(resultErr, closeProbeAdapterAndConfirm(expected, func() {
+			closeAdapter.Call(h) // VOID: a returned call is not proof of removal.
+		}, log.add, waitProbeAdapterAbsent, time.Now))
 	}()
 	if e = log.add("CreateAdapter", "completed", nil); e != nil {
 		return e
@@ -193,6 +198,7 @@ func holdAdapterResources(files securefile.AdminStore, id, role string, log *pro
 	if adapter.GUID != intent.GUID || adapter.Name != name {
 		return errors.New("created adapter identity differs from published intent")
 	}
+	expected = adapter
 	if e = files.Write(filepath.Join(id, "probe-adapter"+role+".json"), adapter); e != nil {
 		return e
 	}
