@@ -11,5 +11,16 @@ func validateRegistryDescriptor(owner string, entries []protectedACE, trustedIns
 		additional[trustedInstaller] = true
 	}
 	trusted := owner == "S-1-5-18" || owner == "S-1-5-32-544" || (trustedInstaller != "" && owner == trustedInstaller)
-	return validateDescriptorWriters(trusted, entries, registryWriteMask, additional)
+	applicable := make([]protectedACE, 0, len(entries))
+	for _, entry := range entries {
+		// CREATOR OWNER is an inheritance placeholder, not an effective SID for
+		// this key's owner (OWNER RIGHTS). A child ACE resolved to the creator's
+		// actual SID must still pass the ordinary writer checks. Recognize only
+		// allow templates marked CONTAINER_INHERIT, even when IO is absent.
+		if entry.Kind == 0 && entry.Flags&0x02 != 0 && entry.SID == "S-1-3-0" {
+			continue
+		}
+		applicable = append(applicable, entry)
+	}
+	return validateDescriptorWriters(trusted, applicable, registryWriteMask, additional)
 }

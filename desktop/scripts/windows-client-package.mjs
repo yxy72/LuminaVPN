@@ -81,11 +81,13 @@ export function installerInclude(releaseID, { bootstrapSource, bootstrapSHA256, 
 !include "x64.nsh"
 !define LUMINA_BOOTSTRAP_SOURCE "${source}"
 !define LUMINA_BOOTSTRAP_SHA256 "${bootstrapSHA256}"
-!include "${protectedInclude}"
 ; Keep electron-builder's normal installer/uninstaller generation, but remove
 ; its elevated HKCU migration branch from the actual compiled install section.
 !addincludedir "${templates}"
 !macro customHeader
+  ; Expand plugin-using functions only after the builder has registered its
+  ; plugin directories; re-registering an already used System.dll is rejected.
+  !include "${protectedInclude}"
   ; The template first loads its own multiUser.nsh from the original CWD.
   ; Moving earlier can select NSIS's unrelated, case-insensitive MultiUser.nsh.
   !ifndef BUILD_UNINSTALLER
@@ -323,7 +325,7 @@ function runNode(script, args, cwd) {
   if (result.error || result.signal || result.status !== 0) throw new Error('Windows client build step failed')
 }
 
-export function validateInstallPlan(plan) {
+function validateInstallPlanShape(plan) {
   const fields = ['version', 'schema', 'service_name', 'image_kind', 'image_relative', 'account', 'auto_connect',
     'requires_review', 'installed', 'service_arguments', 'supported_entries', 'bootstrap_available',
     'recovery_service_name', 'recovery_arguments', 'target_preflight', 'target_root', 'data_root']
@@ -345,10 +347,30 @@ export function validateInstallPlan(plan) {
       || !Array.isArray(plan.recovery_arguments) || plan.recovery_arguments.length !== 1 || plan.recovery_arguments[0] !== '--recover-service'
       || !Array.isArray(plan.supported_entries) || plan.supported_entries.length !== entries.length
       || new Set(plan.supported_entries).size !== entries.length || entries.some(entry => !plan.supported_entries.includes(entry))
-      || !['absent', 'protected'].includes(plan.target_preflight)
+      || !['absent', 'protected', 'unsafe'].includes(plan.target_preflight)
       || !nativeRoot(plan.target_root, '\\LuminaVPN') || !nativeRoot(plan.data_root, '\\LuminaVPN\\ServiceState')) {
     throw new Error('Service bootstrap/recovery contract is not ready for packaging')
   }
+}
+
+export function validateInstallPlan(plan) {
+  validateInstallPlanShape(plan)
+  if (!['absent', 'protected'].includes(plan.target_preflight)) {
+    throw new Error('Service bootstrap/recovery contract is not ready for packaging')
+  }
+}
+
+// Packaging checks the executable contract, not permission to install on the
+// build host. Runtime Go/NSIS preflight still requires an independently observed
+// safe target and a zero exit before resume or any previous uninstaller runs.
+export function validateBuildInstallPlanResult(result) {
+  if (!result || result.error != null || result.signal != null || ![0, 1].includes(result.status)
+      || typeof result.stdout !== 'string') throw new Error('Cannot inspect the service installation contract')
+  const plan = JSON.parse(result.stdout)
+  validateInstallPlanShape(plan)
+  const preflightPassed = plan.target_preflight !== 'unsafe'
+  if (result.status !== (preflightPassed ? 0 : 1)) throw new Error('Service installation plan and exit status disagree')
+  return { native_preflight_passed: preflightPassed, exit_status: result.status, plan }
 }
 
 export function validateBuildTags(text, mode) {
@@ -371,12 +393,12 @@ function verifyBuildInterface(staged, mode, goPath) {
     validateBuildTags(metadata.stdout, mode)
   }
   // The only payload invocation during packaging is this read-only fixed verb.
-  // Older partially implemented bootstrap interfaces deliberately fail here.
+  // Older partially implemented bootstrap interfaces deliberately fail here;
+  // a complete contract may report that this build host cannot install it.
   const result = spawnSync(join(staged.releaseRoot, 'lumina-service.exe'), ['--print-install-plan'], {
     shell: false, encoding: 'utf8', windowsHide: true, timeout: 10_000, maxBuffer: 64 << 10,
   })
-  if (result.error || result.signal || result.status !== 0) throw new Error('Cannot inspect the service installation contract')
-  validateInstallPlan(JSON.parse(result.stdout))
+  return validateBuildInstallPlanResult(result)
 }
 
 async function main() {
@@ -398,7 +420,16 @@ async function main() {
   const output = join(base, randomUUID())
   await mkdir(output)
   const staged = await stageWindowsRelease({ repoRoot, ...options, outputRoot: join(output, 'release') })
-  verifyBuildInterface(staged, options.mode, options.goPath)
+  const hostReadiness = verifyBuildInterface(staged, options.mode, options.goPath)
+  // Local evidence only: outside release, payload and every packaged resource.
+  await put(output, 'build-host-readiness.json', Buffer.from(JSON.stringify({
+    schema: 'lumina-build-host-readiness-v1', observed_at: new Date().toISOString(),
+    build_mode: options.mode, release_id: staged.releaseID,
+    service_sha256: staged.catalog.files.service.sha256, ...hostReadiness,
+  }, null, 2) + '\n'))
+  if (!hostReadiness.native_preflight_passed) {
+    process.stderr.write('WARNING build-host-not-installable: native preflight is unsafe (exit 1); packaging does not authorize installation.\n')
+  }
   const prepared = await prepareWindowsClientPackage({ releaseStage: staged.outputRoot, outputRoot: join(output, 'payload') })
   const icons = join(output, 'icons')
   await generateIcons(icons, 'windows')
@@ -414,5 +445,11 @@ async function main() {
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  main().catch(error => { process.stderr.write((error instanceof Error ? error.message : 'Windows client packaging failed') + '\n'); process.exitCode = 1 })
+  main().catch(error => {
+    process.stderr.write((error instanceof Error ? error.message : 'Windows client packaging failed') + '\n')
+    process.exitCode = 1
+    // Match electron-builder's CLI: its asynchronous cleanup hook can call
+    // process.exit(0), so preserve the failure after cleanup reaches exit.
+    process.on('exit', () => { process.exitCode = 1 })
+  })
 }

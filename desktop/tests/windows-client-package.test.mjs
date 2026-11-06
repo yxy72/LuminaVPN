@@ -7,7 +7,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 import { installerInclude, prepareWindowsClientPackage, recoveryEntry, removeUserUninstallerMigration, validateBuildTags,
-  validateInstallPlan, windowsClientConfiguration, writeWindowsClientConfiguration } from '../scripts/windows-client-package.mjs'
+  validateBuildInstallPlanResult, validateInstallPlan, windowsClientConfiguration, writeWindowsClientConfiguration } from '../scripts/windows-client-package.mjs'
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex')
 async function put(root, path, bytes) {
@@ -131,7 +131,7 @@ test('the compiled install section cannot migrate an elevated per-user uninstall
   assert.throws(() => removeUserUninstallerMigration(original.replace('HKEY_CURRENT_USER', 'changed')), /branch changed/)
 })
 
-test('the template keeps its own include directory until the installer-only customHeader hook', async t => {
+test('customHeader defers protected plugin functions and keeps the template include directory until loaded', async t => {
   const f = await fixture(t), prepared = await prepareWindowsClientPackage(f)
   const require = createRequire(import.meta.url)
   const templateRoot = join(dirname(require.resolve('app-builder-lib/package.json')), 'templates/nsis')
@@ -144,6 +144,13 @@ test('the template keeps its own include directory until the installer-only cust
   const include = await readFile(prepared.includePath, 'utf8')
   const start = include.indexOf('!macro customHeader'), end = include.indexOf('!macroend', start)
   assert.ok(start >= 0 && end > start)
+  const protectedIncludes = [...include.matchAll(/!include "[^"\r\n]*windows-client-bootstrap\.nsh"/g)]
+  assert.equal(protectedIncludes.length, 1)
+  assert.ok(protectedIncludes[0].index > start && protectedIncludes[0].index < end,
+    'plugin functions must be expanded by customHeader after the shared plugin directories, never while defining hooks')
+  assert.ok(protectedIncludes[0].index < include.indexOf('!ifndef BUILD_UNINSTALLER', start),
+    'both native installer and uninstaller branches require the protected functions')
+  assert.ok(protectedIncludes[0].index < include.indexOf('!cd ', start))
   assert.ok(!include.slice(0, start).includes('!cd '), 'shared header must not change CWD before builder includes')
   assert.match(include.slice(start, end), /!ifndef BUILD_UNINSTALLER\s+!cd "[^"\r\n]+"\s+!endif/)
   assert.equal((include.match(/!cd /g) ?? []).length, 1)
@@ -255,10 +262,91 @@ test('the Go v1 install plan fixture keeps all 17 fields and explicit review req
   assert.throws(() => validateInstallPlan(missingField), /contract is not ready/)
 })
 
+function buildContractPlan() {
+  return { version: 1, schema: 'lumina-service-install-v1', service_name: 'LuminaVPNService', image_kind: 'service',
+    image_relative: 'releases/<reviewed-release>/lumina-service.exe', account: 'LocalSystem with an explicit service SID',
+    auto_connect: false, requires_review: true, installed: false, bootstrap_available: true,
+    recovery_service_name: 'LuminaVPNRecoveryService', recovery_arguments: ['--recover-service'],
+    service_arguments: ['--service'], supported_entries: ['--bootstrap', '--service', '--recover', '--recover-service', '--uninstall', '--print-install-plan', '--resume-install-preflight'],
+    target_preflight: 'unsafe', target_root: 'C:\\Program Files\\LuminaVPN', data_root: 'C:\\ProgramData\\LuminaVPN\\ServiceState' }
+}
+
+test('build-only contract validation preserves the native unsafe observation and strict installer rejection', () => {
+  for (const [state, status, preflightPassed] of [['absent', 0, true], ['protected', 0, true], ['unsafe', 1, false]]) {
+    const plan = { ...buildContractPlan(), target_preflight: state }, stdout = JSON.stringify(plan)
+    const result = { status, signal: null, stdout }
+    const observation = validateBuildInstallPlanResult(result)
+    assert.deepEqual(observation, { native_preflight_passed: preflightPassed, exit_status: status, plan })
+    assert.equal(result.stdout, stdout, 'the native plan must not be rewritten for packaging')
+    if (state === 'unsafe') assert.throws(() => validateInstallPlan(observation.plan), /contract is not ready/)
+  }
+})
+
+test('build-only contract rejects inconsistent exits and process failures despite valid JSON', () => {
+  const plan = buildContractPlan(), result = { status: 1, signal: null, stdout: JSON.stringify(plan) }
+  for (const patch of [{ status: 0 }, { status: 2 }, { status: -1 }, { status: null }, { status: undefined }, { status: '1' },
+    { error: new Error('spawn failed') }, { error: Object.assign(new Error('timed out'), { code: 'ETIMEDOUT' }) },
+    { signal: 'SIGTERM' }, { signal: 'SIGKILL' },
+    { stdout: JSON.stringify({ ...plan, target_preflight: 'absent' }) },
+    { stdout: JSON.stringify({ ...plan, target_preflight: 'protected' }) }]) {
+    assert.throws(() => validateBuildInstallPlanResult({ ...result, ...patch }))
+  }
+  assert.throws(() => validateBuildInstallPlanResult(null))
+})
+
+test('unsafe build observations must still satisfy the entire fixed interface and native path contract', () => {
+  const plan = buildContractPlan()
+  for (const patch of [{ target_preflight: 'unknown' }, { target_preflight: '' },
+    { supported_entries: plan.supported_entries.filter(entry => entry !== '--resume-install-preflight') },
+    { supported_entries: [...plan.supported_entries.slice(0, 6), '--exec'] },
+    { version: 2 }, { bootstrap_available: false }, { service_arguments: ['--service', 'user-path'] },
+    { recovery_arguments: ['--recover-service', 'user-path'] }, { arbitrary_command: '--exec' },
+    { target_root: 'LuminaVPN' }, { target_root: '\\\\server\\share\\LuminaVPN' },
+    { target_root: 'C:\\Program Files\\..\\Temp\\LuminaVPN' }, { data_root: 'C:\\ProgramData\\OtherService' }]) {
+    assert.throws(() => validateBuildInstallPlanResult({ status: 1, stdout: JSON.stringify({ ...plan, ...patch }) }))
+  }
+  const { data_root, ...missingField } = plan
+  assert.throws(() => validateBuildInstallPlanResult({ status: 1, stdout: JSON.stringify(missingField) }))
+})
+
+test('build-only contract refuses malformed or missing stdout instead of substituting a plan', () => {
+  for (const stdout of ['', '{', 'null', '[]', 'true', JSON.stringify(buildContractPlan()) + '\nextra output', null, undefined]) {
+    assert.throws(() => validateBuildInstallPlanResult({ status: 1, stdout }))
+  }
+})
+
 test('read-only Go metadata must match the chosen mode for every fixed image', () => {
   validateBuildTags('file.exe: go1.27.3\n\tbuild\t-tags=windows_client\n', 'daily')
   validateBuildTags('\tbuild\t-tags=windows_client,windows_client_validation\n', 'validation')
   for (const [text, mode] of [['\tbuild\t-tags=windows_client\n', 'validation'],
     ['\tbuild\t-tags=windows_client,windows_client_validation\n', 'daily'], ['', 'daily'],
     ['\tbuild\t-tags=windows_client,custom\n', 'daily']]) assert.throws(() => validateBuildTags(text, mode))
+})
+
+test('the package CLI preserves failure after the fixed asynchronous cleanup hook exits zero', async t => {
+  const { spawnSync } = await import('node:child_process')
+  const { rmdir, unlink } = await import('node:fs/promises')
+  const root = await mkdtemp(join(tmpdir(), 'lumina-build-exit-'))
+  const preload = join(root, 'cleanup.cjs')
+  t.after(async () => {
+    await unlink(preload).catch(error => { if (error.code !== 'ENOENT') throw error })
+    await rmdir(root)
+  })
+  const hook = createRequire(import.meta.url).resolve('async-exit-hook')
+  await writeFile(preload, `require(${JSON.stringify(hook)})((done) => {
+  setImmediate(() => { process.stderr.write('BUILD_EXIT_FIXTURE_CLEANUP_COMPLETED\\n'); done(); });
+});\n`)
+  // Invalid mode fails before staging or building. Exercise the real CLI catch,
+  // while reproducing only the fixed dependency's asynchronous exit behavior.
+  const result = spawnSync(process.execPath, ['--require', preload,
+    fileURLToPath(new URL('../scripts/windows-client-package.mjs', import.meta.url)), '--mode', 'invalid'], {
+    shell: false, windowsHide: true, encoding: 'utf8', timeout: 10_000, maxBuffer: 64 << 10,
+    env: { ...process.env, NODE_OPTIONS: '' },
+  })
+  assert.equal(result.error, undefined)
+  assert.equal(result.signal, null)
+  assert.equal(result.status, 1, result.stderr)
+  assert.match(result.stderr, /An explicit daily or validation mode is required|Windows client packaging requires native Windows x64/)
+  assert.match(result.stderr, /BUILD_EXIT_FIXTURE_CLEANUP_COMPLETED/)
+  assert.doesNotMatch(result.stdout, /Windows client package built/)
 })
