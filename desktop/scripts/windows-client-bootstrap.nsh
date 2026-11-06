@@ -519,11 +519,28 @@ Function ${P}LuminaPrepareBootstrap
   ${EndIf}
   System::Call '$SYSDIR\shell32.dll::SHGetKnownFolderPath(g "{62AB5D82-FDC1-4DC3-A9DD-070D1D495D97}", i 0, p 0, *p .r0)i.r1'
   ${If} $1 != 0
+  ${OrIf} $0 == 0
+    System::Call '$SYSDIR\ole32.dll::CoTaskMemFree(p r0)'
     StrCpy $LuminaFailure "PROGRAMDATA"
     Goto prepare_done
   ${EndIf}
-  System::Call '*$0(&w${NSIS_MAX_STRLEN}.r1)'
+  ; The OS allocates only the actual NUL-terminated string. Reading it as a
+  ; fixed &w array makes System memcpy beyond that allocation and can fault.
+  System::Call '$SYSDIR\kernel32.dll::lstrlenW(p r0)i.r2'
+  ${If} $2 <= 0
+  ${OrIf} $2 >= ${NSIS_MAX_STRLEN}
+    System::Call '$SYSDIR\ole32.dll::CoTaskMemFree(p r0)'
+    StrCpy $LuminaFailure "PROGRAMDATA_LENGTH"
+    Goto prepare_done
+  ${EndIf}
+  System::Call '$SYSDIR\kernel32.dll::lstrcpynW(w .r1, p r0, i ${NSIS_MAX_STRLEN})p.r3'
   System::Call '$SYSDIR\ole32.dll::CoTaskMemFree(p r0)'
+  StrLen $0 $1
+  ${If} $3 == 0
+  ${OrIf} $0 != $2
+    StrCpy $LuminaFailure "PROGRAMDATA_LENGTH"
+    Goto prepare_done
+  ${EndIf}
   StrCpy $LuminaProgramData $1
   StrLen $0 $LuminaProgramData
   ${If} $0 > 160
