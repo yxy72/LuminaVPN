@@ -35,6 +35,34 @@ type Spec struct {
 	Environment           []string
 }
 
+var isProcessInJobProc = windows.NewLazySystemDLL("kernel32.dll").NewProc("IsProcessInJob")
+
+func independentJobPreflight() error {
+	var inside uint32
+	ok, _, err := isProcessInJobProc.Call(uintptr(windows.CurrentProcess()), 0, uintptr(unsafe.Pointer(&inside)))
+	if ok == 0 {
+		return fmt.Errorf("inspect independent parent job: %w", err)
+	}
+	if inside == 0 {
+		return nil
+	}
+	var limits windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+	var size uint32
+	if err := windows.QueryInformationJobObject(0, windows.JobObjectExtendedLimitInformation, uintptr(unsafe.Pointer(&limits)), uint32(unsafe.Sizeof(limits)), &size); err != nil {
+		return fmt.Errorf("inspect independent parent job limits: %w", err)
+	}
+	if size != uint32(unsafe.Sizeof(limits)) {
+		return errors.New("independent parent job limits are incomplete")
+	}
+	// Nested jobs may retain the child in a non-breakaway job even when
+	// CreateProcess accepts CREATE_BREAKAWAY_FROM_JOB. Do not publish a
+	// recovery process when the caller's immediate job forbids independence.
+	if limits.BasicLimitInformation.LimitFlags&(windows.JOB_OBJECT_LIMIT_BREAKAWAY_OK|windows.JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK) == 0 {
+		return fmt.Errorf("independent parent job forbids breakaway: %w", windows.ERROR_ACCESS_DENIED)
+	}
+	return nil
+}
+
 func NewJob() (*Job, error) {
 	h, e := windows.CreateJobObject(nil, nil)
 	if e != nil {
@@ -115,6 +143,11 @@ func StartIndependent(spec Spec, publish func(platform.Identity) error) (*Proces
 func start(spec Spec, publish func(platform.Identity) error, job windows.Handle, independent bool) (*Process, error) {
 	if len(spec.Args) == 0 || !filepath.IsAbs(spec.Args[0]) || publish == nil {
 		return nil, errors.New("owned job, absolute executable and publication callback required")
+	}
+	if independent {
+		if err := independentJobPreflight(); err != nil {
+			return nil, err
+		}
 	}
 	app, e := windows.UTF16PtrFromString(spec.Args[0])
 	if e != nil {

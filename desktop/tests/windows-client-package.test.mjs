@@ -163,7 +163,7 @@ test('protected bootstrap source uses exclusive files and locks the verified ima
 
 test('the NSIS trust declaration contains real quote escape bytes and produces the fixed JSON envelope', async () => {
   const source = await readFile(new URL('../scripts/windows-client-bootstrap.nsh', import.meta.url), 'utf8')
-  const declarations = source.split('\n').filter(line => line.includes('StrCpy $2') && line.includes('created_unix'))
+  const declarations = source.split(/\r?\n/).filter(line => line.includes('StrCpy $2') && line.includes('created_unix'))
   assert.equal(declarations.length, 1)
   const declaration = declarations[0]
   for (let i = 0; i < declaration.length; i++) if (declaration.charCodeAt(i) === 34) {
