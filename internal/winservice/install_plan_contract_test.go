@@ -35,7 +35,7 @@ func TestInstallPlanSerializationMatchesFixedInstallerContract(t *testing.T) {
 	if !reflect.DeepEqual(plan.ServiceArguments, []string{"--service"}) || !reflect.DeepEqual(plan.RecoveryArguments, []string{"--recover-service"}) {
 		t.Fatal("SCM arguments were broadened")
 	}
-	if len(plan.SupportedEntries) != 6 {
+	if len(plan.SupportedEntries) != 7 {
 		t.Fatal("fixed installer entries changed")
 	}
 	seen := map[string]bool{}

@@ -174,7 +174,7 @@ type InstallPlan struct {
 }
 
 func PreparedInstallPlan() InstallPlan {
-	return InstallPlan{Version: 1, Schema: "lumina-service-install-v1", ServiceName: ServiceName, ImageKind: ServiceImage, ImageRelative: "releases/<reviewed-release>/lumina-service.exe", Account: "LocalSystem with an explicit service SID", AutoConnect: false, RequiresReview: true, ServiceArguments: []string{"--service"}, SupportedEntries: []string{"--service", "--bootstrap", "--recover-service", "--recover", "--uninstall", "--print-install-plan"}, BootstrapAvailable: true, RecoveryServiceName: RecoveryServiceName, RecoveryArguments: []string{"--recover-service"}, TargetPreflight: "unknown"}
+	return InstallPlan{Version: 1, Schema: "lumina-service-install-v1", ServiceName: ServiceName, ImageKind: ServiceImage, ImageRelative: "releases/<reviewed-release>/lumina-service.exe", Account: "LocalSystem with an explicit service SID", AutoConnect: false, RequiresReview: true, ServiceArguments: []string{"--service"}, SupportedEntries: []string{"--service", "--bootstrap", "--recover-service", "--recover", "--uninstall", "--print-install-plan", "--resume-install-preflight"}, BootstrapAvailable: true, RecoveryServiceName: RecoveryServiceName, RecoveryArguments: []string{"--recover-service"}, TargetPreflight: "unknown"}
 }
 func ValidProfileID(id string) bool {
 	return releaseText.MatchString(id) && !strings.Contains(id, "..")

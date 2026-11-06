@@ -93,6 +93,7 @@ test('generated installer retains files unless the fixed recovery verb succeeds'
   assert.ok(include.includes('!define LUMINA_BOOTSTRAP_SOURCE "D:\\source$$test\\lumina-service.exe"'))
   assert.deepEqual([...include.matchAll(/ExecWait '"([^"\r\n]+)" ([^'\r\n]+)'/g)].map(match => [match[1], match[2]]), [
     ['$LuminaNoncePath\\lumina-service.exe', '--print-install-plan'],
+    ['$LuminaNoncePath\\lumina-service.exe', '--resume-install-preflight'],
     ['$LuminaNoncePath\\lumina-service.exe', '--bootstrap'], ['$LuminaNoncePath\\lumina-service.exe', '--uninstall'],
   ])
   assert.match(include, /!macro customInit[\s\S]*Call LuminaPrepareBootstrap[\s\S]*--print-install-plan[\s\S]*PREFLIGHT_REJECTED[\s\S]*!macroend/)
@@ -113,6 +114,15 @@ test('the compiled install section cannot migrate an elevated per-user uninstall
   assert.ok(!section.includes('HKEY_CURRENT_USER'))
   assert.ok(section.includes('uninstallOldVersion SHELL_CONTEXT'))
   const include = await readFile(prepared.includePath, 'utf8')
+  const init = /!macro customInit\n([\s\S]*?)!macroend/.exec(include)?.[1]
+  assert.ok(init && init.indexOf('--print-install-plan') < init.indexOf('--resume-install-preflight'))
+  assert.ok(init.indexOf('--resume-install-preflight') < init.indexOf('Call LuminaCloseBootstrap'))
+  assert.match(init, /--resume-install-preflight[\s\S]*\$\{Errors\}[\s\S]*RESUME_PREFLIGHT_START[\s\S]*\$R0 != 0[\s\S]*RESUME_PREFLIGHT_REJECTED/)
+  // The real template runs init before its old-uninstaller section. A retry
+  // must finish the exact pending bootstrap before that uninstall can work.
+  const template = await readFile(join(dirname(createRequire(import.meta.url).resolve('app-builder-lib/package.json')), 'templates/nsis/installer.nsi'), 'utf8')
+  assert.ok(template.indexOf('!insertmacro customInit') < template.indexOf('!include "installSection.nsh"'))
+  assert.ok(section.indexOf('uninstallOldVersion SHELL_CONTEXT') < section.indexOf('!insertmacro customInstall'))
   assert.ok(include.includes(`!cd "${join(prepared.outputRoot, 'nsis-overrides')}"`))
   assert.ok(include.includes('!addincludedir "'))
   assert.deepEqual(await readdir(join(prepared.outputRoot, 'nsis-overrides')), ['installSection.nsh'])
@@ -223,13 +233,14 @@ test('the Go v1 install plan fixture keeps all 17 fields and explicit review req
     image_relative: 'releases/<reviewed-release>/lumina-service.exe', account: 'LocalSystem with an explicit service SID',
     auto_connect: false, requires_review: true, installed: false, bootstrap_available: true,
     recovery_service_name: 'LuminaVPNRecoveryService', recovery_arguments: ['--recover-service'],
-    service_arguments: ['--service'], supported_entries: ['--bootstrap', '--service', '--recover', '--recover-service', '--uninstall', '--print-install-plan'],
+    service_arguments: ['--service'], supported_entries: ['--bootstrap', '--service', '--recover', '--recover-service', '--uninstall', '--print-install-plan', '--resume-install-preflight'],
     target_preflight: 'absent', target_root: 'C:\\Program Files\\LuminaVPN', data_root: 'C:\\ProgramData\\LuminaVPN\\ServiceState' }
   assert.equal(Object.keys(plan).length, 17)
   validateInstallPlan(plan)
   validateInstallPlan({ ...plan, target_preflight: 'protected', installed: true })
   validateInstallPlan({ ...plan, target_root: 'D:\\Program Files\\LuminaVPN' })
   for (const patch of [{ bootstrap_available: false }, { auto_connect: true }, { supported_entries: plan.supported_entries.slice(1) },
+    { supported_entries: plan.supported_entries.filter(entry => entry !== '--resume-install-preflight') },
     { supported_entries: [...plan.supported_entries, '--exec'] }, { service_arguments: ['--service', 'user-path'] },
     { version: '1' }, { schema: 'unknown-install-v1' }, { requires_review: false }, { installed: 'false' },
     { image_relative: 'C:\\user\\service.exe' }, { account: 'LocalSystem with explicit service SID and reviewed minimum privileges' },

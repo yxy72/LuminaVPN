@@ -117,6 +117,18 @@ export function installerInclude(releaseID, { bootstrapSource, bootstrapSHA256, 
     StrCpy $LuminaFailure "PREFLIGHT_REJECTED"
     Call LuminaBootstrapFatal
   \${EndIf}
+  ; Complete only this release's protected pending bootstrap before the
+  ; template invokes its previous uninstaller. Other installs are read-only.
+  ClearErrors
+  ExecWait '"$LuminaNoncePath\\lumina-service.exe" --resume-install-preflight' $R0
+  \${If} \${Errors}
+    StrCpy $LuminaFailure "RESUME_PREFLIGHT_START"
+    Call LuminaBootstrapFatal
+  \${EndIf}
+  \${If} $R0 != 0
+    StrCpy $LuminaFailure "RESUME_PREFLIGHT_REJECTED"
+    Call LuminaBootstrapFatal
+  \${EndIf}
   Call LuminaCloseBootstrap
   ClearErrors
 !macroend
@@ -315,7 +327,7 @@ export function validateInstallPlan(plan) {
   const fields = ['version', 'schema', 'service_name', 'image_kind', 'image_relative', 'account', 'auto_connect',
     'requires_review', 'installed', 'service_arguments', 'supported_entries', 'bootstrap_available',
     'recovery_service_name', 'recovery_arguments', 'target_preflight', 'target_root', 'data_root']
-  const entries = ['--bootstrap', '--service', '--recover', '--recover-service', '--uninstall', '--print-install-plan']
+  const entries = ['--bootstrap', '--service', '--recover', '--recover-service', '--uninstall', '--print-install-plan', '--resume-install-preflight']
   // Paths are observations from the Go entry's own KnownFolder calls, never
   // installation arguments. The trusted native entry retains path authority.
   const nativeRoot = (value, suffix) => typeof value === 'string' && value.length <= 260

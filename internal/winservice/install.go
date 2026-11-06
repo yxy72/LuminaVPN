@@ -14,12 +14,13 @@ func installerAdministrator(sid string, elevated, enabledAdmin, denyOnly bool) b
 type Command string
 
 const (
-	CommandService        Command = "--service"
-	CommandBootstrap      Command = "--bootstrap"
-	CommandRecoverService Command = "--recover-service"
-	CommandUninstall      Command = "--uninstall"
-	CommandRecover        Command = "--recover"
-	CommandPrintPlan      Command = "--print-install-plan"
+	CommandService         Command = "--service"
+	CommandBootstrap       Command = "--bootstrap"
+	CommandRecoverService  Command = "--recover-service"
+	CommandUninstall       Command = "--uninstall"
+	CommandRecover         Command = "--recover"
+	CommandPrintPlan       Command = "--print-install-plan"
+	CommandResumePreflight Command = "--resume-install-preflight"
 )
 
 func ParseCommand(args []string) (Command, error) {
@@ -28,7 +29,7 @@ func ParseCommand(args []string) (Command, error) {
 	}
 	command := Command(args[0])
 	switch command {
-	case CommandService, CommandBootstrap, CommandRecoverService, CommandUninstall, CommandRecover, CommandPrintPlan:
+	case CommandService, CommandBootstrap, CommandRecoverService, CommandUninstall, CommandRecover, CommandPrintPlan, CommandResumePreflight:
 		return command, nil
 	}
 	return "", errors.New("unsupported service entry")
@@ -52,7 +53,84 @@ func verifiedEnrollment(full, linked, shell EnrollmentFacts, profileID string) (
 	return Binding{ProfileID: profileID, OwnerSID: linked.SID, LogonSID: linked.LogonSID, AuthenticationID: linked.AuthenticationID, SessionID: linked.SessionID, ExecutorSID: "S-1-5-18", Revision: 1, LogonEpoch: linked.LogonEpoch}, nil
 }
 
-type BootstrapState struct{ Present, Trusted, Enrolled, ServicesMatch, Retired bool }
+type BootstrapState struct {
+	Present, Trusted, Enrolled, ServicesMatch, Retired bool
+	// ReenrollmentAllowed is set only after strict installation retirement and
+	// a newly captured ordinary login's stable owner/profile have been verified.
+	// It never permits replacing an existing, nonretired service enrollment.
+	ReenrollmentAllowed bool
+	// Pending flags require the protected journal's frozen plan and current OS
+	// observations. They never describe an arbitrary partial SCM installation.
+	BootstrapPending, UninstallPending bool
+}
+
+type retiredInstallation struct {
+	Version         int    `json:"version"`
+	ProfileID       string `json:"profile_id"`
+	RestorationID   string `json:"restoration_id"`
+	ServiceInstance string `json:"service_instance"`
+}
+
+func verifyRetiredInstallation(files protectedStateFiles, binding Binding) error {
+	data, err := files.Read("installation-retired.json")
+	if err != nil {
+		return errors.New("SCM absent without strict retirement publication")
+	}
+	var retired retiredInstallation
+	if decodeState(data, &retired) != nil || retired.Version != 1 || retired.ProfileID != binding.ProfileID || retired.ServiceInstance != binding.ServiceInstance || retired.RestorationID != binding.LastRestorationID || binding.RunRef != "" || binding.PendingEnrollmentID != "" || !validOwnedBinding(binding, binding) {
+		return errors.New("invalid retired enrollment")
+	}
+	receipt, err := readRestoration(files, retired.RestorationID)
+	if err != nil || !sameEnrollment(receipt.Enrollment, binding) {
+		return errors.New("retirement has no strict restoration receipt")
+	}
+	return nil
+}
+
+func sameEnrollmentIdentity(a, b Binding) bool {
+	return a.ProfileID == b.ProfileID && a.OwnerSID == b.OwnerSID && a.LogonSID == b.LogonSID && a.AuthenticationID == b.AuthenticationID && a.SessionID == b.SessionID && a.ExecutorSID == b.ExecutorSID && a.LogonEpoch == b.LogonEpoch
+}
+
+// retiredEnrollmentTarget copies only the independently observed login tuple.
+// Permanent ownership and the service instance stay bound to the retired tree.
+func retiredEnrollmentTarget(previous, captured Binding) (Binding, error) {
+	if previous.ProfileID != captured.ProfileID || previous.OwnerSID != captured.OwnerSID || previous.ExecutorSID != captured.ExecutorSID || captured.LogonEpoch == "" || previous.Revision == ^uint64(0) {
+		return Binding{}, errors.New("retired installation belongs to another owner or profile")
+	}
+	target := previous
+	target.LogonSID, target.AuthenticationID = captured.LogonSID, captured.AuthenticationID
+	target.SessionID, target.LogonEpoch = captured.SessionID, captured.LogonEpoch
+	target.Revision++
+	if !validOwnedBinding(target, previous) || target.RunRef != "" || target.PendingEnrollmentID != "" {
+		return Binding{}, errors.New("ordinary retired enrollment unavailable")
+	}
+	return target, nil
+}
+
+// provisionRetiredEnrollment uses the existing durable rotation publication:
+// a new login gets a new receipt tied to the old exact restoration evidence,
+// rather than inheriting a receipt whose enrollment still names the old login.
+func provisionRetiredEnrollment(files protectedStateFiles, previous, captured Binding) (Binding, error) {
+	if err := verifyRetiredInstallation(files, previous); err != nil {
+		return Binding{}, err
+	}
+	target, err := retiredEnrollmentTarget(previous, captured)
+	if err != nil {
+		return Binding{}, err
+	}
+	owners, err := newFileOwnershipStore(files, previous)
+	if err != nil {
+		return Binding{}, err
+	}
+	if sameEnrollment(previous, target) {
+		if err = owners.Save(target); err != nil {
+			return Binding{}, err
+		}
+		return target, nil
+	}
+	return owners.Rotate(previous, target)
+}
+
 type InstallSystem interface {
 	Inspect() (BootstrapState, error)
 	Enrollment() (Binding, error)
@@ -78,15 +156,21 @@ func Bootstrap(ctx context.Context, system InstallSystem) (InstallResult, error)
 		return result, err
 	}
 	if state.Present {
-		if !state.Trusted || !state.Enrolled || (!state.ServicesMatch && !state.Retired) {
-			return result, errors.New("existing installation is unknown; no state was replaced")
-		}
-		if !state.Retired {
-			if err = system.StartMain(ctx); err != nil {
-				return result, err
+		if state.BootstrapPending {
+			if !state.Trusted || !state.Enrolled {
+				return result, errors.New("pending installer enrollment is unknown")
 			}
-			result.Completed = true
-			return result, nil
+		} else {
+			if !state.Trusted || (!state.Enrolled && !(state.Retired && state.ReenrollmentAllowed)) || (!state.ServicesMatch && !state.Retired) {
+				return result, errors.New("existing installation is unknown; no state was replaced")
+			}
+			if !state.Retired {
+				if err = system.StartMain(ctx); err != nil {
+					return result, err
+				}
+				result.Completed = true
+				return result, nil
+			}
 		}
 	}
 	enrollment, err := system.Enrollment()
@@ -102,6 +186,11 @@ func Bootstrap(ctx context.Context, system InstallSystem) (InstallResult, error)
 	if err = system.StartMain(ctx); err != nil {
 		return result, err
 	}
+	if commit, ok := system.(interface{ CommitBootstrap() error }); ok {
+		if err = commit.CommitBootstrap(); err != nil {
+			return result, err
+		}
+	}
 	result.Completed = true
 	return result, nil
 }
@@ -113,6 +202,16 @@ func Uninstall(ctx context.Context, system InstallSystem) (InstallResult, error)
 	}
 	if !state.Present || !state.Trusted || !state.Enrolled || !state.ServicesMatch {
 		return result, errors.New("known installed enrollment required")
+	}
+	if state.UninstallPending {
+		// The journal was written only after exact recovery and is rechecked
+		// before every remaining fixed SCM deletion. Never repeat unknown recovery.
+		result.Restored = true
+		if err = system.DeleteServices(); err != nil {
+			return result, err
+		}
+		result.Completed = true
+		return result, nil
 	}
 	// Stopping may itself run restoration. A distinct SYSTEM recovery service
 	// still must produce this request's exact acknowledgement before deletion.

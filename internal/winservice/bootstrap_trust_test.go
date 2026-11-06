@@ -44,7 +44,7 @@ func TestInstallerPlanLiteralSchemaAndExitMapping(t *testing.T) {
 	if len(fields) != 17 || plan.Version != 1 || plan.Schema != "lumina-service-install-v1" || plan.ServiceName != ServiceName || plan.RecoveryServiceName != RecoveryServiceName || !plan.BootstrapAvailable || !plan.RequiresReview || plan.Installed || plan.AutoConnect || strings.Contains(plan.Account, "minimum") {
 		t.Fatalf("installer plan contract drifted: %s", raw)
 	}
-	expected := []string{"--service", "--bootstrap", "--recover-service", "--recover", "--uninstall", "--print-install-plan"}
+	expected := []string{"--service", "--bootstrap", "--recover-service", "--recover", "--uninstall", "--print-install-plan", "--resume-install-preflight"}
 	if !reflect.DeepEqual(plan.SupportedEntries, expected) || !reflect.DeepEqual(plan.ServiceArguments, []string{"--service"}) || !reflect.DeepEqual(plan.RecoveryArguments, []string{"--recover-service"}) {
 		t.Fatal("fixed installer entries drifted")
 	}

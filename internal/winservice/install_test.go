@@ -11,6 +11,7 @@ type installFixture struct {
 	state        BootstrapState
 	calls        []string
 	recoverErr   error
+	provisionErr error
 	stillRunning bool
 }
 
@@ -22,7 +23,10 @@ func (f *installFixture) Enrollment() (Binding, error) {
 	f.calls = append(f.calls, "enroll")
 	return Binding{ProfileID: "profile"}, nil
 }
-func (f *installFixture) Provision(Binding) error { f.calls = append(f.calls, "provision"); return nil }
+func (f *installFixture) Provision(Binding) error {
+	f.calls = append(f.calls, "provision")
+	return f.provisionErr
+}
 func (f *installFixture) ConfigureServices() error {
 	f.calls = append(f.calls, "configure")
 	return nil
@@ -51,6 +55,71 @@ func TestBootstrapPreservesUnknownExistingState(t *testing.T) {
 	fixture := &installFixture{state: BootstrapState{Present: true}}
 	if _, err := Bootstrap(context.Background(), fixture); err == nil || !reflect.DeepEqual(fixture.calls, []string{"inspect"}) {
 		t.Fatal("unknown state was overwritten")
+	}
+}
+func TestBootstrapNewLoginRequiresVerifiedRetiredOwnerBeforeProvisioning(t *testing.T) {
+	state := BootstrapState{Present: true, Trusted: true, Retired: true, ReenrollmentAllowed: true}
+	fixture := &installFixture{state: state}
+	result, err := Bootstrap(context.Background(), fixture)
+	if err != nil || !result.Completed || !reflect.DeepEqual(fixture.calls, []string{"inspect", "enroll", "configure", "provision", "start"}) {
+		t.Fatal("strictly retired same-owner new login could not reinstall", result, err, fixture.calls)
+	}
+	for _, change := range []func(*BootstrapState){
+		func(s *BootstrapState) { s.ReenrollmentAllowed = false },
+		func(s *BootstrapState) { s.Trusted = false },
+		func(s *BootstrapState) { s.Retired = false; s.ServicesMatch = true },
+	} {
+		bad := state
+		change(&bad)
+		fixture := &installFixture{state: bad}
+		if result, err := Bootstrap(context.Background(), fixture); err == nil || result.Completed || !reflect.DeepEqual(fixture.calls, []string{"inspect"}) {
+			t.Fatal("unverified/nonretired enrollment reached SCM mutation", result, err, fixture.calls)
+		}
+	}
+}
+func TestBootstrapFailedReenrollmentDoesNotStartOrComplete(t *testing.T) {
+	fixture := &installFixture{
+		state:        BootstrapState{Present: true, Trusted: true, Retired: true, ReenrollmentAllowed: true},
+		provisionErr: errors.New("durable rotation publication failed"),
+	}
+	result, err := Bootstrap(context.Background(), fixture)
+	if err == nil || result.Completed || !reflect.DeepEqual(fixture.calls, []string{"inspect", "enroll", "configure", "provision"}) {
+		t.Fatal("failed enrollment publication was started or acknowledged", result, err, fixture.calls)
+	}
+}
+
+type committingInstallFixture struct {
+	installFixture
+	commitErr error
+}
+
+func (f *committingInstallFixture) CommitBootstrap() error {
+	f.calls = append(f.calls, "commit")
+	return f.commitErr
+}
+
+func TestBootstrapPendingJournalRequiresDurableCompletionAcknowledgement(t *testing.T) {
+	for _, failure := range []bool{false, true} {
+		fixture := &committingInstallFixture{installFixture: installFixture{state: BootstrapState{Present: true, Trusted: true, Enrolled: true, BootstrapPending: true}}}
+		if failure {
+			fixture.commitErr = errors.New("journal completion publication failed")
+		}
+		result, err := Bootstrap(context.Background(), fixture)
+		if failure && (err == nil || result.Completed) || !failure && (err != nil || !result.Completed) || !reflect.DeepEqual(fixture.calls, []string{"inspect", "enroll", "configure", "provision", "start", "commit"}) {
+			t.Fatal("pending journal skipped provisioning or acknowledged a failed checkpoint", result, err, fixture.calls)
+		}
+	}
+}
+
+func TestUninstallPendingJournalDoesNotRepeatAnUnknownRecovery(t *testing.T) {
+	fixture := &installFixture{state: BootstrapState{Present: true, Trusted: true, Enrolled: true, ServicesMatch: true, UninstallPending: true}}
+	result, err := Uninstall(context.Background(), fixture)
+	if err != nil || !result.Completed || !result.Restored || !reflect.DeepEqual(fixture.calls, []string{"inspect", "delete_services"}) {
+		t.Fatal("strict pending retirement repeated recovery or did not resume deletion", result, err, fixture.calls)
+	}
+	fixture = &installFixture{state: BootstrapState{Present: true, Trusted: true, ServicesMatch: true, UninstallPending: true}}
+	if _, err = Uninstall(context.Background(), fixture); err == nil || !reflect.DeepEqual(fixture.calls, []string{"inspect"}) {
+		t.Fatal("unverified pending retirement reached SCM mutation")
 	}
 }
 func TestUninstallRequiresExactRecoveryBeforeDeletingSCM(t *testing.T) {
