@@ -9,6 +9,9 @@ import (
 	"strings"
 	"syscall"
 	"unsafe"
+
+	"golang.org/x/sys/windows"
+	"netlaunch/internal/winprofile"
 )
 
 var profileDir = syscall.NewLazyDLL("userenv.dll").NewProc("GetUserProfileDirectoryW")
@@ -169,18 +172,22 @@ func PrivateConfigRoot(local bool) (string, error) {
 	return privateRoot(profile, path)
 }
 
-// PrivateProfileRoot explicitly chooses <native user profile>\.netlaunch.
-// It never falls back from AppData implicitly, migrates data or repairs ACLs.
-// The profile must have an approved owner, no unapproved write grants, and
-// actual create-directory access. All ancestors are pinned and reparse-checked.
-// Read/execute-only capability grants on the parent are permitted; the newly
-// created child still grants access exclusively to user, SYSTEM and Administrators.
+// PrivateProfileRoot creates only the fixed Windows client's profile below the
+// installer-protected per-user namespace. Home/AppData ACLs are not changed or
+// relied upon. Existing roots remain subject to strict private ACL validation;
+// configuration is never silently migrated from a legacy location.
 func PrivateProfileRoot() (string, error) {
-	profile, e := profileLocation()
+	token, e := tokenForUser()
 	if e != nil {
 		return "", e
 	}
-	return privateRoot(profile, filepath.Join(profile, ".netlaunch"))
+	defer token.Close()
+	location, release, e := winprofile.OpenForToken(windows.Token(token))
+	if e != nil {
+		return "", e
+	}
+	defer release()
+	return privateRoot(location.UserDirectory, location.Profile)
 }
 
 // rootParents is read-only. profile is the native user trust boundary in public

@@ -36,6 +36,9 @@ func (key *windowsLegacyRegistryKey) StringValue(name string) (string, error) {
 	// A single bounded read avoids allocating based on mutable registry data.
 	buffer := make([]byte, 4096)
 	n, kind, err := key.key.GetValue(name, buffer)
+	if errors.Is(err, registry.ErrNotExist) {
+		return "", errLegacyRegistryValueMissing
+	}
 	if err != nil {
 		return "", err
 	}
@@ -56,13 +59,17 @@ func (key *windowsLegacyRegistryKey) StringValue(name string) (string, error) {
 }
 
 func openRegistryLinkItself(parent registry.Key, path string, view uint32) (registry.Key, error) {
+	return openRegistryLinkAccess(parent, path, view, windows.READ_CONTROL|registry.QUERY_VALUE)
+}
+
+func openRegistryLinkAccess(parent registry.Key, path string, view, access uint32) (registry.Key, error) {
 	name, err := windows.UTF16PtrFromString(path)
 	if err != nil {
 		return 0, err
 	}
 	var handle windows.Handle
 	// REG_OPTION_OPEN_LINK: inspect the final component, never its link target.
-	err = windows.RegOpenKeyEx(windows.Handle(parent), name, 8, windows.READ_CONTROL|registry.QUERY_VALUE|view, &handle)
+	err = windows.RegOpenKeyEx(windows.Handle(parent), name, 8, access|view, &handle)
 	return registry.Key(handle), err
 }
 
@@ -78,6 +85,10 @@ func (windowsLegacyRegistry) HasCurrentUserKey(view uint32, path string) (bool, 
 }
 
 func (windowsLegacyRegistry) OpenMachine(view uint32, path string) (result legacyRegistryKey, err error) {
+	return openMachineRegistryPath(view, path, false)
+}
+
+func openMachineRegistryPath(view uint32, path string, claim bool) (result legacyRegistryKey, err error) {
 	if (view != registry.WOW64_64KEY && view != registry.WOW64_32KEY) || !strings.HasPrefix(path, `Software\`) || len(path) > 512 {
 		return nil, errors.New("unexpected fixed registry path or view")
 	}
@@ -92,25 +103,41 @@ func (windowsLegacyRegistry) OpenMachine(view uint32, path string) (result legac
 		return nil, lookupErr
 	}
 	current := registry.LOCAL_MACHINE
-	if err = checkRegistryKey(current, installer.String()); err != nil {
+	parentCanCreate, err := checkRegistryAncestor(current, installer.String(), false)
+	if err != nil {
 		return nil, err
 	}
-	for _, component := range strings.Split(path, `\`) {
+	components := strings.Split(path, `\`)
+	for index, component := range components {
 		if component == "" || component == "." || component == ".." {
 			return nil, errors.New("invalid registry component")
 		}
 		var next registry.Key
-		next, err = openRegistryLinkItself(current, component, view)
+		final := index == len(components)-1
+		if claim && final {
+			next, err = claimRegistryLeaf(current, component, view, installer.String())
+		} else {
+			access := uint32(windows.READ_CONTROL | registry.QUERY_VALUE)
+			if claim && index == len(components)-2 {
+				access |= registry.CREATE_SUB_KEY
+			}
+			next, err = openRegistryLinkAccess(current, component, view, access)
+		}
 		if errors.Is(err, registry.ErrNotExist) {
-			// The last existing parent has already been checked for CREATE_SUB_KEY
-			// and security/replace rights, so an untrusted user cannot fill this gap.
+			// Absence is only an observation. Before NSIS uses or writes either
+			// product key, the nonce-bound resume entry must claim its exact leaf.
 			return nil, errLegacyRegistryMissing
 		}
 		if err != nil {
 			return nil, err
 		}
 		key.held = append(key.held, next)
-		if err = checkRegistryKey(next, installer.String()); err != nil {
+		if final {
+			err = checkRegistryKey(next, installer.String())
+		} else {
+			parentCanCreate, err = checkRegistryAncestor(next, installer.String(), parentCanCreate)
+		}
+		if err != nil {
 			return nil, err
 		}
 		current = next
@@ -120,54 +147,77 @@ func (windowsLegacyRegistry) OpenMachine(view uint32, path string) (result legac
 }
 
 func checkRegistryKey(key registry.Key, trustedInstaller string) error {
+	owner, entries, err := registryDescriptor(key)
+	if err != nil {
+		return err
+	}
+	if err = validateRegistryDescriptor(owner, entries, trustedInstaller); err != nil {
+		return err
+	}
+	return rejectRegistryLink(key)
+}
+
+func checkRegistryAncestor(key registry.Key, trustedInstaller string, parentCanCreate bool) (bool, error) {
+	owner, entries, err := registryDescriptor(key)
+	if err != nil {
+		return false, err
+	}
+	if err = rejectRegistryLink(key); err != nil {
+		return false, err
+	}
+	return validateRegistryAncestor(owner, entries, trustedInstaller, parentCanCreate)
+}
+
+func registryDescriptor(key registry.Key) (string, []protectedACE, error) {
 	// RegGetKeySecurity supports predefined HKLM as well as opened component
 	// handles. Every descriptor is read from the exact handle used for traversal.
 	information := uintptr(windows.OWNER_SECURITY_INFORMATION | windows.DACL_SECURITY_INFORMATION)
 	var length uint32
 	status, _, _ := regGetKeySecurity.Call(uintptr(key), information, 0, uintptr(unsafe.Pointer(&length)))
 	if status != uintptr(windows.ERROR_INSUFFICIENT_BUFFER) || length < 20 || length > 65536 {
-		return errors.New("registry security size is unknown")
+		return "", nil, errors.New("registry security size is unknown")
 	}
 	buffer := make([]byte, length)
 	status, _, _ = regGetKeySecurity.Call(uintptr(key), information, uintptr(unsafe.Pointer(&buffer[0])), uintptr(unsafe.Pointer(&length)))
 	if status != 0 {
-		return syscall.Errno(status)
+		return "", nil, syscall.Errno(status)
 	}
 	defer runtime.KeepAlive(buffer)
 	sd := (*windows.SECURITY_DESCRIPTOR)(unsafe.Pointer(&buffer[0]))
 	if !sd.IsValid() {
-		return errors.New("invalid registry security descriptor")
+		return "", nil, errors.New("invalid registry security descriptor")
 	}
 	owner, _, err := sd.Owner()
 	if err != nil || owner == nil || !owner.IsValid() {
-		return errors.New("registry owner is unknown")
+		return "", nil, errors.New("registry owner is unknown")
 	}
 	acl, _, err := sd.DACL()
 	if err != nil || acl == nil || acl.AceCount > 512 {
-		return errors.New("registry DACL is absent or unbounded")
+		return "", nil, errors.New("registry DACL is absent or unbounded")
 	}
 	entries := make([]protectedACE, 0, acl.AceCount)
 	for i := uint32(0); i < uint32(acl.AceCount); i++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
 		if err = windows.GetAce(acl, i, &ace); err != nil || ace == nil {
-			return errors.New("registry ACE is unknown")
+			return "", nil, errors.New("registry ACE is unknown")
 		}
 		entry := protectedACE{Kind: ace.Header.AceType, Flags: ace.Header.AceFlags}
 		if entry.Kind == windows.ACCESS_ALLOWED_ACE_TYPE && entry.Flags&8 == 0 {
 			if ace.Header.AceSize < 16 {
-				return errors.New("registry allow ACE is truncated")
+				return "", nil, errors.New("registry allow ACE is truncated")
 			}
 			sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 			if !sid.IsValid() || sid.Len() > int(ace.Header.AceSize)-8 {
-				return errors.New("registry allow SID is truncated")
+				return "", nil, errors.New("registry allow SID is truncated")
 			}
 			entry.Mask, entry.SID = uint32(ace.Mask), sid.String()
 		}
 		entries = append(entries, entry)
 	}
-	if err = validateRegistryDescriptor(owner.String(), entries, trustedInstaller); err != nil {
-		return err
-	}
+	return owner.String(), entries, nil
+}
+
+func rejectRegistryLink(key registry.Key) error {
 	_, kind, err := key.GetValue("SymbolicLinkValue", nil)
 	if errors.Is(err, registry.ErrNotExist) {
 		return nil

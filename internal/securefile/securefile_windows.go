@@ -102,7 +102,10 @@ func open(path string, access uint32) (syscall.Handle, error) {
 	if e != nil {
 		return 0, e
 	}
-	return syscall.CreateFile(p, access, syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE, nil, syscall.OPEN_EXISTING, syscall.FILE_FLAG_BACKUP_SEMANTICS|syscall.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	// Security-only READ_CONTROL handles do not enforce file share denial.
+	// Include a data-read access bit so held ancestor handles really prevent
+	// rename/deletion when FILE_SHARE_DELETE is omitted.
+	return syscall.CreateFile(p, access|syscall.GENERIC_READ, syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE, nil, syscall.OPEN_EXISTING, syscall.FILE_FLAG_BACKUP_SEMANTICS|syscall.FILE_FLAG_OPEN_REPARSE_POINT, 0)
 }
 func shape(h syscall.Handle, dir bool) error {
 	return shapeLinks(h, dir, false)

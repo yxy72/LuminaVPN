@@ -8,7 +8,7 @@ import (
 )
 
 func (b *Broker) submitAttachment(v VerifiedPrincipal, m p.Mutation, old Binding, lookupErr error) (p.Operation, error) {
-	if lookupErr != nil || !v.Verified() || !v.ordinary || v.profileID != m.ProfileID || old.OwnerSID != v.sid || old.ExecutorSID != b.executorSID || old.ServiceInstance != b.instance || v.logonEpoch == "" || old.LogonEpoch == "" {
+	if lookupErr != nil || !v.Verified() || !v.desktopEligible || v.profileID != m.ProfileID || old.OwnerSID != v.sid || old.ExecutorSID != b.executorSID || old.ServiceInstance != b.instance || v.logonEpoch == "" || old.LogonEpoch == "" {
 		return p.Operation{}, safeError("ACCESS_DENIED")
 	}
 	if authorize(v, old, b.executorSID, b.instance) == nil {

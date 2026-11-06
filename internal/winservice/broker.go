@@ -24,7 +24,7 @@ type VerifiedPrincipal struct {
 	retain                          func() (VerifiedPrincipal, error)
 	release                         func()
 	token                           uintptr
-	ordinary                        bool
+	desktopEligible                 bool
 	profileID                       string
 	logonEpoch                      string
 }
@@ -373,7 +373,7 @@ func newID(prefix string) (string, error) {
 	return prefix + hex.EncodeToString(raw[:]), nil
 }
 func authorize(v VerifiedPrincipal, binding Binding, executorSID, instance string) error {
-	if binding.PendingEnrollmentID != "" || !v.Verified() || binding.OwnerSID != v.sid || binding.LogonSID != v.logonSID || binding.AuthenticationID != v.authenticationID || binding.SessionID != v.sessionID || (binding.LogonEpoch != "" && binding.LogonEpoch != v.logonEpoch) || binding.ExecutorSID != executorSID || binding.ServiceInstance != instance {
+	if binding.PendingEnrollmentID != "" || !v.Verified() || !v.desktopEligible || v.profileID != binding.ProfileID || binding.OwnerSID != v.sid || binding.LogonSID != v.logonSID || binding.AuthenticationID != v.authenticationID || binding.SessionID != v.sessionID || (binding.LogonEpoch != "" && binding.LogonEpoch != v.logonEpoch) || binding.ExecutorSID != executorSID || binding.ServiceInstance != instance {
 		return safeError("ACCESS_DENIED")
 	}
 	return nil

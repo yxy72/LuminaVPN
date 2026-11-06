@@ -66,3 +66,37 @@ func TestRegistryCreatorOwnerTemplateDoesNotHideActualWriter(t *testing.T) {
 		t.Fatal("inheritance template hid a real applicable writer")
 	}
 }
+
+func TestRegistryAncestorRightsDoNotGrantProtectedChildRights(t *testing.T) {
+	const system = "S-1-5-18"
+	const users = "S-1-5-32-545"
+	for _, test := range []struct {
+		name           string
+		mask           uint32
+		parentCreates  bool
+		allow, creates bool
+	}{
+		{"terminal server parent metadata rights", 0x3001F, false, true, true},
+		{"same rights with replaceable ancestor", 0x3001F, true, false, false},
+		{"set value is local", 2, true, true, false},
+		{"create sibling is local", 4, true, true, true},
+		{"generic write can create sibling", 0x40000000, false, true, true},
+		{"DACL can propagate", 0x40000, false, false, false},
+		{"owner can reset DACL", 0x80000, false, false, false},
+		{"generic all", 0x10000000, false, false, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			entries := []protectedACE{{Kind: 0, SID: users, Mask: test.mask}}
+			creates, err := validateRegistryAncestor(system, entries, "", test.parentCreates)
+			if (err == nil) != test.allow || (err == nil && creates != test.creates) {
+				t.Fatalf("creates=%v err=%v", creates, err)
+			}
+			if validateRegistryDescriptor(system, entries, "") == nil {
+				t.Fatal("ancestor exception leaked to the product leaf")
+			}
+		})
+	}
+	if _, err := validateRegistryAncestor(users, nil, "", false); err == nil {
+		t.Fatal("untrusted ancestor owner accepted")
+	}
+}

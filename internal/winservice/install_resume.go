@@ -8,9 +8,10 @@ import (
 )
 
 type resumeInstallPreflightControl struct {
-	acquire func() (func(), error)
-	journal func() (installJournal, bool, error)
-	pending func(context.Context, installJournal) (InstallSystem, error)
+	acquire  func() (func(), error)
+	journal  func() (installJournal, bool, error)
+	pending  func(context.Context, installJournal) (InstallSystem, error)
+	finalize func() error
 }
 
 // The public installer invokes this before NSIS runs an earlier uninstaller.
@@ -42,6 +43,14 @@ func resumeInstallPreflight(ctx context.Context, control resumeInstallPreflightC
 		}
 	}
 	if !exists || j.Action == "retire" || j.Phase == "complete" {
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
+		if control.finalize != nil {
+			if err := control.finalize(); err != nil {
+				return result, err
+			}
+		}
 		result.Completed = true
 		return result, nil
 	}
@@ -60,6 +69,15 @@ func resumeInstallPreflight(ctx context.Context, control resumeInstallPreflightC
 	}
 	result, err = Bootstrap(ctx, system)
 	result.Action = "resume-install-preflight"
+	if err == nil && result.Completed {
+		err = ctx.Err()
+		if err == nil && control.finalize != nil {
+			err = control.finalize()
+		}
+		if err != nil {
+			result.Completed = false
+		}
+	}
 	return result, err
 }
 

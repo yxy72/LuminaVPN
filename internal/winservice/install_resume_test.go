@@ -9,6 +9,45 @@ import (
 	"testing"
 )
 
+func TestResumeRegistryClaimRunsUnderLockOnlyAfterValidState(t *testing.T) {
+	for _, failure := range []string{"none", "journal", "claim", "cancel"} {
+		t.Run(failure, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			locked, claimed := false, false
+			result, err := resumeInstallPreflight(ctx, resumeInstallPreflightControl{
+				acquire: func() (func(), error) { locked = true; return func() { locked = false }, nil },
+				journal: func() (installJournal, bool, error) {
+					if failure == "journal" {
+						return installJournal{}, false, errors.New("unknown")
+					}
+					if failure == "cancel" {
+						cancel()
+					}
+					return installJournal{}, false, nil
+				},
+				pending: func(context.Context, installJournal) (InstallSystem, error) {
+					t.Fatal("fresh claim loaded installed system")
+					return nil, nil
+				},
+				finalize: func() error {
+					if !locked {
+						t.Fatal("registry claim escaped installer lock")
+					}
+					claimed = true
+					if failure == "claim" {
+						return errors.New("unsafe product key")
+					}
+					return nil
+				},
+			})
+			if locked || claimed != (failure == "none" || failure == "claim") || result.Completed != (failure == "none") || (err == nil) != (failure == "none") {
+				t.Fatalf("result=%+v claimed=%v locked=%v err=%v", result, claimed, locked, err)
+			}
+		})
+	}
+}
+
 func TestResumeInstallPreflightNonpendingNeverLoadsInstalledRelease(t *testing.T) {
 	for _, state := range []string{"first_install_missing_root", "old_release_complete", "old_release_retirement_pending"} {
 		t.Run(state, func(t *testing.T) {

@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -245,51 +244,11 @@ type tokenStatistics struct {
 }
 
 func tokenFacts(token windows.Token) (VerifiedPrincipal, error) {
-	user, err := token.GetTokenUser()
+	facts, err := enrollmentTokenFacts(token)
 	if err != nil {
 		return VerifiedPrincipal{}, err
 	}
-	groups, err := token.GetTokenGroups()
-	if err != nil {
-		return VerifiedPrincipal{}, err
-	}
-	var logon string
-	for _, group := range groups.AllGroups() {
-		if group.Attributes&0xC0000000 == 0xC0000000 {
-			logon = group.Sid.String()
-		}
-	}
-	var session uint32
-	var needed uint32
-	if err = windows.GetTokenInformation(token, windows.TokenSessionId, (*byte)(unsafe.Pointer(&session)), 4, &needed); err != nil {
-		return VerifiedPrincipal{}, err
-	}
-	var stats tokenStatistics
-	if err = windows.GetTokenInformation(token, windows.TokenStatistics, (*byte)(unsafe.Pointer(&stats)), uint32(unsafe.Sizeof(stats)), &needed); err != nil {
-		return VerifiedPrincipal{}, err
-	}
-	if err = requireImpersonationToken(stats.TokenType, stats.ImpersonationLevel); err != nil {
-		return VerifiedPrincipal{}, err
-	}
-	v := VerifiedPrincipal{sid: user.User.Sid.String(), logonSID: logon, authenticationID: fmt.Sprintf("%08x-%08x", stats.AuthenticationID.HighPart, stats.AuthenticationID.LowPart), sessionID: session, verified: true}
-	if !v.Verified() || v.sid == "S-1-5-18" || v.sid == "S-1-5-7" {
-		return VerifiedPrincipal{}, errors.New("interactive authenticated caller required")
-	}
-	epoch, interactive, epochErr := kernelLogonEpoch(stats.AuthenticationID, v.sid, session)
-	if epochErr != nil {
-		return VerifiedPrincipal{}, epochErr
-	}
-	v.logonEpoch = epoch
-	profile, profileErr := token.GetUserProfileDirectory()
-	if profileErr == nil && filepath.IsAbs(profile) {
-		v.profileID = localProfileID(filepath.Join(profile, ".netlaunch"))
-	}
-	elevated, elevationErr := explicitTokenElevation(token)
-	if elevationErr != nil {
-		return VerifiedPrincipal{}, elevationErr
-	}
-	v.ordinary = interactive && !elevated && v.profileID != ""
-	return v, nil
+	return verifiedDesktopPrincipal(facts)
 }
 func principalForToken(token windows.Token) (VerifiedPrincipal, error) {
 	v, err := tokenFacts(token)

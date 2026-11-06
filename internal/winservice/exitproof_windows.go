@@ -10,6 +10,7 @@ import (
 
 	"golang.org/x/sys/windows"
 	p "netlaunch/internal/serviceprotocol"
+	"netlaunch/internal/winprofile"
 )
 
 func servicePresence() localPresence {
@@ -101,6 +102,14 @@ func localAbsentSnapshot(profile string) (p.Snapshot, bool) {
 	}
 	evidence := localAbsenceEvidence{service: servicePresence(), installation: pathPresence(programFiles, filepath.Join(programFiles, "LuminaVPN"))}
 	evidence.owned = append(evidence.owned, pathPresence(programData, filepath.Join(programData, "LuminaVPN", "ServiceState")), pathPresence(programData, filepath.Join(programData, "NetLaunch")))
+	currentProfile, err := winprofile.PathForToken(windows.GetCurrentProcessToken())
+	if err != nil {
+		return p.Snapshot{}, false
+	}
+	if localProfileID(currentProfile) == profile {
+		evidence.defaultProfile = true
+	}
+	evidence.owned = append(evidence.owned, pathPresence(programData, filepath.Join(currentProfile, "current.json")), pathPresence(programData, filepath.Join(currentProfile, "runs")))
 	for _, location := range []struct {
 		folder *windows.KNOWNFOLDERID
 		leaf   string

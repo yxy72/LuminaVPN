@@ -14,7 +14,10 @@ import (
 const ServiceName = "LuminaVPNService"
 const PipeName = `\\.\pipe\LuminaVPN.Service.v1`
 const StopPipeName = PipeName + ".stop"
-const PipeClientRights uint32 = 0x00100003 // synchronize + read/write data; no create-instance bit 4.
+
+// CreateFile also requests FILE_READ_ATTRIBUTES when opening a pipe. Grant
+// that read-only right explicitly, without generic-write/create-instance.
+const PipeClientRights uint32 = 0x00100083 // synchronize + read attributes + read/write data; no bit 4.
 const PipeFirstInstance uint32 = 0x00080000
 const PipeRejectRemote uint32 = 0x00000008
 
@@ -30,7 +33,7 @@ func PipeSDDL(serviceSID, logonSID string) (string, error) {
 	if !sidText.MatchString(serviceSID) || !sidText.MatchString(logonSID) {
 		return "", errors.New("invalid pipe principal")
 	}
-	return "D:P(A;;GA;;;SY)(A;;GA;;;" + serviceSID + ")(A;;0x00100003;;;" + logonSID + ")", nil
+	return "D:P(A;;GA;;;SY)(A;;GA;;;" + serviceSID + ")(A;;0x00100083;;;" + logonSID + ")", nil
 }
 
 type ExecutableKind string

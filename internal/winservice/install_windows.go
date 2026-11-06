@@ -14,6 +14,7 @@ import (
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
+	"netlaunch/internal/winprofile"
 )
 
 type windowsInstallSystem struct {
@@ -249,6 +250,13 @@ func protectedInstallDirectory(path string) error {
 	return checkProtectedACL(path)
 }
 func (s *windowsInstallSystem) Provision(enrollment Binding) error {
+	location, err := winprofile.LocationForSID(enrollment.OwnerSID)
+	if err != nil || localProfileID(location.Profile) != enrollment.ProfileID {
+		return errors.New("captured desktop profile namespace differs")
+	}
+	if err = winprofile.Provision(enrollment.OwnerSID); err != nil {
+		return err
+	}
 	return s.provisionJournal(enrollment)
 }
 func (s *windowsInstallSystem) ConfigureServices() error {

@@ -12,7 +12,7 @@ import (
 
 func ordinaryAttachPeer(epoch string, session uint32) VerifiedPrincipal {
 	v := testPeer()
-	v.ordinary = true
+	v.desktopEligible = true
 	v.profileID = "profile"
 	v.logonEpoch = epoch
 	v.sessionID = session
@@ -98,15 +98,51 @@ func TestNewLoginAttachmentOutlivesRPCAndRestoresBeforeRotating(t *testing.T) {
 		t.Fatal("retired GUI reclaimed the new login")
 	}
 }
-func TestAttachmentRejectsElevatedForeignProfileAndUnknownEpoch(t *testing.T) {
+func TestAttachmentRejectsIneligibleForeignProfileAndUnknownEpoch(t *testing.T) {
 	old := ordinaryAttachPeer("1", 1)
 	b, _, _ := newTestBroker(t, &fakeBackend{}, attachBinding(old))
-	for _, change := range []func(*VerifiedPrincipal){func(v *VerifiedPrincipal) { v.ordinary = false }, func(v *VerifiedPrincipal) { v.sid = "S-1-5-21-2" }, func(v *VerifiedPrincipal) { v.profileID = "foreign" }, func(v *VerifiedPrincipal) { v.logonEpoch = "" }} {
+	for _, change := range []func(*VerifiedPrincipal){func(v *VerifiedPrincipal) { v.desktopEligible = false }, func(v *VerifiedPrincipal) { v.sid = "S-1-5-21-2" }, func(v *VerifiedPrincipal) { v.profileID = "foreign" }, func(v *VerifiedPrincipal) { v.logonEpoch = "" }} {
 		actor := ordinaryAttachPeer("2", 2)
 		change(&actor)
 		if _, err := b.Submit(context.Background(), actor, attachmentMutation("request")); err == nil {
-			t.Fatal("unverified/elevated/foreign attachment accepted")
+			t.Fatal("unverified/ineligible/foreign attachment accepted")
 		}
+	}
+}
+
+func TestUnfilteredAdministratorAttachmentPreservesLoginRotationBoundary(t *testing.T) {
+	old := ordinaryAttachPeer("1", 1)
+	facts := testUnfilteredAdminFacts()
+	facts.AuthenticationID, facts.LogonSID, facts.LogonEpoch, facts.SessionID = "auth-2", "S-1-5-5-1-2", "2", 2
+	facts.TokenType, facts.ImpersonationLevel = 2, 2
+	current, err := verifiedDesktopPrincipal(facts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := attachBinding(old)
+	binding.RunRef = "run-old"
+	var restores atomic.Int32
+	b, store, _ := newTestBroker(t, &fakeBackend{stop: func(_ context.Context, a AuthorizedOperation, _ func(Progress)) (Completion, error) {
+		if a.Binding().AuthenticationID != old.authenticationID {
+			t.Error("restoration changed the old login")
+		}
+		restores.Add(1)
+		return Completion{Restored: true, RestorationID: "restore-mock"}, nil
+	}}, binding)
+	op, err := b.Submit(context.Background(), current, attachmentMutation("unfiltered-attach"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	final := waitAttachment(t, b, current, op.ID)
+	if final.Error != nil || !final.Completed || !final.Restored || restores.Load() != 1 {
+		t.Fatal("unfiltered login did not restore and attach", final)
+	}
+	latest, _ := store.Lookup("profile")
+	if latest.AuthenticationID != facts.AuthenticationID || latest.LogonEpoch != facts.LogonEpoch || latest.OwnerSID != binding.OwnerSID || latest.ProfileID != binding.ProfileID {
+		t.Fatal("rotation changed permanent ownership or lost current login")
+	}
+	if _, err := b.Submit(context.Background(), old, attachmentMutation("retired-unfiltered")); err == nil {
+		t.Fatal("retired login reclaimed current enrollment")
 	}
 }
 func TestFailedRestoreNeverRotatesEnrollment(t *testing.T) {

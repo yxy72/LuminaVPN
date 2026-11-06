@@ -6,6 +6,10 @@ package winservice
 const registryWriteMask uint32 = 0x500D0026
 
 func validateRegistryDescriptor(owner string, entries []protectedACE, trustedInstaller string) error {
+	return validateRegistryDescriptorMask(owner, entries, trustedInstaller, registryWriteMask)
+}
+
+func validateRegistryDescriptorMask(owner string, entries []protectedACE, trustedInstaller string, mask uint32) error {
 	additional := map[string]bool{}
 	if trustedInstaller != "" {
 		additional[trustedInstaller] = true
@@ -22,5 +26,23 @@ func validateRegistryDescriptor(owner string, entries []protectedACE, trustedIns
 		}
 		applicable = append(applicable, entry)
 	}
-	return validateDescriptorWriters(trusted, applicable, registryWriteMask, additional)
+	return validateDescriptorWriters(trusted, applicable, mask, additional)
+}
+
+// A parent's SET_VALUE/CREATE_SUB_KEY/DELETE rights do not grant rights on an
+// existing protected child. Security changes remain forbidden at every level.
+// Renaming a key requires CREATE_SUB_KEY on its parent and DELETE on the key;
+// conservatively reject that combination even when different SIDs grant it.
+func validateRegistryAncestor(owner string, entries []protectedACE, trustedInstaller string, parentCanCreate bool) (bool, error) {
+	const securityMask = uint32(0x100C0000) // GENERIC_ALL, WRITE_DAC, WRITE_OWNER.
+	if err := validateRegistryDescriptorMask(owner, entries, trustedInstaller, securityMask); err != nil {
+		return false, err
+	}
+	if parentCanCreate {
+		if err := validateRegistryDescriptorMask(owner, entries, trustedInstaller, 0x10010000); err != nil {
+			return false, err
+		}
+	}
+	canCreate := validateRegistryDescriptorMask(owner, entries, trustedInstaller, 0x50000004) != nil
+	return canCreate, nil
 }

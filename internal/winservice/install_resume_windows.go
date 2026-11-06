@@ -44,6 +44,9 @@ func runWindowsResumePreflight(ctx context.Context) (InstallResult, error) {
 	root := filepath.Join(base, "LuminaVPN", "ServiceState")
 	var held windows.Handle
 	return resumeInstallPreflight(ctx, resumeInstallPreflightControl{
+		// Claim only this product's fixed registry leaves, after successful
+		// journal/resume validation and while the same installer lock is held.
+		finalize: func() error { return claimFixedMachineRegistry(ctx) },
 		acquire: func() (func(), error) {
 			var err error
 			held, err = acquireInstallerLock()

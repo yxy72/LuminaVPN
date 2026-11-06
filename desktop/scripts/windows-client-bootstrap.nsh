@@ -20,6 +20,7 @@ Var LuminaSD
 Var LuminaSA
 Var LuminaSystemSID
 Var LuminaAdminSID
+Var LuminaTrustedInstallerSID
 Var LuminaProgramData
 Var LuminaSetupParent
 Var LuminaNoncePath
@@ -27,6 +28,8 @@ Var LuminaNonce
 Var LuminaProgramDataHandle
 Var LuminaAncestorHandles
 Var LuminaAncestorCount
+Var LuminaAnchorHandle
+Var LuminaAnchorPath
 Var LuminaSetupHandle
 Var LuminaNonceHandle
 Var LuminaImageHandle
@@ -82,6 +85,10 @@ Function ${P}LuminaCloseBootstrap
     StrCpy $LuminaAncestorHandles 0
     StrCpy $LuminaAncestorCount 0
   ${EndIf}
+  ${If} $LuminaAnchorHandle != 0
+    System::Call '$SYSDIR\kernel32.dll::CloseHandle(p $LuminaAnchorHandle)'
+    StrCpy $LuminaAnchorHandle 0
+  ${EndIf}
   ${If} $LuminaSA != 0
     System::Free $LuminaSA
     StrCpy $LuminaSA 0
@@ -97,6 +104,10 @@ Function ${P}LuminaCloseBootstrap
   ${If} $LuminaAdminSID != 0
     System::Call '$SYSDIR\kernel32.dll::LocalFree(p $LuminaAdminSID)'
     StrCpy $LuminaAdminSID 0
+  ${EndIf}
+  ${If} $LuminaTrustedInstallerSID != 0
+    System::Free $LuminaTrustedInstallerSID
+    StrCpy $LuminaTrustedInstallerSID 0
   ${EndIf}
   System::Store "l"
 FunctionEnd
@@ -127,10 +138,14 @@ Function ${P}LuminaCheckProtected
   System::Call '$SYSDIR\advapi32.dll::EqualSid(p r0, p $LuminaSystemSID)i.r3'
   System::Call '$SYSDIR\advapi32.dll::EqualSid(p r0, p $LuminaAdminSID)i.r4'
   IntOp $3 $3 | $4
+  ${If} $LuminaCheckStrict == 0
+    System::Call '$SYSDIR\advapi32.dll::EqualSid(p r0, p $LuminaTrustedInstallerSID)i.r4'
+    IntOp $3 $3 | $4
+  ${EndIf}
   ${If} $3 == 0
     Goto check_free
   ${EndIf}
-  System::Call '$SYSDIR\advapi32.dll::GetSecurityDescriptorControl(p r2, *i 0 .r3, *i 0 .r4)i.r5'
+  System::Call '$SYSDIR\advapi32.dll::GetSecurityDescriptorControl(p r2, *i 0 r3, *i .r4)i.r5'
   ${If} $5 == 0
     Goto check_free
   ${EndIf}
@@ -188,13 +203,20 @@ Function ${P}LuminaCheckProtected
     System::Call '$SYSDIR\advapi32.dll::EqualSid(p r4, p $LuminaSystemSID)i.r3'
     System::Call '$SYSDIR\advapi32.dll::EqualSid(p r4, p $LuminaAdminSID)i.r5'
     IntOp $3 $3 | $5
+    ${If} $LuminaCheckStrict == 0
+      System::Call '$SYSDIR\advapi32.dll::EqualSid(p r4, p $LuminaTrustedInstallerSID)i.r5'
+      IntOp $3 $3 | $5
+    ${EndIf}
     ${If} $3 == 0
       ${If} $LuminaCheckStrict == 1
         ; GENERIC_ALL/WRITE; DELETE/WRITE_DAC/OWNER; data/EA/attrs/DELETE_CHILD.
         IntOp $7 $7 & 0x500D0156
       ${Else}
-        ; Ancestors can permit new children, never replacement of this one.
-        IntOp $7 $7 & 0x500D0150
+        ; Match Go ancestorReplaceMask: new children/EA/attributes do not
+        ; authorize deleting this child or replacing its security. The held
+        ; held data-read handles deny DELETE sharing. Path binding and the
+        ; pinned existing child make every ancestor stably nonempty before use.
+        IntOp $7 $7 & 0x100D0040
       ${EndIf}
       ${If} $7 != 0
         Goto check_free
@@ -212,7 +234,7 @@ FunctionEnd
 ; $0 is a directory path. The returned handle in $LuminaCheckHandle stays open
 ; without sharing WRITE or DELETE; metadata is queried from that same handle.
 Function ${P}LuminaOpenDirectory
-  System::Store "p1 p2 p3"
+  System::Store "p1 p2 p3 p4 p5"
   StrCpy $LuminaCheckHandle 0
   System::Call '$SYSDIR\kernel32.dll::CreateFileW(w r0, i 0x120081, i 1, p 0, i 3, i 0x02200000, p 0)p.r1'
   ${If} $1 == -1
@@ -224,8 +246,16 @@ Function ${P}LuminaOpenDirectory
   ${If} $3 != 0
     System::Call '*$2(i.r3, i)'
     IntOp $3 $3 & 0x410 ; FILE_ATTRIBUTE_REPARSE_POINT | DIRECTORY.
-    ${If} $3 == 0x10
-      StrCpy $LuminaCheckHandle $1
+    ${If} $3 = 0x10
+      ; A transient junction in a parent must not bind this handle to some
+      ; other existing trusted directory. Compare normalized DOS final paths.
+      System::Call '$SYSDIR\kernel32.dll::GetFinalPathNameByHandleW(p r1, w .r4, i ${NSIS_MAX_STRLEN}, i 0)i.r3'
+      StrCpy $5 "\\?\$0"
+      ${If} $3 > 0
+      ${AndIf} $3 < ${NSIS_MAX_STRLEN}
+      ${AndIf} $4 == $5 ; NSIS StrCmp compares Windows paths case-insensitively.
+        StrCpy $LuminaCheckHandle $1
+      ${EndIf}
     ${EndIf}
   ${EndIf}
   System::Free $2
@@ -234,7 +264,25 @@ Function ${P}LuminaOpenDirectory
     StrCpy $LuminaFailure "DIRECTORY_REPARSE_OR_QUERY"
   ${EndIf}
   directory_done:
-  System::Store "r3 r2 r1"
+  System::Store "r5 r4 r3 r2 r1"
+FunctionEnd
+
+; Called only after the full path-bound chain and its existing terminal child
+; are pinned. No ancestor can then become empty or be renamed by another open.
+Function ${P}LuminaCheckPinnedDirectory
+  System::Store "s"
+  StrCpy $LuminaCheckOK 0
+  System::Call '*(i 0, i 0)p.r0'
+  System::Call '$SYSDIR\kernel32.dll::GetFileInformationByHandleEx(p $LuminaCheckHandle, i 9, p r0, i 8)i.r1'
+  ${If} $1 != 0
+    System::Call '*$0(i.r1, i)'
+    IntOp $1 $1 & 0x410
+    ${If} $1 = 0x10
+      StrCpy $LuminaCheckOK 1
+    ${EndIf}
+  ${EndIf}
+  System::Free $0
+  System::Store "l"
 FunctionEnd
 
 ; Create an exclusive new file using the same explicit protected descriptor.
@@ -279,7 +327,7 @@ Function ${P}LuminaCopyImage
   Pop $R3
   StrCpy $R4 0
   copy_loop:
-    System::Call '$SYSDIR\kernel32.dll::ReadFile(p $R2, p $R3, i 65536, *i 0 .r3, p 0)i.r4'
+    System::Call '$SYSDIR\kernel32.dll::ReadFile(p $R2, p $R3, i 65536, *i .r3, p 0)i.r4'
     ${If} $4 == 0
     ${OrIf} $3 > 65536
       StrCpy $LuminaFailure "READ_EMBEDDED_DATA"
@@ -296,7 +344,7 @@ Function ${P}LuminaCopyImage
       StrCpy $LuminaFailure "IMAGE_SIZE"
       Goto copy_free
     ${EndIf}
-    System::Call '$SYSDIR\kernel32.dll::WriteFile(p $R1, p $R3, i r3, *i 0 .r5, p 0)i.r4'
+    System::Call '$SYSDIR\kernel32.dll::WriteFile(p $R1, p $R3, i r3, *i .r5, p 0)i.r4'
     ${If} $4 == 0
     ${OrIf} $5 != $3
       StrCpy $LuminaFailure "WRITE_IMAGE"
@@ -350,7 +398,7 @@ Function ${P}LuminaLockAndHashImage
   System::Alloc 65536
   Pop $R0
   hash_loop:
-    System::Call '$SYSDIR\kernel32.dll::ReadFile(p $LuminaImageHandle, p $R0, i 65536, *i 0 .r3, p 0)i.r4'
+    System::Call '$SYSDIR\kernel32.dll::ReadFile(p $LuminaImageHandle, p $R0, i 65536, *i .r3, p 0)i.r4'
     ${If} $4 == 0
     ${OrIf} $3 > 65536
       StrCpy $LuminaFailure "HASH_READ"
@@ -403,9 +451,12 @@ Function ${P}LuminaPrepareBootstrap
   StrCpy $LuminaSA 0
   StrCpy $LuminaSystemSID 0
   StrCpy $LuminaAdminSID 0
+  StrCpy $LuminaTrustedInstallerSID 0
   StrCpy $LuminaProgramDataHandle 0
   StrCpy $LuminaAncestorHandles 0
   StrCpy $LuminaAncestorCount 0
+  StrCpy $LuminaAnchorHandle 0
+  StrCpy $LuminaAnchorPath ""
   StrCpy $LuminaSetupHandle 0
   StrCpy $LuminaNonceHandle 0
   StrCpy $LuminaImageHandle 0
@@ -432,6 +483,40 @@ Function ${P}LuminaPrepareBootstrap
     Goto prepare_done
   ${EndIf}
   StrCpy $LuminaAdminSID $0
+  ; Existing OS ancestors may be owned or maintained by TrustedInstaller.
+  ; Resolve only that fixed local service identity through Windows; strict
+  ; setup directories and executable files still permit only SYSTEM/Admins.
+  System::Alloc 68 ; SECURITY_MAX_SID_SIZE, including every possible subauthority.
+  Pop $LuminaTrustedInstallerSID
+  ${If} $LuminaTrustedInstallerSID == 0
+    StrCpy $LuminaFailure "TRUSTED_INSTALLER_MEMORY"
+    Goto prepare_done
+  ${EndIf}
+  System::Alloc 512 ; Bounded 256-WCHAR referenced-domain buffer.
+  Pop $5
+  ${If} $5 == 0
+    StrCpy $LuminaFailure "TRUSTED_INSTALLER_MEMORY"
+    Goto prepare_done
+  ${EndIf}
+  System::Call '$SYSDIR\advapi32.dll::LookupAccountNameW(p 0, w "NT SERVICE\TrustedInstaller", p $LuminaTrustedInstallerSID, *i 68 r1, p r5, *i 256 r2, *i .r3)i.r0'
+  System::Free $5
+  ${If} $0 == 0
+  ${OrIf} $1 < 8
+  ${OrIf} $1 > 68
+    StrCpy $LuminaFailure "TRUSTED_INSTALLER_SID"
+    Goto prepare_done
+  ${EndIf}
+  System::Call '$SYSDIR\advapi32.dll::IsValidSid(p $LuminaTrustedInstallerSID)i.r0'
+  ${If} $0 == 0
+    StrCpy $LuminaFailure "TRUSTED_INSTALLER_SID"
+    Goto prepare_done
+  ${EndIf}
+  System::Call '$SYSDIR\advapi32.dll::GetLengthSid(p $LuminaTrustedInstallerSID)i.r0'
+  ${If} $0 < 8
+  ${OrIf} $0 > 68
+    StrCpy $LuminaFailure "TRUSTED_INSTALLER_SID"
+    Goto prepare_done
+  ${EndIf}
   System::Call '$SYSDIR\shell32.dll::SHGetKnownFolderPath(g "{62AB5D82-FDC1-4DC3-A9DD-070D1D495D97}", i 0, p 0, *p .r0)i.r1'
   ${If} $1 != 0
     StrCpy $LuminaFailure "PROGRAMDATA"
@@ -526,6 +611,59 @@ Function ${P}LuminaPrepareBootstrap
       Goto ancestor_open
   ancestors_ready:
   StrCpy $LuminaSetupParent "$LuminaProgramData\LuminaVPN-Setup"
+  ; Attribute-only access is not denied by sharing flags. FSCTL reparse
+  ; assignment does reject nonempty directories, so pin an existing protected
+  ; child before creating anything. A standard Windows ProgramData has Microsoft.
+  StrCpy $LuminaAnchorPath $LuminaSetupParent
+  System::Call '$SYSDIR\kernel32.dll::GetFileAttributesW(w "$LuminaAnchorPath")i.r0 ?e'
+  Pop $1
+  ${If} $0 == -1
+    ${If} $1 == 2
+    ${OrIf} $1 == 3
+      StrCpy $LuminaAnchorPath "$LuminaProgramData\Microsoft"
+    ${Else}
+      StrCpy $LuminaFailure "PROGRAMDATA_ANCHOR_QUERY"
+      Goto prepare_done
+    ${EndIf}
+  ${EndIf}
+  StrCpy $0 $LuminaAnchorPath
+  Call ${P}LuminaOpenDirectory
+  StrCpy $LuminaAnchorHandle $LuminaCheckHandle
+  ${If} $LuminaAnchorHandle == 0
+    StrCpy $LuminaFailure "PROGRAMDATA_ANCHOR_OPEN"
+    Goto prepare_done
+  ${EndIf}
+  StrCpy $LuminaCheckStrict 0
+  Call ${P}LuminaCheckProtected
+  ${If} $LuminaCheckOK != 1
+    StrCpy $LuminaFailure "PROGRAMDATA_ANCHOR_ACL"
+    Goto prepare_done
+  ${EndIf}
+  StrCpy $4 0
+  StrCpy $5 $LuminaAncestorHandles
+  ${DoWhile} $4 < $LuminaAncestorCount
+    System::Call '*$5(p.r0)'
+    StrCpy $LuminaCheckHandle $0
+    Call ${P}LuminaCheckPinnedDirectory
+    ${If} $LuminaCheckOK != 1
+      StrCpy $LuminaFailure "PROGRAMDATA_ANCESTOR_CHANGED"
+      Goto prepare_done
+    ${EndIf}
+    IntOp $5 $5 + 4
+    IntOp $4 $4 + 1
+  ${Loop}
+  StrCpy $LuminaCheckHandle $LuminaProgramDataHandle
+  Call ${P}LuminaCheckPinnedDirectory
+  ${If} $LuminaCheckOK != 1
+    StrCpy $LuminaFailure "PROGRAMDATA_CHANGED"
+    Goto prepare_done
+  ${EndIf}
+  StrCpy $LuminaCheckHandle $LuminaAnchorHandle
+  Call ${P}LuminaCheckPinnedDirectory
+  ${If} $LuminaCheckOK != 1
+    StrCpy $LuminaFailure "PROGRAMDATA_ANCHOR_CHANGED"
+    Goto prepare_done
+  ${EndIf}
   System::Call '$SYSDIR\kernel32.dll::CreateDirectoryW(w "$LuminaSetupParent", p $LuminaSA)i.r0 ?e'
   Pop $1
   ${If} $0 == 0
@@ -617,7 +755,7 @@ Function ${P}LuminaPrepareBootstrap
   StrCpy $R0 $1
   StrCpy $2 '{$\"version$\":1,$\"product$\":$\"LuminaVPN$\",$\"purpose$\":$\"service-bootstrap$\",$\"nonce$\":$\"$LuminaNonce$\",$\"sha256$\":$\"${LUMINA_BOOTSTRAP_SHA256}$\",$\"created_unix$\":$LuminaCreated,$\"expires_unix$\":$LuminaExpires}'
   StrLen $3 $2 ; All JSON characters are ASCII; byte length equals character count.
-  System::Call '$SYSDIR\kernel32.dll::WriteFile(p $R0, m r2, i r3, *i 0 .r4, p 0)i.r5'
+  System::Call '$SYSDIR\kernel32.dll::WriteFile(p $R0, m r2, i r3, *i .r4, p 0)i.r5'
   ${If} $5 == 0
   ${OrIf} $4 != $3
     StrCpy $LuminaFailure "WRITE_TRUST"

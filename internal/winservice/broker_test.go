@@ -46,7 +46,12 @@ func (f *fakeBackend) Workspace(c context.Context, _ VerifiedPrincipal, _ Bindin
 	return Completion{}, nil
 }
 func testPeer() VerifiedPrincipal {
-	return VerifiedPrincipal{sid: "S-1-5-21-1", logonSID: "S-1-5-5-1-1", authenticationID: "auth-1", sessionID: 1, verified: true}
+	return VerifiedPrincipal{sid: "S-1-5-21-1", logonSID: "S-1-5-5-1-1", authenticationID: "auth-1", sessionID: 1, verified: true, desktopEligible: true, profileID: "profile"}
+}
+func testPeerForProfile(profile string) VerifiedPrincipal {
+	v := testPeer()
+	v.profileID = profile
+	return v
 }
 func testBinding(id string) Binding {
 	v := testPeer()
@@ -68,9 +73,13 @@ func newTestBroker(t *testing.T, f *fakeBackend, bindings ...Binding) (*Broker, 
 }
 func waitOperation(t *testing.T, b *Broker, id string) p.Operation {
 	t.Helper()
+	return waitOperationAs(t, b, id, testPeer())
+}
+func waitOperationAs(t *testing.T, b *Broker, id string, peer VerifiedPrincipal) p.Operation {
+	t.Helper()
 	until := time.Now().Add(2 * time.Second)
 	for {
-		op, err := b.Operation(context.Background(), testPeer(), id)
+		op, err := b.Operation(context.Background(), peer, id)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -204,28 +213,28 @@ func TestStopForOtherProfileDoesNotCancelActiveRun(t *testing.T) {
 			return Completion{}, nil
 		}
 	}}, a, testBinding("profileB"))
-	op, err := b.Submit(context.Background(), testPeer(), p.Mutation{RequestID: "channels", ProfileID: "profileA", ExpectedRevision: 1, RunRef: "run-A", Kind: p.ChannelsSet, Channels: &p.DesiredChannels{Personal: true}})
+	op, err := b.Submit(context.Background(), testPeerForProfile("profileA"), p.Mutation{RequestID: "channels", ProfileID: "profileA", ExpectedRevision: 1, RunRef: "run-A", Kind: p.ChannelsSet, Channels: &p.DesiredChannels{Personal: true}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	<-entered
-	stop, err := b.Submit(context.Background(), testPeer(), stopMutation("stopB", "profileB", ""))
+	stop, err := b.Submit(context.Background(), testPeerForProfile("profileB"), stopMutation("stopB", "profileB", ""))
 	if err != nil {
 		t.Fatal(err)
 	}
-	waitOperation(t, b, stop.ID)
+	waitOperationAs(t, b, stop.ID, testPeerForProfile("profileB"))
 	if cancelled.Load() {
 		t.Fatal("B stop cancelled A")
 	}
 	close(finish)
-	if value := waitOperation(t, b, op.ID); value.Error != nil {
+	if value := waitOperationAs(t, b, op.ID, testPeerForProfile("profileA")); value.Error != nil {
 		t.Fatalf("A stopped by foreign profile: %#v", value)
 	}
 }
 
 func TestCallerAndExecutorIdentityAreNotRPCClaims(t *testing.T) {
 	b, _, _ := newTestBroker(t, &fakeBackend{}, testBinding("profile"))
-	for _, alter := range []func(*VerifiedPrincipal){func(v *VerifiedPrincipal) { v.sid = "foreign" }, func(v *VerifiedPrincipal) { v.sessionID = 2 }, func(v *VerifiedPrincipal) { v.authenticationID = "other-logon" }, func(v *VerifiedPrincipal) { v.verified = false }} {
+	for _, alter := range []func(*VerifiedPrincipal){func(v *VerifiedPrincipal) { v.sid = "foreign" }, func(v *VerifiedPrincipal) { v.sessionID = 2 }, func(v *VerifiedPrincipal) { v.authenticationID = "other-logon" }, func(v *VerifiedPrincipal) { v.verified = false }, func(v *VerifiedPrincipal) { v.desktopEligible = false }, func(v *VerifiedPrincipal) { v.profileID = "foreign" }} {
 		peer := testPeer()
 		alter(&peer)
 		if _, err := b.Submit(context.Background(), peer, startMutation("request", "profile")); err == nil {
@@ -275,7 +284,7 @@ func TestLedgerContainsNoCredentialsAndFirstFailureIsSticky(t *testing.T) {
 }
 func TestPipeAclUsesExactDataRightsAndFixedFlags(t *testing.T) {
 	sddl, err := PipeSDDL("S-1-5-80-1-2-3", "S-1-5-5-1-1")
-	if err != nil || !strings.Contains(sddl, "0x00100003") || strings.Contains(sddl, "GW") || PipeClientRights&4 != 0 || PipeFirstInstance != 0x80000 || PipeRejectRemote != 8 {
+	if err != nil || !strings.Contains(sddl, "0x00100083") || strings.Contains(sddl, "GW") || PipeClientRights != 0x00100083 || PipeClientRights&4 != 0 || PipeFirstInstance != 0x80000 || PipeRejectRemote != 8 {
 		t.Fatal("unsafe pipe access or flags")
 	}
 	if _, err := PipeSDDL("bad;GA", "S-1-5-5-1-1"); err == nil {

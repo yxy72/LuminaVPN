@@ -37,26 +37,49 @@ func ParseCommand(args []string) (Command, error) {
 
 // EnrollmentFacts are obtained from held OS token/process handles, never
 // decoded from command-line/IPC claims. Full and limited token AuthIDs may
-// differ; only the actual limited interactive identity is persisted.
+// differ in split-token mode; that branch persists the limited desktop identity.
+// Unfiltered administrators retain their actual elevated desktop identity.
 type EnrollmentFacts struct {
-	SID, LogonSID, AuthenticationID string
-	SessionID                       uint32
-	Primary, Elevated, Limited      bool
-	LogonEpoch                      string
-	Interactive                     bool
+	SID, LogonSID, AuthenticationID       string
+	SessionID                             uint32
+	TokenType, ImpersonationLevel         uint32
+	ElevationType                         uint32
+	Elevated, EnabledAdmin, AdminDenyOnly bool
+	LogonEpoch                            string
+	Interactive                           bool
+	ProfileID                             string
 }
 
-func verifiedEnrollment(full, linked, shell EnrollmentFacts, profileID string) (Binding, error) {
-	if !full.Primary || !full.Elevated || full.Limited || !linked.Primary || linked.Elevated || !linked.Limited || !linked.Interactive || !shell.Interactive || linked.LogonEpoch == "" || linked.LogonEpoch != shell.LogonEpoch || !shell.Primary || shell.Elevated || linked.SID == "S-1-5-18" || linked.SessionID == 0 || full.SID != linked.SID || full.SessionID != linked.SessionID || linked.SID != shell.SID || linked.LogonSID != shell.LogonSID || linked.AuthenticationID != shell.AuthenticationID || linked.SessionID != shell.SessionID || !sidText.MatchString(linked.SID) || !sidText.MatchString(linked.LogonSID) || linked.AuthenticationID == "" || len(linked.AuthenticationID) > 128 || !ValidProfileID(profileID) {
-		return Binding{}, errors.New("ordinary interactive enrollment could not be independently verified")
+func verifiedEnrollment(full, linked, shell EnrollmentFacts) (Binding, error) {
+	if !validInteractiveIdentity(full) || full.TokenType != 1 || !full.Elevated || !full.EnabledAdmin || full.AdminDenyOnly || shell.TokenType != 1 {
+		return Binding{}, errors.New("interactive installer enrollment could not be independently verified")
 	}
-	return Binding{ProfileID: profileID, OwnerSID: linked.SID, LogonSID: linked.LogonSID, AuthenticationID: linked.AuthenticationID, SessionID: linked.SessionID, ExecutorSID: "S-1-5-18", Revision: 1, LogonEpoch: linked.LogonEpoch}, nil
+	user := linked
+	switch full.ElevationType {
+	case tokenElevationFull:
+		// A split-token installer enrolls its actual limited desktop identity,
+		// whose authentication ID may differ from the elevated installer.
+		if linked.TokenType != 1 || linked.ElevationType != tokenElevationLimited || shell.ElevationType != tokenElevationLimited || desktopTokenMode(linked) != desktopStandard || desktopTokenMode(shell) != desktopStandard || !sameDesktopLogin(linked, shell) || full.SID != linked.SID || full.SessionID != linked.SessionID || full.ProfileID != linked.ProfileID {
+			return Binding{}, errors.New("linked desktop identity differs from installer enrollment")
+		}
+	case tokenElevationDefault:
+		// UAC-disabled / unfiltered administrators have no linked token. This
+		// explicit mode keeps their real elevation and requires the installer's
+		// entire OS login tuple to match the independently opened desktop shell.
+		if linked != (EnrollmentFacts{}) || desktopTokenMode(full) != desktopUnfilteredAdmin || desktopTokenMode(shell) != desktopUnfilteredAdmin || !sameDesktopLogin(full, shell) {
+			return Binding{}, errors.New("unfiltered administrator differs from desktop enrollment")
+		}
+		user = full
+	default:
+		return Binding{}, errors.New("unsupported installer token mode")
+	}
+	return Binding{ProfileID: user.ProfileID, OwnerSID: user.SID, LogonSID: user.LogonSID, AuthenticationID: user.AuthenticationID, SessionID: user.SessionID, ExecutorSID: "S-1-5-18", Revision: 1, LogonEpoch: user.LogonEpoch}, nil
 }
 
 type BootstrapState struct {
 	Present, Trusted, Enrolled, ServicesMatch, Retired bool
 	// ReenrollmentAllowed is set only after strict installation retirement and
-	// a newly captured ordinary login's stable owner/profile have been verified.
+	// a newly captured desktop login's stable owner/profile have been verified.
 	// It never permits replacing an existing, nonretired service enrollment.
 	ReenrollmentAllowed bool
 	// Pending flags require the protected journal's frozen plan and current OS
@@ -102,7 +125,7 @@ func retiredEnrollmentTarget(previous, captured Binding) (Binding, error) {
 	target.SessionID, target.LogonEpoch = captured.SessionID, captured.LogonEpoch
 	target.Revision++
 	if !validOwnedBinding(target, previous) || target.RunRef != "" || target.PendingEnrollmentID != "" {
-		return Binding{}, errors.New("ordinary retired enrollment unavailable")
+		return Binding{}, errors.New("desktop retired enrollment unavailable")
 	}
 	return target, nil
 }

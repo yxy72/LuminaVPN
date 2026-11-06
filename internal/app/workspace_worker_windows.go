@@ -10,11 +10,9 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"os"
 	"path/filepath"
 	"strings"
 
-	"golang.org/x/sys/windows"
 	p "netlaunch/internal/serviceprotocol"
 )
 
@@ -27,13 +25,8 @@ type workspaceWorkerRequest struct {
 // the verified caller token. No filesystem path, executable or argv is accepted
 // on its input. A privileged host may not substitute thread impersonation here.
 func WorkspaceWorker(in io.Reader, out io.Writer) error {
-	u, err := windows.GetCurrentProcessToken().GetTokenUser()
-	if err != nil || u.User.Sid == nil || u.User.Sid.String() == "S-1-5-18" {
-		return errors.New("workspace worker requires the interactive user process")
-	}
-	var session uint32
-	if err := windows.ProcessIdToSessionId(uint32(os.Getpid()), &session); err != nil || session == 0 {
-		return errors.New("workspace worker requires an interactive logon session")
+	if err := serviceInteractiveUser(); err != nil {
+		return errors.New("workspace worker requires a verified interactive user process")
 	}
 	raw, err := io.ReadAll(io.LimitReader(in, p.MaxFrame+1))
 	if err != nil || len(raw) > p.MaxFrame {

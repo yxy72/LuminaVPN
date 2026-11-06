@@ -196,7 +196,7 @@ func TestPendingAttachmentOnlyAcceptedForOriginalVerifiedTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	actor := VerifiedPrincipal{sid: target.OwnerSID, logonSID: target.LogonSID, authenticationID: target.AuthenticationID, sessionID: target.SessionID, logonEpoch: target.LogonEpoch, profileID: target.ProfileID, ordinary: true, verified: true}
+	actor := VerifiedPrincipal{sid: target.OwnerSID, logonSID: target.LogonSID, authenticationID: target.AuthenticationID, sessionID: target.SessionID, logonEpoch: target.LogonEpoch, profileID: target.ProfileID, desktopEligible: true, verified: true}
 	wrong := actor
 	wrong.authenticationID = "other"
 	if _, err = b.Submit(ctx, wrong, attachmentMutation("wrong")); err == nil {

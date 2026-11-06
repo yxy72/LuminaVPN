@@ -15,6 +15,9 @@ import (
 	"strings"
 	"syscall"
 	"unsafe"
+
+	"golang.org/x/sys/windows"
+	"netlaunch/internal/winprofile"
 )
 
 // ProfilePath is read-only and ignores environment-provided profile overrides.
@@ -24,17 +27,7 @@ func ProfilePath() (string, error) {
 		return "", e
 	}
 	defer token.Close()
-	b := make([]uint16, 32768)
-	n := uint32(len(b))
-	ok, _, e := profileDir.Call(uintptr(token), uintptr(unsafe.Pointer(&b[0])), uintptr(unsafe.Pointer(&n)))
-	if e = winerr("GetUserProfileDirectory", ok, e); e != nil {
-		return "", e
-	}
-	p, e := cleanPath(syscall.UTF16ToString(b))
-	if e != nil {
-		return "", e
-	}
-	return filepath.Join(p, ".netlaunch"), nil
+	return winprofile.PathForToken(windows.Token(token))
 }
 
 func Dir(path string) error {

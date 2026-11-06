@@ -7,7 +7,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 import { installerInclude, prepareWindowsClientPackage, recoveryEntry, removeUserUninstallerMigration, validateBuildTags,
-  validateBuildInstallPlanResult, validateInstallPlan, windowsClientConfiguration, writeWindowsClientConfiguration } from '../scripts/windows-client-package.mjs'
+  restrictWindowsUninstallUtilities, restrictWindowsUninstaller, validateBuildInstallPlanResult, validateInstallPlan, windowsClientConfiguration, writeWindowsClientConfiguration } from '../scripts/windows-client-package.mjs'
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex')
 async function put(root, path, bytes) {
@@ -94,6 +94,7 @@ test('generated installer retains files unless the fixed recovery verb succeeds'
   assert.deepEqual([...include.matchAll(/ExecWait '"([^"\r\n]+)" ([^'\r\n]+)'/g)].map(match => [match[1], match[2]]), [
     ['$LuminaNoncePath\\lumina-service.exe', '--print-install-plan'],
     ['$LuminaNoncePath\\lumina-service.exe', '--resume-install-preflight'],
+    ['$LuminaNoncePath\\lumina-service.exe', '--resume-install-preflight'],
     ['$LuminaNoncePath\\lumina-service.exe', '--bootstrap'], ['$LuminaNoncePath\\lumina-service.exe', '--uninstall'],
   ])
   assert.match(include, /!macro customInit[\s\S]*Call LuminaPrepareBootstrap[\s\S]*--print-install-plan[\s\S]*PREFLIGHT_REJECTED[\s\S]*!macroend/)
@@ -125,7 +126,7 @@ test('the compiled install section cannot migrate an elevated per-user uninstall
   assert.ok(section.indexOf('uninstallOldVersion SHELL_CONTEXT') < section.indexOf('!insertmacro customInstall'))
   assert.ok(include.includes(`!cd "${join(prepared.outputRoot, 'nsis-overrides')}"`))
   assert.ok(include.includes('!addincludedir "'))
-  assert.deepEqual(await readdir(join(prepared.outputRoot, 'nsis-overrides')), ['installSection.nsh'])
+  assert.deepEqual(await readdir(join(prepared.outputRoot, 'nsis-overrides')), ['installSection.nsh', 'installUtil.nsh', 'uninstaller.nsh'])
   assert.ok(include.includes('!ifndef LUMINA_MACHINE_ONLY_INSTALL_SECTION'))
   assert.ok(section.startsWith('!define LUMINA_MACHINE_ONLY_INSTALL_SECTION\n'))
   assert.throws(() => removeUserUninstallerMigration(original.replace('HKEY_CURRENT_USER', 'changed')), /branch changed/)
@@ -148,12 +149,37 @@ test('customHeader defers protected plugin functions and keeps the template incl
   assert.equal(protectedIncludes.length, 1)
   assert.ok(protectedIncludes[0].index > start && protectedIncludes[0].index < end,
     'plugin functions must be expanded by customHeader after the shared plugin directories, never while defining hooks')
-  assert.ok(protectedIncludes[0].index < include.indexOf('!ifndef BUILD_UNINSTALLER', start),
-    'both native installer and uninstaller branches require the protected functions')
   assert.ok(protectedIncludes[0].index < include.indexOf('!cd ', start))
   assert.ok(!include.slice(0, start).includes('!cd '), 'shared header must not change CWD before builder includes')
-  assert.match(include.slice(start, end), /!ifndef BUILD_UNINSTALLER\s+!cd "[^"\r\n]+"\s+!endif/)
+  assert.match(include.slice(start, end), /!cd "[^"\r\n]+"/)
+  assert.ok(!include.slice(start, end).includes('BUILD_UNINSTALLER'), 'both branches must select the restricted templates')
   assert.equal((include.match(/!cd /g) ?? []).length, 1)
+})
+
+test('fixed registry claims bracket legacy uninstall and registration without mutable execution or deletion paths', async t => {
+  const f = await fixture(t), prepared = await prepareWindowsClientPackage(f)
+  const templateRoot = join(dirname(createRequire(import.meta.url).resolve('app-builder-lib/package.json')), 'templates/nsis')
+  const utilitySource = await readFile(join(templateRoot, 'include/installUtil.nsh'), 'utf8')
+  const uninstallerSource = await readFile(join(templateRoot, 'uninstaller.nsh'), 'utf8')
+  const utility = await readFile(join(prepared.outputRoot, 'nsis-overrides/installUtil.nsh'), 'utf8')
+  const uninstaller = await readFile(join(prepared.outputRoot, 'nsis-overrides/uninstaller.nsh'), 'utf8')
+  const section = await readFile(join(prepared.outputRoot, 'nsis-overrides/installSection.nsh'), 'utf8')
+  const include = await readFile(prepared.includePath, 'utf8')
+  assert.equal(utility, restrictWindowsUninstallUtilities(utilitySource))
+  assert.equal(uninstaller, restrictWindowsUninstaller(uninstallerSource))
+  const old = /^Function uninstallOldVersion\n([\s\S]*?)^FunctionEnd$/m.exec(utility)?.[1]
+  assert.ok(old && !/ReadReg|readReg|PLUGINSDIR|CopyFiles|copyFile/.test(old))
+  assert.ok(!/GetInQuotes|GetFileParent/.test(utility), 'unused registry command parsers must not survive the native warning gate')
+  assert.deepEqual([...old.matchAll(/ExecWait '([^'\r\n]+)'/g)].map(match => match[1]),
+    ['"$PROGRAMFILES64\\LuminaVPN\\Uninstall LuminaVPN.exe" /S /KEEP_APP_DATA /allusers --updated --keep-shortcuts _?=$PROGRAMFILES64\\LuminaVPN'])
+  assert.ok(section.indexOf('handleUninstallResult SHELL_CONTEXT') < section.indexOf('!insertmacro LuminaClaimRegistry'))
+  assert.ok(section.indexOf('!insertmacro LuminaClaimRegistry') < section.indexOf('!insertmacro installApplicationFiles'))
+  assert.ok(section.indexOf('!insertmacro LuminaClaimRegistry') < section.indexOf('!insertmacro registryAddInstallInfo'))
+  assert.ok(section.includes('!insertmacro LuminaSetLinkVars') && uninstaller.includes('!insertmacro LuminaSetLinkVars'))
+  assert.ok(!/ReadRegStr.*MenuDirectory/.test(uninstaller))
+  assert.match(include, /!macro LuminaClaimRegistry[\s\S]*--resume-install-preflight[\s\S]*REGISTRY_CLAIM_REJECTED[\s\S]*LuminaBootstrapFatal/)
+  assert.throws(() => restrictWindowsUninstallUtilities(utilitySource.replace('Function uninstallOldVersion', 'Function unknown')), /changed/)
+  assert.throws(() => restrictWindowsUninstaller(uninstallerSource.replace('MenuDirectory', 'UnknownDirectory')), /changed/)
 })
 
 test('protected bootstrap source uses exclusive files and locks the verified image through the fixed action', async () => {
@@ -165,6 +191,29 @@ test('protected bootstrap source uses exclusive files and locks the verified ima
   assert.ok(source.includes('bootstrap-trust.json') && source.includes('System::Int64Op $LuminaCreated + 1800'))
   assert.ok(source.includes('SHGetKnownFolderPath') && source.includes('GetSecurityInfo'))
   assert.ok(source.includes('PROGRAMDATA_ANCESTOR_ACL') && source.includes('DIRECTORY_REPARSE_OR_QUERY'))
+  assert.match(source, /LookupAccountNameW\(p 0, w "NT SERVICE\\TrustedInstaller", p \$LuminaTrustedInstallerSID, \*i 68/)
+  assert.equal((source.match(/EqualSid\(p r[04], p \$LuminaTrustedInstallerSID\)/g) ?? []).length, 2)
+  assert.equal((source.match(/\$\{If\} \$LuminaCheckStrict == 0\s+System::Call '[^'\n]*EqualSid\(p r[04], p \$LuminaTrustedInstallerSID\)/g) ?? []).length, 2,
+    'OS service identity applies only to ancestor owner/writer checks, never strict setup payloads')
+  assert.match(source, /GetLengthSid\(p \$LuminaTrustedInstallerSID\)/)
+  assert.ok(!/\*[ip]\s+\d+\s+\.r\d/.test(source), 'System input/output parameters have exactly source and destination slots')
+  assert.match(source, /GetSecurityDescriptorControl\(p r2, \*i 0 r3, \*i \.r4\)/)
+  assert.match(source, /\$\{If\} \$3 = 0x10/)
+  assert.ok(!/\$\{(?:If|AndIf|OrIf|ElseIf)\}[^\n]*(?:==|!=)\s+0x/.test(source), 'numeric masks must not use LogicLib string equality')
+  assert.match(source, /\$\{If\} \$LuminaCheckStrict == 1\s*;[^\n]*\n\s*IntOp \$7 \$7 & 0x500D0156/)
+  assert.match(source, /IntOp \$7 \$7 & 0x100D0040/)
+  assert.match(source, /CreateFileW\(w r0, i 0x120081, i 1, p 0, i 3, i 0x02200000/)
+  assert.match(source, /GetFinalPathNameByHandleW\(p r1, w \.r4, i \$\{NSIS_MAX_STRLEN\}, i 0\)/)
+  assert.ok(source.includes('StrCpy $5 "\\\\?\\$0"'))
+  const anchorStart = source.indexOf('StrCpy $LuminaAnchorPath $LuminaSetupParent')
+  const createSetup = source.indexOf('CreateDirectoryW(w "$LuminaSetupParent"')
+  assert.ok(anchorStart > 0 && createSetup > anchorStart)
+  const anchor = source.slice(anchorStart, createSetup)
+  assert.ok(anchor.includes('StrCpy $LuminaAnchorPath "$LuminaProgramData\\Microsoft"'))
+  assert.match(anchor, /LuminaAnchorHandle[\s\S]*LuminaCheckProtected[\s\S]*LuminaCheckPinnedDirectory/)
+  for (const failure of ['PROGRAMDATA_ANCESTOR_CHANGED', 'PROGRAMDATA_CHANGED', 'PROGRAMDATA_ANCHOR_CHANGED']) assert.ok(anchor.includes(failure))
+  assert.match(source, /CloseHandle\(p \$LuminaAnchorHandle\)'\s+StrCpy \$LuminaAnchorHandle 0/)
+  assert.match(source, /System::Free \$LuminaTrustedInstallerSID\s+StrCpy \$LuminaTrustedInstallerSID 0/)
   assert.ok(!/PowerShell|nsExec::|CopyFileW|RMDir \/r|ExecWait.*\$INSTDIR/.test(source))
 })
 

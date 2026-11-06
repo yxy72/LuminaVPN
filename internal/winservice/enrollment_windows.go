@@ -5,11 +5,11 @@ package winservice
 import (
 	"errors"
 	"fmt"
-	"path/filepath"
 	"runtime"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+	"netlaunch/internal/winprofile"
 )
 
 var getShellWindow = windows.NewLazySystemDLL("user32.dll").NewProc("GetShellWindow")
@@ -17,7 +17,10 @@ var getWindowThreadProcessID = windows.NewLazySystemDLL("user32.dll").NewProc("G
 
 func enrollmentTokenFacts(token windows.Token) (EnrollmentFacts, error) {
 	user, err := token.GetTokenUser()
-	if err != nil {
+	if err != nil || user == nil || user.User.Sid == nil {
+		if err == nil {
+			err = errors.New("token user observation unknown")
+		}
 		return EnrollmentFacts{}, err
 	}
 	groups, err := token.GetTokenGroups()
@@ -25,7 +28,12 @@ func enrollmentTokenFacts(token windows.Token) (EnrollmentFacts, error) {
 		return EnrollmentFacts{}, err
 	}
 	var logon string
+	var enabledAdmin, adminDenyOnly bool
 	for _, group := range groups.AllGroups() {
+		if group.Sid.String() == "S-1-5-32-544" {
+			enabledAdmin = group.Attributes&windows.SE_GROUP_ENABLED != 0
+			adminDenyOnly = group.Attributes&windows.SE_GROUP_USE_FOR_DENY_ONLY != 0
+		}
 		if group.Attributes&0xC0000000 == 0xC0000000 && group.Attributes&windows.SE_GROUP_ENABLED != 0 && group.Attributes&windows.SE_GROUP_USE_FOR_DENY_ONLY == 0 {
 			if logon != "" {
 				return EnrollmentFacts{}, errors.New("multiple enabled logon identities")
@@ -48,11 +56,9 @@ func enrollmentTokenFacts(token windows.Token) (EnrollmentFacts, error) {
 	if needed != 4 {
 		return EnrollmentFacts{}, errors.New("token session observation unknown")
 	}
-	if err = windows.GetTokenInformation(token, windows.TokenElevationType, (*byte)(unsafe.Pointer(&elevationType)), 4, &needed); err != nil {
+	err = windows.GetTokenInformation(token, windows.TokenElevationType, (*byte)(unsafe.Pointer(&elevationType)), 4, &needed)
+	if elevationType, err = knownTokenElevationType(elevationType, needed, err); err != nil {
 		return EnrollmentFacts{}, err
-	}
-	if needed != 4 || elevationType < 1 || elevationType > 3 {
-		return EnrollmentFacts{}, errors.New("token elevation type observation unknown")
 	}
 	epoch, interactive, err := kernelLogonEpoch(statistics.AuthenticationID, user.User.Sid.String(), session)
 	if err != nil {
@@ -62,23 +68,49 @@ func enrollmentTokenFacts(token windows.Token) (EnrollmentFacts, error) {
 	if err != nil {
 		return EnrollmentFacts{}, err
 	}
-	// TOKEN_ELEVATION_TYPE: Default=1, Full=2, Limited=3 (winnt.h).
-	return EnrollmentFacts{SID: user.User.Sid.String(), LogonSID: logon, AuthenticationID: fmt.Sprintf("%08x-%08x", statistics.AuthenticationID.HighPart, statistics.AuthenticationID.LowPart), SessionID: session, Primary: statistics.TokenType == windows.TokenPrimary, Elevated: elevated, Limited: elevationType == 3, LogonEpoch: epoch, Interactive: interactive}, nil
+	profile, err := winprofile.PathForToken(token)
+	if err != nil {
+		return EnrollmentFacts{}, errors.New("OS user profile unavailable")
+	}
+	return EnrollmentFacts{SID: user.User.Sid.String(), LogonSID: logon, AuthenticationID: fmt.Sprintf("%08x-%08x", statistics.AuthenticationID.HighPart, statistics.AuthenticationID.LowPart), SessionID: session, TokenType: statistics.TokenType, ImpersonationLevel: statistics.ImpersonationLevel, ElevationType: elevationType, Elevated: elevated, EnabledAdmin: enabledAdmin, AdminDenyOnly: adminDenyOnly, LogonEpoch: epoch, Interactive: interactive, ProfileID: localProfileID(profile)}, nil
 }
+
+// VerifyCurrentInteractiveUser checks the real process token used by a fixed
+// user worker. It never substitutes a thread token or changes token elevation.
+func VerifyCurrentInteractiveUser() error {
+	var token windows.Token
+	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_QUERY, &token); err != nil {
+		return err
+	}
+	defer token.Close()
+	facts, err := enrollmentTokenFacts(token)
+	if err != nil {
+		return err
+	}
+	return requireDesktopProcess(facts)
+}
+
 func captureInstallerEnrollment() (Binding, error) {
-	process := windows.GetCurrentProcessToken()
+	var process windows.Token
+	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_QUERY, &process); err != nil {
+		return Binding{}, err
+	}
+	defer process.Close()
 	full, err := enrollmentTokenFacts(process)
 	if err != nil {
 		return Binding{}, err
 	}
-	linked, err := process.GetLinkedToken()
-	if err != nil {
-		return Binding{}, errors.New("linked ordinary user token required")
-	}
-	defer linked.Close()
-	limited, err := enrollmentTokenFacts(linked)
-	if err != nil {
-		return Binding{}, err
+	var limited EnrollmentFacts
+	if full.ElevationType == tokenElevationFull {
+		linked, err := process.GetLinkedToken()
+		if err != nil {
+			return Binding{}, errors.New("linked desktop user token required")
+		}
+		defer linked.Close()
+		limited, err = enrollmentTokenFacts(linked)
+		if err != nil {
+			return Binding{}, err
+		}
 	}
 	window, _, _ := getShellWindow.Call()
 	if window == 0 {
@@ -104,10 +136,5 @@ func captureInstallerEnrollment() (Binding, error) {
 	if err != nil {
 		return Binding{}, err
 	}
-	profile, err := linked.GetUserProfileDirectory()
-	if err != nil || !filepath.IsAbs(profile) {
-		return Binding{}, errors.New("ordinary native profile unavailable")
-	}
-	// Native userenv path, not the elevated process environment or RPC input.
-	return verifiedEnrollment(full, limited, shell, localProfileID(filepath.Join(profile, ".netlaunch")))
+	return verifiedEnrollment(full, limited, shell)
 }

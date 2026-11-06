@@ -9,15 +9,14 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"golang.org/x/sys/windows"
 	"netlaunch/internal/auth"
 	"netlaunch/internal/policy"
 	p "netlaunch/internal/serviceprotocol"
+	"netlaunch/internal/winservice"
 )
 
 // ServiceUserSnapshotData is private bootstrap data for the installed service.
@@ -43,16 +42,7 @@ type serviceSnapshotDependencies struct {
 }
 
 func serviceInteractiveUser() error {
-	token := windows.GetCurrentProcessToken()
-	user, err := token.GetTokenUser()
-	if err != nil || user.User.Sid == nil || user.User.Sid.String() == "S-1-5-18" {
-		return errors.New("real interactive user process required")
-	}
-	var session uint32
-	if windows.ProcessIdToSessionId(uint32(os.Getpid()), &session) != nil || session == 0 {
-		return errors.New("interactive user session required")
-	}
-	return nil
+	return winservice.VerifyCurrentInteractiveUser()
 }
 func serviceDefaultProfile(requested string, resolve func() (string, error)) (string, error) {
 	profile, err := resolve()

@@ -3,6 +3,7 @@ package winservice
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -46,11 +47,19 @@ func (f *legacyRegistryFixture) OpenMachine(view uint32, path string) (legacyReg
 func (f *legacyRegistryFixture) HasCurrentUserKey(view uint32, path string) (bool, error) {
 	return f.user[registryFixtureKey(view, path)], nil
 }
+func (f *legacyRegistryFixture) ProbeMachine(view uint32, path string) (bool, error) {
+	name := registryFixtureKey(view, path)
+	if err := f.unsafe[name]; err != nil {
+		return false, err
+	}
+	_, exists := f.machine[name]
+	return exists, nil
+}
 func (key *legacyRegistryFixtureKey) StringValue(name string) (string, error) {
 	key.fixture.reads = append(key.fixture.reads, key.name+":"+name)
 	value, exists := key.values[name]
 	if !exists {
-		return "", errors.New("fixture value does not exist")
+		return "", errLegacyRegistryValueMissing
 	}
 	return value, nil
 }
@@ -158,7 +167,7 @@ func TestLegacyPreflightRejectsUserRegistrationsAndUnsafeMachineAncestors(t *tes
 		}
 	}
 	f := &legacyRegistryFixture{}
-	if err := checkLegacyUninstall(builderFixtureRoot, f, func(string) error { t.Fatal("absent registration has no image to verify"); return nil }); err != nil {
+	if err := checkLegacyUninstall(builderFixtureRoot, f, func(string) error { return fs.ErrNotExist }); err != nil {
 		t.Fatal("clean first install was rejected", err)
 	}
 }
@@ -182,5 +191,72 @@ func TestRegistryDescriptorRejectsEveryUntrustedMutationRight(t *testing.T) {
 	}
 	if err := validateRegistryDescriptor("trusted-installer", []protectedACE{{Kind: 0, SID: "trusted-installer", Mask: 0x10000000}}, "trusted-installer"); err != nil {
 		t.Fatal("OS-resolved TrustedInstaller rejected", err)
+	}
+}
+
+func TestLegacyPreflightReservationsAndMissingRegistrationStillInspectFixedImage(t *testing.T) {
+	for _, mode := range []string{"absent", "first-reserved", "both-reserved", "registry-removed", "unsafe-image"} {
+		t.Run(mode, func(t *testing.T) {
+			f := &legacyRegistryFixture{machine: map[string]map[string]string{}}
+			if mode == "first-reserved" || mode == "both-reserved" {
+				f.machine[registryFixtureKey(0x100, builderFixtureInstall)] = map[string]string{}
+			}
+			if mode == "both-reserved" {
+				f.machine[registryFixtureKey(0x100, builderFixtureUninstall)] = map[string]string{}
+			}
+			checked := 0
+			err := checkLegacyUninstall(builderFixtureRoot, f, func(path string) error {
+				checked++
+				if path != filepath.Join(builderFixtureRoot, "Uninstall LuminaVPN.exe") {
+					t.Fatal(path)
+				}
+				if mode == "unsafe-image" {
+					return errors.New("untrusted fixed image")
+				}
+				if mode == "registry-removed" {
+					return nil
+				}
+				return fs.ErrNotExist
+			})
+			if (err == nil) != (mode != "unsafe-image") || checked != 1 || f.closed != f.opened {
+				t.Fatalf("checked=%d err=%v", checked, err)
+			}
+		})
+	}
+}
+
+func TestLegacyPreflightRejectsShortcutTraversalBeforeOldUninstaller(t *testing.T) {
+	for _, name := range []string{"ShortcutName", "MenuDirectory"} {
+		f := normalLegacyFixture()
+		f.machine[registryFixtureKey(0x100, builderFixtureInstall)][name] = `..\..\unrelated`
+		if checkLegacyUninstall(builderFixtureRoot, f, func(string) error { t.Fatal("unsafe metadata reached executable check"); return nil }) == nil {
+			t.Fatal("unsafe legacy shortcut path accepted")
+		}
+	}
+}
+
+func TestMissingLegacyImageRequiresAbsentOrFullyRetiredServiceState(t *testing.T) {
+	if err := missingLegacyImagePreflight(installJournal{}, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	_, j := journalFixture()
+	if missingLegacyImagePreflight(j, true, nil) == nil {
+		t.Fatal("pending bootstrap lost its uninstaller")
+	}
+	j = provisionedJournal(j)
+	j.Phase = "complete"
+	if missingLegacyImagePreflight(j, true, nil) == nil {
+		t.Fatal("active complete installation lost its uninstaller")
+	}
+	_, retired := retireJournalFixture()
+	if missingLegacyImagePreflight(retired, true, nil) == nil {
+		t.Fatal("pending retirement lost its uninstaller")
+	}
+	retired.Phase = "complete"
+	if err := missingLegacyImagePreflight(retired, true, nil); err != nil {
+		t.Fatal(err)
+	}
+	if missingLegacyImagePreflight(retired, true, errors.New("unreadable state")) == nil {
+		t.Fatal("unknown state accepted")
 	}
 }

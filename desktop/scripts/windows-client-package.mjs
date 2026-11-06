@@ -90,9 +90,16 @@ export function installerInclude(releaseID, { bootstrapSource, bootstrapSHA256, 
   !include "${protectedInclude}"
   ; The template first loads its own multiUser.nsh from the original CWD.
   ; Moving earlier can select NSIS's unrelated, case-insensitive MultiUser.nsh.
-  !ifndef BUILD_UNINSTALLER
-    !cd "${overrides}"
-  !endif
+  !cd "${overrides}"
+!macroend
+!macro LuminaSetLinkVars
+  ; Registry metadata is never a shortcut deletion or rename path authority.
+  StrCpy $oldShortcutName "LuminaVPN"
+  StrCpy $oldMenuDirectory ""
+  StrCpy $oldDesktopLink "$DESKTOP\\LuminaVPN.lnk"
+  StrCpy $newDesktopLink "$DESKTOP\\LuminaVPN.lnk"
+  StrCpy $oldStartMenuLink "$SMPROGRAMS\\LuminaVPN.lnk"
+  StrCpy $newStartMenuLink "$SMPROGRAMS\\LuminaVPN.lnk"
 !macroend
 !macro customInit
   \${IfNot} \${RunningX64}
@@ -164,6 +171,23 @@ export function installerInclude(releaseID, { bootstrapSource, bootstrapSHA256, 
 !macro customUnInstallCheckCurrentUser
   !insertmacro LuminaRequireUninstallSuccess
 !macroend
+!macro LuminaClaimRegistry
+  ; A successful previous uninstaller deleted the product keys. Reclaim only
+  ; those fixed leaves before the template writes any registration values.
+  Call LuminaPrepareBootstrap
+  ClearErrors
+  ExecWait '"$LuminaNoncePath\\lumina-service.exe" --resume-install-preflight' $R0
+  \${If} \${Errors}
+    StrCpy $LuminaFailure "REGISTRY_CLAIM_START"
+    Call LuminaBootstrapFatal
+  \${EndIf}
+  \${If} $R0 != 0
+    StrCpy $LuminaFailure "REGISTRY_CLAIM_REJECTED"
+    Call LuminaBootstrapFatal
+  \${EndIf}
+  Call LuminaCloseBootstrap
+  ClearErrors
+!macroend
 !macro customInstall
   !ifndef LUMINA_MACHINE_ONLY_INSTALL_SECTION
     !error "The restricted machine-only install section was not selected"
@@ -208,7 +232,54 @@ export function removeUserUninstallerMigration(source) {
   if (guarded.includes('HKEY_CURRENT_USER') || !guarded.includes('!insertmacro uninstallOldVersion SHELL_CONTEXT')) {
     throw new Error('NSIS installer migration cannot be restricted')
   }
+  if (guarded.split('!insertmacro setLinkVars').length !== 2
+      || guarded.split('!insertmacro handleUninstallResult SHELL_CONTEXT\n').length !== 2) throw new Error('Pinned NSIS installation sequence changed')
   return '!define LUMINA_MACHINE_ONLY_INSTALL_SECTION\n' + guarded
+    .replace('!insertmacro setLinkVars', '!insertmacro LuminaSetLinkVars')
+    .replace('!insertmacro handleUninstallResult SHELL_CONTEXT\n', '!insertmacro handleUninstallResult SHELL_CONTEXT\n!insertmacro LuminaClaimRegistry\n')
+}
+
+export function restrictWindowsUninstallUtilities(source) {
+  source = source.replaceAll('\r\n', '\n')
+  const functions = [...source.matchAll(/^Function uninstallOldVersion\n[\s\S]*?^FunctionEnd$/gm)]
+  if (functions.length !== 1 || !functions[0][0].includes('!insertmacro readReg $uninstallString')
+      || !functions[0][0].includes('!insertmacro copyFile "$uninstallerFileName" "$uninstallerFileNameTemp"')
+      || (functions[0][0].match(/ExecWait /g) ?? []).length !== 2) throw new Error('Pinned NSIS old-uninstaller function changed')
+  // The native preflight verifies this fixed protected file even when legacy
+  // registration was removed. Never execute a registry command or a temp copy.
+  let restricted = source.replace(functions[0][0], `Function uninstallOldVersion
+  Pop $R9
+  ClearErrors
+  StrCpy $R0 0
+  \${If} $R9 != "SHELL_CONTEXT"
+  \${OrIf} $installMode != "all"
+  \${OrIf} $INSTDIR != "$PROGRAMFILES64\\LuminaVPN"
+    StrCpy $R0 2
+    SetErrors
+    Return
+  \${EndIf}
+  IfFileExists "$PROGRAMFILES64\\LuminaVPN\\Uninstall LuminaVPN.exe" 0 lumina_no_old_uninstaller
+  ExecWait '"$PROGRAMFILES64\\LuminaVPN\\Uninstall LuminaVPN.exe" /S /KEEP_APP_DATA /allusers --updated --keep-shortcuts _?=$PROGRAMFILES64\\LuminaVPN' $R0
+  lumina_no_old_uninstaller:
+FunctionEnd`)
+  // These parsers belonged only to the removed mutable registry command path.
+  // Drop their definitions instead of suppressing native NSIS unused warnings.
+  for (const name of ['GetInQuotes', 'GetFileParent']) {
+    const definition = new RegExp(`^Function ${name}\\n[\\s\\S]*?^FunctionEnd\\n`, 'gm')
+    if ([...restricted.matchAll(definition)].length !== 1) throw new Error('Pinned NSIS legacy parser changed')
+    restricted = restricted.replace(definition, '')
+  }
+  const macro = /^!macro GetInQuotes Var Str\n[\s\S]*?^!macroend\n/gm
+  if ([...restricted.matchAll(macro)].length !== 1) throw new Error('Pinned NSIS legacy parser macro changed')
+  return restricted.replace(macro, '')
+}
+
+export function restrictWindowsUninstaller(source) {
+  source = source.replaceAll('\r\n', '\n')
+  const menuRead = 'ReadRegStr $R1 SHELL_CONTEXT "\${INSTALL_REGISTRY_KEY}" MenuDirectory'
+  if (source.split('!insertmacro setLinkVars').length !== 2 || source.split(menuRead).length !== 2) throw new Error('Pinned NSIS uninstaller shortcuts changed')
+  return source.replace('!insertmacro setLinkVars', '!insertmacro LuminaSetLinkVars')
+    .replace(menuRead, 'StrCpy $R1 "" ; Fixed flat product shortcut has no menu directory.')
 }
 
 /** Turn one immutable staged release into the GUI and machine payloads. */
@@ -252,6 +323,8 @@ export async function prepareWindowsClientPackage({ releaseStage, outputRoot }) 
   const nsisOverrideRoot = join(outputRoot, 'nsis-overrides')
   const section = removeUserUninstallerMigration(await readFile(join(nsisTemplateRoot, 'installSection.nsh'), 'utf8'))
   await put(nsisOverrideRoot, 'installSection.nsh', Buffer.from(section))
+  await put(nsisOverrideRoot, 'installUtil.nsh', Buffer.from(restrictWindowsUninstallUtilities(await readFile(join(nsisTemplateRoot, 'include', 'installUtil.nsh'), 'utf8'))))
+  await put(nsisOverrideRoot, 'uninstaller.nsh', Buffer.from(restrictWindowsUninstaller(await readFile(join(nsisTemplateRoot, 'uninstaller.nsh'), 'utf8'))))
   await put(outputRoot, 'installer.nsh', Buffer.from(installerInclude(releaseID, {
     bootstrapSource: join(outputRoot, 'machine', 'releases', releaseID, 'lumina-service.exe'), bootstrapSHA256: catalog.files.service.sha256,
     nsisTemplateRoot, nsisOverrideRoot,

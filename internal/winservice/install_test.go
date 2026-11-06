@@ -147,22 +147,64 @@ func TestUninstallDoesNotRecoverAcrossAStillRunningMainService(t *testing.T) {
 	}
 }
 func TestEnrollmentPersistsLimitedShellIdentityNotElevatedAuthID(t *testing.T) {
-	linked := EnrollmentFacts{SID: "S-1-5-21-1", LogonSID: "S-1-5-5-1-1", AuthenticationID: "limited-auth", SessionID: 1, Primary: true, Limited: true, LogonEpoch: "epoch-1", Interactive: true}
+	linked := testDesktopFacts()
+	linked.AuthenticationID = "limited-auth"
 	shell := linked
 	full := linked
 	full.AuthenticationID = "full-auth"
 	full.Elevated = true
-	full.Limited = false
-	binding, err := verifiedEnrollment(full, linked, shell, "profile")
+	full.EnabledAdmin = true
+	full.AdminDenyOnly = false
+	full.ElevationType = tokenElevationFull
+	binding, err := verifiedEnrollment(full, linked, shell)
 	if err != nil || binding.AuthenticationID != "limited-auth" {
 		t.Fatal("fulltoken identity leaked into GUI enrollment")
 	}
-	for _, alter := range []func(*EnrollmentFacts){func(f *EnrollmentFacts) { f.AuthenticationID = "other" }, func(f *EnrollmentFacts) { f.LogonSID = "S-1-5-5-1-2" }, func(f *EnrollmentFacts) { f.SID = "S-1-5-21-2" }, func(f *EnrollmentFacts) { f.SessionID = 2 }, func(f *EnrollmentFacts) { f.Elevated = true; f.Limited = false }, func(f *EnrollmentFacts) { f.Primary = false }} {
+	for _, alter := range []func(*EnrollmentFacts){func(f *EnrollmentFacts) { f.AuthenticationID = "other" }, func(f *EnrollmentFacts) { f.LogonSID = "S-1-5-5-1-2" }, func(f *EnrollmentFacts) { f.SID = "S-1-5-21-2" }, func(f *EnrollmentFacts) { f.SessionID = 2 }, func(f *EnrollmentFacts) { f.Elevated = true; f.ElevationType = tokenElevationFull }, func(f *EnrollmentFacts) { f.TokenType = 2 }, func(f *EnrollmentFacts) { f.ProfileID = "foreign" }} {
 		bad := linked
 		alter(&bad)
-		if _, err := verifiedEnrollment(full, bad, shell, "profile"); err == nil {
+		if _, err := verifiedEnrollment(full, bad, shell); err == nil {
 			t.Fatal("mismatched/full/foreign token enrolled")
 		}
+	}
+}
+
+func TestEnrollmentUnfilteredAdministratorRequiresExactDesktopLogin(t *testing.T) {
+	full := testUnfilteredAdminFacts()
+	binding, err := verifiedEnrollment(full, EnrollmentFacts{}, full)
+	if err != nil || binding.OwnerSID != full.SID || binding.AuthenticationID != full.AuthenticationID || binding.LogonSID != full.LogonSID || binding.LogonEpoch != full.LogonEpoch || binding.ProfileID != full.ProfileID {
+		t.Fatal("verified unfiltered desktop identity was not enrolled", binding, err)
+	}
+	for name, change := range map[string]func(*EnrollmentFacts){
+		"user":              func(f *EnrollmentFacts) { f.SID = "S-1-5-21-2" },
+		"logon":             func(f *EnrollmentFacts) { f.LogonSID = "S-1-5-5-1-2" },
+		"authentication":    func(f *EnrollmentFacts) { f.AuthenticationID = "other" },
+		"session":           func(f *EnrollmentFacts) { f.SessionID = 2 },
+		"epoch":             func(f *EnrollmentFacts) { f.LogonEpoch = "epoch-2" },
+		"profile":           func(f *EnrollmentFacts) { f.ProfileID = "foreign" },
+		"nonprimary":        func(f *EnrollmentFacts) { f.TokenType = 2 },
+		"disabled-admin":    func(f *EnrollmentFacts) { f.EnabledAdmin = false },
+		"deny-only-admin":   func(f *EnrollmentFacts) { f.AdminDenyOnly = true },
+		"not-elevated":      func(f *EnrollmentFacts) { f.Elevated = false },
+		"full-elevated":     func(f *EnrollmentFacts) { f.ElevationType = tokenElevationFull },
+		"unknown-elevation": func(f *EnrollmentFacts) { f.ElevationType = 0 },
+		"noninteractive":    func(f *EnrollmentFacts) { f.Interactive = false },
+		"system":            func(f *EnrollmentFacts) { f.SID = "S-1-5-18" },
+		"session-zero":      func(f *EnrollmentFacts) { f.SessionID = 0 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			bad := full
+			change(&bad)
+			if _, err := verifiedEnrollment(full, EnrollmentFacts{}, bad); err == nil {
+				t.Fatal("mismatched or invalid desktop shell accepted")
+			}
+			if _, err := verifiedEnrollment(bad, EnrollmentFacts{}, full); err == nil {
+				t.Fatal("mismatched or invalid installer accepted")
+			}
+		})
+	}
+	if _, err := verifiedEnrollment(full, full, full); err == nil {
+		t.Fatal("linked-token claims accepted in unfiltered mode")
 	}
 }
 func TestInstallerCommandHasNoPathOrShellAuthority(t *testing.T) {
