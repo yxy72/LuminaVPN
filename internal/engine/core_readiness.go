@@ -90,6 +90,14 @@ func measurePersonalWith(ctx context.Context, names, probes []string, request fu
 }
 
 func applyPersonalSamples(parent context.Context, run string, p *selector.Policy, started time.Time, values map[string]int) error {
+	return applyPersonalSamplesWith(parent, run, p, func(now time.Time) (string, string) { return p.DecideSamplesSince(now, started, values) })
+}
+
+func applyPersonalTimedSamples(parent context.Context, run string, p *selector.Policy, samples map[string]selector.TimedSample) error {
+	return applyPersonalSamplesWith(parent, run, p, func(now time.Time) (string, string) { return p.DecideTimedSamples(now, samples) })
+}
+
+func applyPersonalSamplesWith(parent context.Context, run string, p *selector.Policy, decide func(time.Time) (string, string)) error {
 	if parent.Err() != nil {
 		return parent.Err()
 	}
@@ -99,7 +107,7 @@ func applyPersonalSamples(parent context.Context, run string, p *selector.Policy
 	if e != nil {
 		return e
 	}
-	node, _ := p.DecideSamplesSince(time.Now(), started, values)
+	node, _ := decide(time.Now())
 	if e = selectPersonalContext(ctx, run, node); e != nil {
 		return e
 	}

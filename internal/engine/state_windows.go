@@ -130,6 +130,9 @@ func update(run string, fn func(*State) error) error {
 	return save(run, &s)
 }
 func guard(run string, s *State) error {
+	if err := s.Manifest.ValidateMode(); err != nil {
+		return err
+	}
 	if s.Windows != nil && !s.Windows.ValidationDeadline.IsZero() && !time.Now().Before(s.Windows.ValidationDeadline) {
 		return errors.New("validation deadline reached")
 	}
@@ -233,13 +236,23 @@ func networkManager(run string) (winstate.Manager, error) {
 	if e != nil {
 		return winstate.Manager{}, e
 	}
-	return winstate.Manager{Store: winstate.NativeStorage{Files: files, RunID: id}, Native: winstate.NativeBackend{}}, nil
+	retained := false
+	if raw, err := files.Read(filepath.Join(id, "service-owned.json"), 16<<10); err == nil {
+		var binding ServiceRunBinding
+		if json.Unmarshal(raw, &binding) != nil || binding.ExecutorSID != "S-1-5-18" || !serviceProfileID.MatchString(binding.ProfileID) {
+			return winstate.Manager{}, errors.New("service evidence marker rejected")
+		}
+		retained = true
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return winstate.Manager{}, err
+	}
+	return winstate.Manager{Store: winstate.NativeStorage{Files: files, RunID: id, RetainEvidence: retained}, Native: winstate.NativeBackend{}, RetainEvidence: retained}, nil
 }
 func readCore(run string, v any) error { return winRead(run, "core.json", v) }
 func saveCore(run string, v any) error { return winWrite(run, "core.json", v) }
 
 func cancelledStatus(run string) error {
-	if _, e := ReadManifest(run); e != nil {
+	if _, e := readRecoveryManifest(run); e != nil {
 		return e
 	}
 	return securefile.Write(filepath.Join(run, "status.json"), Status{Phase: "stopped", Updated: time.Now(), Company: "unavailable", Personal: selector.Reject, RecoveryReason: "cancelled_before_network_changes", Experimental: true})

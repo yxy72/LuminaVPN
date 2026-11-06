@@ -23,6 +23,9 @@ func CheckRecovered(j Journal) error {
 	for _, v := range j.Guards {
 		states = append(states, v.State)
 	}
+	for _, v := range j.IPv6Guards {
+		states = append(states, v.State)
+	}
 	for _, v := range j.Pairs {
 		states = append(states, v.VPN.State, v.Capture.State)
 	}

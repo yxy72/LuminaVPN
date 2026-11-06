@@ -98,6 +98,35 @@ def package_fixture(root, goos=DEFAULT_PLATFORM):
     return package, resources
 
 
+def windows_client_fixture(root):
+    package, resources = package_fixture(root, 'windows')
+    backend = (resources / 'backend/netlaunch.exe').read_bytes()
+    payload = {
+        'lumina-service.exe': backend + b'service fixture',
+        'lumina-user-worker.exe': backend + b'worker fixture',
+        'netlaunch.exe': backend,
+    }
+    for directory in ('runtime', 'legal'):
+        for path in (resources / directory).rglob('*'):
+            if path.is_file():
+                payload[directory + '/' + path.relative_to(resources / directory).as_posix()] = path.read_bytes()
+    identity = {'version': 1, 'files': [{'path': name, 'sha256': hashlib.sha256(data).hexdigest()}
+                                      for name, data in sorted(payload.items())]}
+    release_id = hashlib.sha256((json.dumps(identity, separators=(',', ':')) + '\n').encode()).hexdigest()
+    release = package / 'releases' / release_id
+    for name, data in payload.items():
+        write(release / name, data)
+    catalog = {
+        'release_id': release_id,
+        'files': {kind: {'sha256': hashlib.sha256(payload[name]).hexdigest()}
+                  for kind, name in check.WINDOWS_CLIENT_IMAGES.items()},
+        'runtime_manifest_sha256': hashlib.sha256(payload['runtime/manifest.json']).hexdigest(),
+    }
+    write(package / 'release-catalog.json', json.dumps(catalog).encode())
+    write(resources / 'recovery/Stop-and-Recover.cmd', check.windows_client_recovery(release_id).replace(b'\n', b'\r\n'))
+    return package, resources, release, catalog
+
+
 class DesktopPackageTests(unittest.TestCase):
     def setUp(self):
         # Synthetic public bytes have their own independent reviewed fixture
@@ -111,6 +140,61 @@ class DesktopPackageTests(unittest.TestCase):
             package, _ = package_fixture(Path(root), 'windows')
             self.assertEqual(check.check_package(package),
                              {'platform': 'windows', 'runtime_components': 18, 'asar_files': 8})
+
+    def test_windows_client_layout_pins_release_and_gui_to_the_same_bytes(self):
+        with tempfile.TemporaryDirectory() as root:
+            package, resources, release, catalog = windows_client_fixture(Path(root))
+            result = check.check_package(package, windows_client=True)
+            self.assertEqual(result, {'platform': 'windows', 'runtime_components': 18,
+                                      'asar_files': 8, 'client_release': catalog['release_id']})
+            self.assertEqual(check.check_package(package), result)
+
+    def test_windows_client_rejects_mutations_and_legacy_recovery(self):
+        for change in ('pin', 'manifest-pin', 'service', 'backend', 'gui-notice', 'extra', 'recovery', 'missing-catalog'):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as root:
+                package, resources, release, catalog = windows_client_fixture(Path(root))
+                if change in ('pin', 'manifest-pin'):
+                    if change == 'pin':
+                        catalog['files']['service']['sha256'] = '0' * 64
+                    else:
+                        catalog['runtime_manifest_sha256'] = '0' * 64
+                    write(package / 'release-catalog.json', json.dumps(catalog).encode())
+                elif change == 'service':
+                    with (release / 'lumina-service.exe').open('ab') as target:
+                        target.write(b'late signing edit')
+                elif change == 'backend':
+                    with (resources / 'backend/netlaunch.exe').open('ab') as target:
+                        target.write(b'separately rebuilt backend')
+                elif change == 'gui-notice':
+                    write(resources / 'runtime/notices/windows-components.txt', b'different but plain text notice')
+                elif change == 'extra':
+                    write(release / 'session.json', b'local state fixture')
+                elif change == 'recovery':
+                    write(resources / 'recovery/Stop-and-Recover.cmd', check.WINDOWS_OFFLINE_RECOVERY)
+                else:
+                    (package / 'release-catalog.json').unlink()
+                with self.assertRaises(check.PackageError):
+                    check.check_package(package, windows_client=True)
+
+    def test_windows_client_rejects_self_reported_unreviewed_runtime(self):
+        with tempfile.TemporaryDirectory() as root:
+            package, resources, release, catalog = windows_client_fixture(Path(root))
+            path = release / 'runtime/manifest.json'
+            manifest = json.loads(path.read_bytes())
+            target = manifest['files'][0]
+            replacement = b'unreviewed component with a self declared hash'
+            write(release / 'runtime' / target['path'], replacement)
+            target['sha256'] = hashlib.sha256(replacement).hexdigest()
+            write(path, json.dumps(manifest).encode())
+            with self.assertRaisesRegex(check.PackageError, 'RUNTIME_FIXED_CHECKSUM_MISMATCH'):
+                check.check_package(package, windows_client=True)
+
+    def test_windows_client_check_cannot_be_used_for_a_macos_or_offline_package(self):
+        for goos in ('darwin', 'windows'):
+            with self.subTest(platform=goos), tempfile.TemporaryDirectory() as root:
+                package, _ = package_fixture(Path(root), goos)
+                with self.assertRaises(check.PackageError):
+                    check.check_package(package, windows_client=True)
 
     @unittest.skipIf(os.name == 'nt', 'macOS executable permission bits require a POSIX filesystem')
     def test_macos_layout_and_asar_payload_pass(self):

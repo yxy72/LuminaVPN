@@ -44,6 +44,9 @@ func validRevision(id string) bool {
 	return err == nil && len(data) == 32 && strings.ToLower(id) == id
 }
 func readRevision(profile, id string) (policy.Config, error) {
+	return readRevisionForIntent(profile, id, policy.DefaultIntent())
+}
+func readRevisionForIntent(profile, id string, intent policy.ChannelIntent, storage ...bool) (policy.Config, error) {
 	if !validRevision(id) {
 		return policy.Config{}, errors.New("revision must be a full lowercase SHA-256 identifier")
 	}
@@ -51,14 +54,24 @@ func readRevision(profile, id string) (policy.Config, error) {
 	if err != nil {
 		return policy.Config{}, errors.New("private configuration revision unavailable")
 	}
-	cfg, err := policy.Decode(raw)
+	cfg, err := policy.DecodeForIntent(raw, intent)
+	if len(storage) == 1 && storage[0] {
+		cfg, err = policy.DecodeForStorage(raw)
+	}
 	if err != nil || policyRevision(cfg) != id {
 		return policy.Config{}, errors.New("configuration revision failed validation or digest verification")
 	}
 	return cfg, nil
 }
 func saveRevision(profile string, cfg policy.Config) (string, error) {
-	if err := cfg.Validate(); err != nil {
+	return saveRevisionForIntent(profile, cfg, policy.DefaultIntent())
+}
+func saveRevisionForIntent(profile string, cfg policy.Config, intent policy.ChannelIntent, storage ...bool) (string, error) {
+	err := cfg.ValidateForIntent(intent)
+	if len(storage) == 1 && storage[0] {
+		err = cfg.ValidateForStorage()
+	}
+	if err != nil {
 		return "", err
 	}
 	id := policyRevision(cfg)
@@ -68,7 +81,7 @@ func saveRevision(profile string, cfg policy.Config) (string, error) {
 	}
 	path := filepath.Join(dir, id+".json")
 	if _, err := os.Lstat(path); err == nil {
-		_, err = readRevision(profile, id)
+		_, err = readRevisionForIntent(profile, id, intent, storage...)
 		return id, err
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return "", err
@@ -114,7 +127,13 @@ func requireCompleteConfigTransaction(profile string) error {
 	return nil
 }
 func ensurePolicyRevision(profile, expected string) error {
-	cfg, err := readPolicy(profile)
+	return ensurePolicyRevisionForIntent(profile, expected, policy.DefaultIntent())
+}
+func ensurePolicyRevisionForIntent(profile, expected string, intent policy.ChannelIntent, storage ...bool) error {
+	cfg, err := readPolicyForIntent(profile, intent)
+	if len(storage) == 1 && storage[0] {
+		cfg, err = readPolicyForStorage(profile)
+	}
 	if err != nil || policyRevision(cfg) != expected {
 		return errors.New("policy changed outside this transaction; preserve revisions and inspect config history")
 	}
@@ -122,10 +141,20 @@ func ensurePolicyRevision(profile, expected string) error {
 }
 
 type configLifecycle struct {
+	intent  *policy.ChannelIntent
+	storage bool
 	running func() (bool, error)
 	stop    func() error
 	start   func(policy.Config, []policy.Node) error
 }
+
+func lifecycleIntent(life configLifecycle) policy.ChannelIntent {
+	if life.intent != nil {
+		return *life.intent
+	}
+	return policy.DefaultIntent()
+}
+
 type configChangeResult struct {
 	Revision        string `json:"revision"`
 	Previous        string `json:"previous,omitempty"`
@@ -138,7 +167,8 @@ type configChangeResult struct {
 // restart failures restore the previous policy only after network cleanup.
 func changeConfig(profile string, candidate policy.Config, restart, repair bool, life configLifecycle) (configChangeResult, error) {
 	var out configChangeResult
-	if err := candidate.Validate(); err != nil {
+	intent := lifecycleIntent(life)
+	if err := validateLifecyclePolicy(candidate, life); err != nil {
 		return out, err
 	}
 	tx, err := readConfigTransaction(profile)
@@ -148,7 +178,7 @@ func changeConfig(profile string, candidate policy.Config, restart, repair bool,
 	if tx.pending() && !repair {
 		return out, errors.New("unfinished configuration change; run config rollback first")
 	}
-	before, err := readPolicy(profile)
+	before, err := readLifecyclePolicy(profile, life)
 	if err != nil {
 		return out, err
 	}
@@ -156,11 +186,11 @@ func changeConfig(profile string, candidate policy.Config, restart, repair bool,
 	if tx.pending() && from != tx.From && from != tx.To {
 		return out, errors.New("pending configuration transaction conflicts with an external edit")
 	}
-	effective, nodes, err := effectiveProfile(profile, candidate)
+	effective, nodes, err := effectiveLifecycleProfile(profile, candidate, life)
 	if err != nil {
 		return out, err
 	}
-	if err := policy.ValidateEndpoints(effective, nodes); err != nil {
+	if err := validateLifecycleEndpoints(effective, nodes, life); err != nil {
 		return out, err
 	}
 	running, err := life.running()
@@ -186,10 +216,10 @@ func changeConfig(profile string, candidate policy.Config, restart, repair bool,
 	if head.Current != from {
 		head = configHead{Version: 1, Current: from, Previous: head.Current}
 	}
-	if _, err := saveRevision(profile, before); err != nil {
+	if _, err := saveRevisionForIntent(profile, before, intent, life.storage); err != nil {
 		return out, err
 	}
-	if _, err := saveRevision(profile, candidate); err != nil {
+	if _, err := saveRevisionForIntent(profile, candidate, intent, life.storage); err != nil {
 		return out, err
 	}
 	if err := securefile.Write(filepath.Join(profile, "config-head.json"), head); err != nil {
@@ -209,7 +239,7 @@ func changeConfig(profile string, candidate policy.Config, restart, repair bool,
 			return out, errors.Join(errors.New("previous run recovery incomplete; policy was not changed"), err, writeTx())
 		}
 	}
-	if err := ensurePolicyRevision(profile, from); err != nil {
+	if err := ensurePolicyRevisionForIntent(profile, from, intent, life.storage); err != nil {
 		return out, err
 	}
 	if err := securefile.Write(filepath.Join(profile, "policy.json"), candidate); err != nil {
@@ -225,7 +255,7 @@ func changeConfig(profile string, candidate policy.Config, restart, repair bool,
 				tx.Phase = "recovery_required"
 				return out, errors.Join(errors.New("candidate startup and recovery failed; run down, then config rollback"), startErr, cleanupErr, writeTx())
 			}
-			if err := ensurePolicyRevision(profile, to); err != nil {
+			if err := ensurePolicyRevisionForIntent(profile, to, intent, life.storage); err != nil {
 				return out, errors.Join(startErr, err)
 			}
 			if err := securefile.Write(filepath.Join(profile, "policy.json"), before); err != nil {
@@ -238,7 +268,7 @@ func changeConfig(profile string, candidate policy.Config, restart, repair bool,
 			return out, errors.Join(errors.New("candidate startup failed; previous policy restored and network stopped; inspect status before up"), startErr, writeTx())
 		}
 	}
-	if err := ensurePolicyRevision(profile, to); err != nil {
+	if err := ensurePolicyRevisionForIntent(profile, to, intent, life.storage); err != nil {
 		return out, err
 	}
 	next := configHead{Version: 1, Current: to, Previous: from}
@@ -266,7 +296,7 @@ func repairConfigChange(profile string, tx configTransaction, current string, or
 			return out, err
 		}
 	}
-	if err := ensurePolicyRevision(profile, current); err != nil {
+	if err := ensurePolicyRevisionForIntent(profile, current, lifecycleIntent(life), life.storage); err != nil {
 		return out, err
 	}
 	if err := securefile.Write(filepath.Join(profile, "policy.json"), original); err != nil {

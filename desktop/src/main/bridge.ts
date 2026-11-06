@@ -1,13 +1,13 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { TextDecoder } from 'node:util'
 import { isRecord, validateRequest, validateResult } from '../../protocol/validation'
-import type { ReadMethod } from '../../protocol/types'
+import type { BridgeMethod } from '../../protocol/validation'
 
 const FRAME_LIMIT = 1 << 20
 export class DesktopError extends Error {
   constructor(public readonly code: string) { super(code) }
 }
-type Pending = { method: ReadMethod; resolve: (value: unknown) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }
+type Pending = { method: BridgeMethod; resolve: (value: unknown) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }
 
 export class Bridge {
   private child: ChildProcessWithoutNullStreams | null = null
@@ -64,12 +64,12 @@ export class Bridge {
     try { await this.send('session.hello', { protocol_major: 1, app_version: this.version }) }
     catch (e) { this.fail('CONTROL_UNAVAILABLE'); throw e }
   }
-  async request(method: ReadMethod, params: Record<string, unknown> = {}): Promise<unknown> {
+  async request(method: BridgeMethod, params: Record<string, unknown> = {}): Promise<unknown> {
     validateRequest(method, params)
     await this.start()
     return this.send(method, params)
   }
-  private send(method: ReadMethod, params: Record<string, unknown>): Promise<unknown> {
+  private send(method: BridgeMethod, params: Record<string, unknown>): Promise<unknown> {
     if (!this.child) return Promise.reject(new DesktopError('CONTROL_DISCONNECTED'))
     const child = this.child
     if (this.pending.size >= 16) return Promise.reject(new DesktopError('BUSY'))
@@ -84,7 +84,8 @@ export class Bridge {
     const child = this.child; this.child = null
     for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(new DesktopError(code)) }
     this.pending.clear(); this.bytes = Buffer.alloc(0)
-    // This child is only the ordinary read-only bridge, never a network runner.
+    // This child is the ordinary IPC proxy. Network operations belong to the
+    // service and survive this proxy's EOF, timeout or termination.
     child?.stdin.end(); child?.kill()
   }
   close(): void { this.disposed = true; this.fail('CONTROL_DISCONNECTED') }

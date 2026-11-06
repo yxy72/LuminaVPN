@@ -38,6 +38,7 @@ import type {
 } from "../../../protocol/types";
 import { currentChannels, elapsedLabel, timeLabel } from "./evidence";
 import { EnvironmentChecks } from "./environment";
+import { ClientWorkspace } from "./ClientWorkspace";
 
 declare global {
   interface Window {
@@ -110,6 +111,8 @@ const modeNames: Record<string, string> = {
   windows_home: "Windows · Home",
   windows_validation: "Windows · Validation",
   windows_offline: "Windows · Offline",
+  windows_client: "Windows · 日常客户端",
+  windows_client_validation: "Windows · 限时验证客户端",
   offline: "离线维护",
   native: "原生运行",
 };
@@ -155,6 +158,9 @@ function errorMessage(error: unknown): string {
         RULE_SOURCE_UNAVAILABLE: "规则来源缓存暂不可用，请使用已有 CLI 同步后刷新。",
         NODE_CACHE_UNAVAILABLE: "节点缓存暂不可用，请使用已有 CLI 导入或同步后刷新。",
         PROFILE_BUSY: "当前配置仍有活动或未确认的运行，请先通过独立恢复入口停止并确认，再切换配置。",
+        PROFILE_NOT_ENROLLED: "此目录未登记到后台服务，已保留原配置目录。可在设置中恢复默认配置目录。",
+        PROFILE_MISMATCH: "后台登记与目录标识不一致，已保留原配置目录。",
+        PROFILE_RECOVERY_NOT_REQUIRED: "当前目录没有明确的未登记错误，不能通过此入口切换默认目录。",
       } as Record<string, string>
     )[code] ?? "读取未完成，请刷新后重试。"
   );
@@ -271,11 +277,11 @@ function useData() {
     };
   }, [refresh]);
 
-  const chooseProfile = async () => {
+  const chooseProfile = async (restoreDefault = false) => {
     if (!window.lumina) return;
     setLoading(true);
     try {
-      const profile = await window.lumina.chooseProfile();
+      const profile = await (restoreDefault ? window.lumina.restoreDefaultProfile() : window.lumina.chooseProfile());
       if (!profile) return;
       generation.current++;
       nodeOffset.current = 0;
@@ -1449,6 +1455,7 @@ function Preferences({
 
 export default function App() {
   const app = useData();
+  const clientMode = app.data.hello?.capabilities.windows_client === true && !!window.lumina?.client;
   const [page, setPage] = useState<Page>("overview");
   const [now, setNow] = useState(Date.now());
   const [environment, setEnvironment] = useState<Environment | null>(null);
@@ -1478,13 +1485,13 @@ export default function App() {
   const refresh = () => {
     void app.refresh(true);
   };
-  const chooseProfile = async () => {
+  const chooseProfile = async (restoreDefault = false) => {
     if (!environmentChecks.current.beginProfileSelection()) return;
     setEnvironment(null);
     setChecking(false);
     setNotice(null);
     try {
-      await app.chooseProfile();
+      await app.chooseProfile(restoreDefault);
     } finally {
       environmentChecks.current.endProfileSelection();
       setEnvironment(null);
@@ -1570,7 +1577,7 @@ export default function App() {
             <Settings2 size={15} strokeWidth={1.4} />
             工作空间设置
           </button>
-          <Badge>只读工程预览</Badge>
+          <Badge>{clientMode ? "Windows 客户端" : "只读工程预览"}</Badge>
           <div className="build">
             <i className={`dot ${app.control === "available" ? "" : "dim"}`} />
             {app.data.hello?.build.version ?? "LuminaVPN Desktop"}
@@ -1599,7 +1606,7 @@ export default function App() {
             </Badge>
           </div>
         </div>
-        <div className="page" key={page}>
+        <div className="page" key={clientMode ? "client-workspace" : page}>
           {(app.error || notice) && (
             <div className="control-banner" role="status">
               <Unplug size={15} />
@@ -1624,7 +1631,8 @@ export default function App() {
               )}
             </div>
           )}
-          {page === "overview" && (
+          {clientMode && window.lumina.client && app.data.profile?.profile_id && <ClientWorkspace key={app.data.profile.profile_id} profileID={app.data.profile.profile_id} page={page} validationOnly={app.data.hello?.capabilities.validation_only===true} api={window.lumina.client} refreshInventory={refresh} nodes={app.data.nodes} subscriptions={app.data.subscriptions} config={app.data.config} loadNodes={app.loadNodes} loadRules={app.loadRules} chooseProfile={()=>chooseProfile()} restoreDefaultProfile={()=>chooseProfile(true)} checking={checking} environmentCheck={environment} checkEnvironment={() => { void checkEnvironment() }} showRecovery={() => { void showRecovery() }} />}
+          {!clientMode && page === "overview" && (
             <Overview
               data={app.data}
               now={now}
@@ -1634,21 +1642,21 @@ export default function App() {
               refresh={refresh}
             />
           )}
-          {page === "nodes" && (
+          {!clientMode && page === "nodes" && (
             <NodePage
               data={app.data}
               loading={app.loading}
               loadNodes={app.loadNodes}
             />
           )}
-          {page === "rules" && (
+          {!clientMode && page === "rules" && (
             <RulesPage
               data={app.data}
               loading={app.loading}
               loadRules={app.loadRules}
             />
           )}
-          {page === "diagnostics" && (
+          {!clientMode && page === "diagnostics" && (
             <Diagnostics
               data={app.data}
               now={now}
@@ -1664,7 +1672,7 @@ export default function App() {
               }}
             />
           )}
-          {page === "settings" && (
+          {!clientMode && page === "settings" && (
             <Preferences
               data={app.data}
               loading={app.loading}

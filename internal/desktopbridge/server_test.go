@@ -21,6 +21,7 @@ func testServer(t *testing.T) *Server {
 	if err != nil {
 		t.Fatal(err)
 	}
+	service.Control = nil // Exercise the unchanged offline contract with no real service.
 	return &Server{Service: service}
 }
 
@@ -55,12 +56,24 @@ func TestHandshakeAndReadOnlyCapabilities(t *testing.T) {
 	if caps["connection_start"] != false || caps["connection_stop"] != false || caps["config_write"] != false || caps["read_only"] != true {
 		t.Fatal(caps)
 	}
+	methods, ok := caps["methods"].([]any)
+	if !ok || len(methods) != 8 || caps["windows_client"] != false {
+		t.Fatal("offline handshake widened its method group")
+	}
+	for _, method := range methods {
+		if name, ok := method.(string); !ok || application.IsClientMethod(name) {
+			t.Fatal("client request leaked into offline method group")
+		}
+	}
 	if _, err := os.Stat(s.Service.Profile); !os.IsNotExist(err) {
 		t.Fatal("readonly protocol created profile")
 	}
 }
 
 func TestSharedTypeScriptContract(t *testing.T) {
+	if len(Methods) != 8 || len(application.ClientMethods) != 5 {
+		t.Fatal("read and client method groups must remain separate")
+	}
 	// The public fixture and schema are consumed by both languages, catching
 	// envelope drift without generating a second set of application types.
 	raw, err := os.ReadFile("../../desktop/protocol/fixtures.json")
@@ -93,10 +106,11 @@ func TestSharedTypeScriptContract(t *testing.T) {
 	if err != nil || json.Unmarshal(raw, &schema) != nil {
 		t.Fatal("shared protocol schema unavailable")
 	}
-	if len(schema.Properties.Method.Enum) != len(Methods) {
+	expected := append(append([]string{}, Methods...), application.ClientMethods...)
+	if len(schema.Properties.Method.Enum) != len(expected) {
 		t.Fatal("shared method set drift")
 	}
-	for i, method := range Methods {
+	for i, method := range expected {
 		if schema.Properties.Method.Enum[i] != method {
 			t.Fatal("shared method order drift")
 		}

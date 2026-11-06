@@ -15,7 +15,8 @@
     "test:electron": "playwright test",
     "package:mac": "npm run build && electron-builder --mac dir --arm64",
     "sign:preview:mac": "sh ../scripts/sign-desktop-preview-macos.sh ../.local/desktop-packages/mac-arm64/LuminaVPN.app",
-    "package:win": "npm run typecheck && node scripts/build-backend.mjs --target windows/amd64 && npm run build:ui && electron-builder --win nsis --x64"
+    "package:win": "node scripts/windows-client-package.mjs --mode daily",
+    "package:win:validation": "node scripts/windows-client-package.mjs --mode validation"
   },
   "dependencies": {
     "lucide-react": "1.66.0",

@@ -1,14 +1,16 @@
 # LuminaVPN
 
-macOS 与 Windows 的白名单网络 CLI 工程预览版本。CLI 与本机配置目录暂沿用 `netlaunch` / `NetLaunch` 名称。Mac 运行包自带 Mihomo、OpenConnect 及所需动态库，使用时不需要安装 Go、Python、Node 或 Homebrew。
+macOS 与 Windows 的白名单网络工程预览版本，提供 CLI 和桌面界面。CLI 与本机配置目录暂沿用 `netlaunch` / `NetLaunch` 名称。运行包自带规则核心、OpenConnect 及所需运行组件，使用时不需要安装 Go、Python、Node 或 Homebrew。
 
-本版为工程预览：Mac 提供原生网络生命周期；Windows 普通构建只提供离线维护，`windows_home` 和 `windows_validation` 构建分别提供有限时长的家用与开发验证生命周期。用 `version --json` 确认手中程序的模式。当前架构改造的 Mac 原生运行验收尚待完成，交叉编译通过不能替代实机验证。使用前先用 `config validate`、`plan`、`doctor` 检查配置和环境。
+本版为工程预览：Mac 提供原生网络生命周期；Windows 不带构建标签的 CLI 只提供离线维护，`windows_home` 和 `windows_validation` 保留有限时长的 CLI 生命周期。新的 Windows 桌面包使用 `windows_client` 后台服务，实验包另外带 `windows_client_validation`。用 `version --json` 确认程序模式；Windows 客户端的真实安装、网络接管与恢复仍需在目标机器验证，编译和单元测试不能替代这些验证。使用前可用 `config validate`、`plan`、`doctor` 检查配置和环境。
 
 ## 桌面工程预览
 
-`desktop/` 提供 Electron、React 和 TypeScript 客户端，采用 Jade Workspace 界面。当前阶段可以读取已有 CLI 配置、保存的三通道状态、下次启动的节点库存、分页规则、订阅摘要和运行组件检查。网络进程存活显示为尚未检查；检查证据超过 90 秒会自动过期。库存编号不代表冻结运行中的节点身份。
+`desktop/` 提供 Electron、React 和 TypeScript 客户端，采用 Jade Workspace 界面。Windows 客户端接入初始化、订阅同步、节点导入与选择、规则编辑、公司认证、独立通道开关、停止与恢复和诊断。界面读取后台的实时状态；服务不可达或证据过期时显示未知，不把保存的状态当作网络正常的证明。
 
-本阶段连接、认证、导入、订阅同步和规则写入尚未开放；仍通过既有 CLI 操作。配置目录不存在时不会自动创建。通过工作空间设置的原生目录对话框选择已有 profile；活动或未确认运行须先完成停止与恢复，再选择其它配置。支持原生恢复的构建可在诊断页显示应用之外、绑定当前 profile 的独立恢复入口，显示入口不会执行恢复。Windows 离线桌面包不执行停止与恢复；请使用创建该运行的原 CLI 或运行目录中的冻结恢复入口，恢复完成前保留该目录。
+Windows 安装器以管理员权限安装固定目录的后台服务，界面以普通用户运行，启动界面不会自动连接。公司与个人通道可分别开启；日用连接持续到手动停止、故障恢复或系统退出，实验连接有不可续期的硬截止，最长 45 分钟。关闭窗口进入托盘；明确退出会先停止并确认恢复。界面崩溃时后台保留连接，重新打开后接回；后台自身故障由独立恢复服务处理。密码和动态码不保存，短期公司会话使用当前用户的 DPAPI 加密，最多按原创建时间复用两小时。
+
+Windows 后台只管理已登记的配置目录，首版安装登记当前用户的默认目录。选择未登记目录会保留原偏好和连接；旧偏好指向未登记目录时，可显式恢复默认目录，接回服务确认的运行。切换其它已登记目录前须停止并确认恢复。诊断页可显示应用之外的独立恢复入口，显示入口不会执行恢复。Mac 和 Windows 离线构建保留只读桌面能力，配置、连接和认证继续使用原 CLI；配置目录不存在时不会自动创建。
 
 开发需要 Node.js 22.12+ 与 Go 1.26+；运行打包应用不需要安装开发工具。在 `desktop/` 执行：
 
@@ -18,7 +20,7 @@ npm run dev
 npm run package:mac
 ```
 
-Go 不在 PATH 时，通过 `NETLAUNCH_GO` 指定构建工具。构建只读取固定 runtime；Windows 交叉打包使用 `LUMINA_BUILD_RUNTIME` 指向符合固定清单的 Windows runtime，再执行 `npm run package:win`。这些变量仅用于构建，发货应用不接受执行路径或页面 URL 覆盖。Windows 默认后端为离线模式，NSIS 安装向导默认选择当前用户安装。
+Go 不在 PATH 时，通过 `NETLAUNCH_GO` 指定构建工具。构建只读取固定 runtime；Windows 客户端须在 Windows x64 原生构建，以 `LUMINA_BUILD_RUNTIME` 指向符合 Windows 清单的 runtime，在 `desktop/` 执行 `npm run package:win` 或 `npm run package:win:validation`。输出位于已忽略的 `.local/windows-client-packages/`。两个模式都固定为全机安装，打包时校验三个 Go 程序、运行组件、后台安装接口与包内字节；当前为未签名开发包。这些变量仅用于构建，发货应用不接受执行路径或页面 URL 覆盖。Windows 使用的规则核心补丁和重建输入见 `scripts/patches/`。
 
 `npm run test:electron` 使用虚构配置检查只读桌面行为，并在本机实包存在时验证打包资源和窗口崩溃恢复。Windows 默认检查 `win-unpacked/LuminaVPN.exe`；验证已安装程序时，可将 `LUMINA_TEST_WINDOWS_EXE` 设为该程序的绝对路径。测试仅为新建的配置对象设置私有权限，不修改已有配置或系统网络。
 
@@ -29,10 +31,12 @@ Mac `.app` 输出到已忽略的 `.local/desktop-packages/mac-arm64/`。使用 `
 - 公司精确域名与明确 IPv4 网段经公司 VPN。公司 DNS 也经公司 VPN。
 - 个人流量经订阅或本地文件导入的代理节点。可选择导入受支持的个人分流规则；订阅中的 DNS、TUN、接口和链式代理设置不继承。
 - 其他目标从当前物理网卡直连。
-- 公司和个人通道均从 REJECT 开始，健康检查通过后开放。通道失效不会改投另一出口。
+- 公司目标在公司通道关闭、未认证或失效时保持阻断。Mac 与旧 CLI 模式的个人通道从 REJECT 开始，检查通过后开放；Windows 客户端在个人通道手动关闭，或所有可用候选的独立健康检查均明确失败时允许直连，单个网站失败、结果缺失和检查取消不会触发直连。
 - `gateway.corp.example.com` 在示例的公司白名单中，覆盖其 `8443` 端口。白名单不依赖 Wi-Fi 或热点类型。
 
 公司授权和固定个人目标允许精确域名及 IPv4 `/24`–`/32` 网段；额外个人规则支持精确域名、域名后缀及上述窄网段。公司后缀授权和 IPv6 白名单尚不支持。Windows 家用构建已有网络接管实现；每次新版本仍需按变更范围验收。关闭核心 IPv6 并不代表关闭系统 IPv6；应用自带解析或缓存 IP 也可能无法命中域名规则。本版不承诺核心退出后的系统级永久阻断。
+
+Windows 客户端以共享基础规则配合手动选择的办公或家庭覆盖；覆盖只调整个人与直连目标，公司名单始终优先且必须经公司 VPN。名单之外默认直连，不自动扩大公司保护范围。首版系统接管处理 IPv4，并以独立 WFP 规则阻断非回环 IPv6；停止接管并恢复系统网络后，这些分流与 IPv6 保护会一并撤销。
 
 ## 首次配置
 

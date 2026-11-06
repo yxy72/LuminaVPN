@@ -39,8 +39,9 @@ func (NativeBackend) SetDNS(a winnet.Adapter, d winnet.DNSSettings) error {
 }
 
 type NativeStorage struct {
-	Files securefile.AdminStore
-	RunID string
+	Files          securefile.AdminStore
+	RunID          string
+	RetainEvidence bool
 }
 
 var runID = regexp.MustCompile(`^netlaunch-[a-z0-9]{16,64}$`)
@@ -75,6 +76,15 @@ func (s NativeStorage) Save(j Journal) error {
 	if e := s.valid(); e != nil {
 		return e
 	}
+	if s.RetainEvidence {
+		b, err := json.Marshal(j)
+		if err != nil {
+			return err
+		}
+		if len(b) > 4<<20 {
+			return errors.New("service recovery evidence reached bounded journal capacity")
+		}
+	}
 	return s.Files.Write(filepath.Join(s.RunID, "network.json"), j)
 }
 
@@ -94,3 +104,9 @@ func (NativeBackend) SetMTU(a winnet.Adapter, before, after uint32) error {
 func (NativeBackend) InspectGuard(s winwfp.Spec) (winwfp.Status, error) { return winwfp.Inspect(s) }
 func (NativeBackend) AddGuard(s winwfp.Spec) error                      { return winwfp.Add(s) }
 func (NativeBackend) RemoveGuard(s winwfp.Spec) error                   { return winwfp.Remove(s) }
+
+func (NativeBackend) InspectIPv6(s winwfp.IPv6Spec) (winwfp.IPv6Status, error) {
+	return winwfp.InspectIPv6(s)
+}
+func (NativeBackend) AddIPv6(s winwfp.IPv6Spec) error    { return winwfp.AddIPv6(s) }
+func (NativeBackend) RemoveIPv6(s winwfp.IPv6Spec) error { return winwfp.RemoveIPv6(s) }

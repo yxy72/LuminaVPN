@@ -1,3 +1,4 @@
+import type { ClientAPI } from './client'
 export type ChannelName = 'company' | 'personal' | 'direct'
 export interface Channel {
   state: string; reason: string; checked_at: string | null; next_action?: string
@@ -7,7 +8,7 @@ export interface Hello {
   protocol_major: 1; session_id: string
   build: { version: string; os: string; arch: string; go_version: string; revision?: string }
   mode: string
-  capabilities: { read_only: boolean; connection_start: boolean; connection_stop: boolean; config_write: boolean; native_lifecycle: boolean; methods: string[] }
+  capabilities: { read_only: boolean; connection_start: boolean; connection_stop: boolean; config_write: boolean; native_lifecycle: boolean; windows_client?: boolean; validation_only?:boolean; validation_maximum_seconds?:number;requires_installed_service?:boolean; methods: string[] }
 }
 export interface State {
   profile_configured: boolean; run_ref: string | null
@@ -16,6 +17,7 @@ export interface State {
   recovery_required: boolean; stop_requested: boolean; observed_at: string
 }
 export interface Profile {
+  profile_id?:string
   configured: boolean; profile_name: string; policy_valid: boolean; nodes_available: boolean
   node_count: number; revision: string | null; transaction_pending: boolean; issues: string[]; read_only: boolean
 }
@@ -40,10 +42,11 @@ export interface Recovery {
   available: boolean; instructions: string[]; read_only: boolean
 }
 export interface LuminaAPI {
+  client?: ClientAPI
   hello(): Promise<Hello>; getState(): Promise<State>; inspectProfile(): Promise<Profile>
   listNodes(params?: { offset?: number; limit?: number }): Promise<Nodes>; getConfig(params?: { offset?: number; limit?: number }): Promise<Config>
   subscriptionsSummary(): Promise<Subscriptions>; checkEnvironment(): Promise<Environment>
-  describeRecovery(): Promise<Recovery>; chooseProfile(): Promise<Profile | null>; showRecovery(): Promise<boolean>
+  describeRecovery(): Promise<Recovery>; chooseProfile(): Promise<Profile | null>; restoreDefaultProfile(): Promise<Profile>; showRecovery(): Promise<boolean>
 }
 export const READ_METHODS = ['session.hello', 'state.get', 'profile.inspect', 'nodes.list', 'config.get', 'subscriptions.summary', 'environment.check', 'recovery.describe'] as const
 export type ReadMethod = typeof READ_METHODS[number]

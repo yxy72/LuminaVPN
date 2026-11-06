@@ -20,6 +20,7 @@ import (
 	"netlaunch/internal/policy"
 	"netlaunch/internal/runtimebundle"
 	"netlaunch/internal/securefile"
+	"netlaunch/internal/serviceprotocol"
 )
 
 type Error struct {
@@ -34,6 +35,7 @@ func unavailable(code, message string) error { return &Error{Code: code, Message
 type Desktop struct {
 	Profile, Runtime string
 	Now              func() time.Time
+	Control          serviceprotocol.Client
 }
 
 func NewDesktop(profile, bundle string) (*Desktop, error) {
@@ -53,7 +55,7 @@ func NewDesktop(profile, bundle string) (*Desktop, error) {
 	if err != nil {
 		return nil, unavailable("RUNTIME_UNAVAILABLE", "Bundled runtime location unavailable.")
 	}
-	return &Desktop{Profile: profile, Runtime: bundle, Now: time.Now}, nil
+	return &Desktop{Profile: profile, Runtime: bundle, Now: time.Now, Control: newDesktopClient()}, nil
 }
 
 func (d *Desktop) configured() bool {
@@ -70,6 +72,7 @@ func timestamp(t time.Time) *string {
 }
 
 type Profile struct {
+	ProfileID          string   `json:"profile_id,omitempty"`
 	Configured         bool     `json:"configured"`
 	ProfileName        string   `json:"profile_name"`
 	PolicyValid        bool     `json:"policy_valid"`
@@ -83,6 +86,9 @@ type Profile struct {
 
 func (d *Desktop) InspectProfile() Profile {
 	p := Profile{Configured: d.configured(), ProfileName: "本机配置", Issues: []string{}, ReadOnly: true}
+	if d.ClientEnabled() {
+		p.ProfileID = d.ClientProfileID()
+	}
 	if !p.Configured {
 		p.Issues = append(p.Issues, "PROFILE_NOT_CONFIGURED")
 		return p
@@ -91,7 +97,7 @@ func (d *Desktop) InspectProfile() Profile {
 		p.Issues = append(p.Issues, "PROFILE_PRIVATE_DIRECTORY_REQUIRED")
 		return p
 	}
-	cfg, err := app.DesktopPolicy(d.Profile)
+	cfg, err := d.desktopPolicy()
 	if err != nil {
 		p.Issues = append(p.Issues, "POLICY_INVALID")
 		return p
@@ -105,7 +111,7 @@ func (d *Desktop) InspectProfile() Profile {
 	} else if p.TransactionPending {
 		p.Issues = append(p.Issues, "CONFIG_TRANSACTION_PENDING")
 	}
-	nodes, err := app.DesktopNodes(d.Profile, cfg)
+	nodes, err := d.desktopNodes(cfg)
 	if err != nil {
 		p.Issues = append(p.Issues, "NODE_CACHE_UNAVAILABLE")
 	} else {
@@ -252,11 +258,11 @@ func (d *Desktop) ListNodes(offset, limit int) (Nodes, error) {
 	if securefile.CheckDir(d.Profile) != nil {
 		return out, unavailable("PROFILE_UNAVAILABLE", "Private local profile unavailable.")
 	}
-	cfg, err := app.DesktopPolicy(d.Profile)
+	cfg, err := d.desktopPolicy()
 	if err != nil {
 		return out, unavailable("POLICY_INVALID", "Local policy is missing or invalid.")
 	}
-	nodes, err := app.DesktopNodes(d.Profile, cfg)
+	nodes, err := d.desktopNodes(cfg)
 	if err != nil {
 		return out, unavailable("NODE_CACHE_UNAVAILABLE", "Validated node cache unavailable; use the existing CLI to import or sync.")
 	}
@@ -286,11 +292,11 @@ func (d *Desktop) Config(offset, limit int) (any, error) {
 	if securefile.CheckDir(d.Profile) != nil {
 		return nil, unavailable("PROFILE_UNAVAILABLE", "Private local profile unavailable.")
 	}
-	cfg, err := app.DesktopPolicy(d.Profile)
+	cfg, err := d.desktopPolicy()
 	if err != nil {
 		return nil, unavailable("POLICY_INVALID", "Local policy is missing or invalid.")
 	}
-	rules, err := app.DesktopRules(d.Profile, cfg)
+	rules, err := d.desktopRules(cfg)
 	if err != nil {
 		return nil, unavailable("RULE_SOURCE_UNAVAILABLE", "Validated rule sources unavailable; cached subscription sources may need synchronization.")
 	}
@@ -314,11 +320,11 @@ func (d *Desktop) Subscriptions() (any, error) {
 	if securefile.CheckDir(d.Profile) != nil {
 		return nil, unavailable("PROFILE_UNAVAILABLE", "Private local profile unavailable.")
 	}
-	cfg, err := app.DesktopPolicy(d.Profile)
+	cfg, err := d.desktopPolicy()
 	if err != nil {
 		return nil, unavailable("POLICY_INVALID", "Local policy is missing or invalid.")
 	}
-	summary, err := app.DesktopSubscriptions(d.Profile, cfg)
+	summary, err := d.desktopSubscriptions(cfg)
 	if err != nil {
 		return nil, unavailable("SUBSCRIPTION_SOURCE_UNAVAILABLE", "Private subscription source settings unavailable.")
 	}

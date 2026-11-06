@@ -76,17 +76,46 @@ func (p *Policy) DecideSamplesSince(now, started time.Time, latency map[string]i
 			filtered[n] = ms
 		}
 	}
-	latency = filtered
+	return p.decideSamples(now, filtered, nil)
+}
+
+// TimedSample carries one node's actual observation interval. Coalesced
+// background results must not borrow another node's earlier start time.
+type TimedSample struct {
+	Latency               int
+	StartedAt, FinishedAt time.Time
+}
+
+func (p *Policy) DecideTimedSamples(now time.Time, samples map[string]TimedSample) (string, string) {
+	latency := make(map[string]int, len(samples))
+	finished := make(map[string]time.Time, len(samples))
+	for n, sample := range samples {
+		h := p.health[n]
+		if sample.StartedAt.IsZero() || sample.FinishedAt.IsZero() || sample.FinishedAt.Before(sample.StartedAt) || sample.StartedAt.After(now) || sample.FinishedAt.After(now) || now.Sub(sample.StartedAt) >= 45*time.Second || now.Sub(sample.FinishedAt) >= 45*time.Second {
+			continue
+		}
+		if !h.FailedAt.After(sample.StartedAt) && !h.Observed.After(sample.StartedAt) && (h.Observed.IsZero() || sample.FinishedAt.After(h.Observed)) {
+			latency[n], finished[n] = sample.Latency, sample.FinishedAt
+		}
+	}
+	return p.decideSamples(now, latency, finished)
+}
+
+func (p *Policy) decideSamples(now time.Time, latency map[string]int, finished map[string]time.Time) (string, string) {
 	best := ""
 	bestMS := int(^uint(0) >> 1)
 	for _, n := range p.Nodes {
 		h := p.health[n]
 		ms, measured := latency[n]
 		if measured {
-			h.Observed, h.Latency = now, ms
+			observed := now
+			if at, ok := finished[n]; ok {
+				observed = at
+			}
+			h.Observed, h.Latency = observed, ms
 			if ms < 0 {
 				h.Successes = 0
-				h.FailedAt = now
+				h.FailedAt = observed
 			} else {
 				h.Successes++
 			}

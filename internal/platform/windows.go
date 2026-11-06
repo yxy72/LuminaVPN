@@ -10,7 +10,7 @@ import (
 )
 
 // Ordinary builds remain gated. The home preview keeps a bounded lifecycle.
-func Supported() bool { return WindowsValidationBuild || WindowsHomeBuild }
+func Supported() bool { return WindowsValidationBuild || WindowsHomeBuild || WindowsClientBuild }
 func Discover() (Network, error) {
 	n, e := winnet.Discover()
 	if e != nil {

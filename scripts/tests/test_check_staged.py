@@ -11,6 +11,36 @@ spec.loader.exec_module(check)
 
 
 class SourceBoundaryTests(unittest.TestCase):
+    def test_fixed_windows_build_inputs_keep_source_and_secret_boundaries(self):
+        allowed = [
+            '.gitattributes', 'desktop/protocol/client.ts',
+            'desktop/protocol/validation-base.ts',
+            'desktop/scripts/windows-client-bootstrap.nsh',
+            'desktop/scripts/windows-client-package.mjs',
+            'desktop/scripts/windows-release-stage.mjs',
+            'desktop/tests/windows-client-package.test.mjs',
+            'desktop/tests/windows-release-stage.test.mjs',
+            'scripts/patches/mihomo-v1.19.32-fakeip-pool-reuse.patch',
+            'scripts/patches/mihomo-v1.19.32-fakeip-pool-reuse.provenance.json',
+            'scripts/patches/mihomo-v1.19.32.LICENSE',
+        ]
+        for name in allowed:
+            with self.subTest(name=name):
+                self.assertFalse(check.scan([(name, '100644', b'public build source')], set()))
+                self.assertTrue(check.scan([(name, '100644', b'private-fixture')], {'private-fixture'}))
+                self.assertTrue(check.scan([(name, '120000', b'/private/local-profile')], set()))
+        for name in [
+            'desktop/scripts/local-bootstrap.nsh',
+            'desktop/tests/local.test.mjs',
+            'scripts/patches/local.patch',
+            'scripts/patches/mihomo-v1.19.32-fakeip-pool-reuse.report.json',
+            'scripts/patches/mihomo-v1.19.32-fakeip-pool-reuse.provenance.private.json',
+            'scripts/patches/acceptance-report.md',
+            '.local/.gitattributes',
+        ]:
+            with self.subTest(name=name):
+                self.assertTrue(check.scan([(name, '100644', b'local artifact')], set()))
+
     def test_desktop_icon_is_vector_source_with_a_fixed_build_script(self):
         for name in ['desktop/assets/icon.svg', 'desktop/scripts/generate-icons.mjs']:
             self.assertFalse(check.scan([(name, '100644', b'public product source')], set()))

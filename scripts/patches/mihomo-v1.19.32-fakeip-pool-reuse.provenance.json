@@ -1,0 +1,79 @@
+{
+  "version": 1,
+  "upstream": "https://github.com/MetaCubeX/mihomo",
+  "tag": "v1.19.32",
+  "commit": "88dcbf7f1614a67c3b36b848ee3592dfa92ada36",
+  "license": "GPL-3.0",
+  "license_file": "mihomo-v1.19.32.LICENSE",
+  "upstream_files": {
+    "component/fakeip/pool.go": {
+      "url": "https://raw.githubusercontent.com/MetaCubeX/mihomo/88dcbf7f1614a67c3b36b848ee3592dfa92ada36/component/fakeip/pool.go",
+      "sha256": "19aabfc35a6d8f52d5be97db7e307e639b2413416eb91494554e28fa6cfda73e"
+    },
+    "dns/enhancer.go": {
+      "url": "https://raw.githubusercontent.com/MetaCubeX/mihomo/88dcbf7f1614a67c3b36b848ee3592dfa92ada36/dns/enhancer.go",
+      "sha256": "6baa4319eb21de2dda1a65ac070dc327ebd00950957a3926f28ac5f395f15306"
+    },
+    "LICENSE": {
+      "url": "https://raw.githubusercontent.com/MetaCubeX/mihomo/88dcbf7f1614a67c3b36b848ee3592dfa92ada36/LICENSE",
+      "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+    },
+    "go.mod": {
+      "url": "https://raw.githubusercontent.com/MetaCubeX/mihomo/88dcbf7f1614a67c3b36b848ee3592dfa92ada36/go.mod",
+      "sha256": "72b10f80ec33e2e06dee425a75e499d5818039c99d4e25f745d0bca349c90af5"
+    },
+    "go.sum": {
+      "url": "https://raw.githubusercontent.com/MetaCubeX/mihomo/88dcbf7f1614a67c3b36b848ee3592dfa92ada36/go.sum",
+      "sha256": "8fa2b10fe8589a4a1118fd6819f59231f74a27e71c8154de9c3903a69c3735aa"
+    }
+  },
+  "patch": {
+    "path": "mihomo-v1.19.32-fakeip-pool-reuse.patch",
+    "sha256": "c24128f5c65899942a1065530ff7c3bc442f4dc8528e318b9e6d66a7c8e2e91e",
+    "production_files": [
+      "component/fakeip/pool.go",
+      "dns/enhancer.go"
+    ],
+    "test_files": [
+      "component/fakeip/lumina_pool_reuse_test.go",
+      "dns/lumina_pool_reuse_test.go"
+    ]
+  },
+  "purpose": "Keep one canonical-prefix- and capacity-compatible in-memory fake-IP pool identity (mutex/store/allocator) across DNS service reloads, for IPv4 and IPv6 separately.",
+  "limits": [
+    "Not a DNS-response quiescence barrier; does not prove all resolver caches fresh.",
+    "Different prefix and backing-kind transitions deliberately retain the upstream clone branch.",
+    "Pool wrap/eviction/persistence policy are not redesigned.",
+    "Caller must keep the Windows prefix stable and not flush/disable/recreate the live pool during transition.",
+    "Only known nonnil memoryStore pools are reused; persistent pools always retain the upstream clone branch because constructor restoreState can clear shared storage before PatchFrom.",
+    "Memory capacity must also match exactly; zero-capacity construction semantics are unchanged."
+  ],
+  "persistence_note": "Only nonpersistent pools are reused. Upstream New(Persistence=true) can call restoreState and clear shared storage before PatchFrom; persistent pools retain the upstream clone branch.",
+  "binary_sha256": "afe81988502c39236b0f96e192f622dab667604ae72c4a4bbf5a332f1026dc4c",
+  "build": {
+    "script": "rebuild-mihomo-windows.py",
+    "version": "v1.19.32-lumina.1",
+    "source_commit_build_time": "2026-09-30T22:35:49+08:00",
+    "go_version": "1.27.3",
+    "goos": "windows",
+    "goarch": "amd64",
+    "goamd64": "v1",
+    "cgo_enabled": false,
+    "tags": [
+      "with_gvisor"
+    ],
+    "goproxy": "off",
+    "trimpath": true,
+    "buildvcs": false,
+    "ldflags": [
+      "-w",
+      "-s",
+      "-buildid="
+    ],
+    "source_archive_sha256": "a1cf2b8f4ffb3c90c9bb7a37a27a94862933a456a998f85d619e5917f4384b38",
+    "compiler_sha256": "83b7ba66215e696414fa49462d0db2da4f4cf15c7bebd42f0b189fa04866999d",
+    "script_sha256": "5bc96e74488de0f5cf6a60afd284033227786ca0098692ff8f99ac2d09472da1"
+  },
+  "binary_bytes": 60442112,
+  "runtime_manifest_sha256": "e2e37fd57677bb86fcec156d8e65b5c76b56c1374f1318b9f0426812d2ac9bb2"
+}

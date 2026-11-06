@@ -151,3 +151,39 @@ func TestPublicStatusAgesWithoutCoordinatorAndPreservesOriginalSnapshot(t *testi
 		t.Fatal("mutated input")
 	}
 }
+
+func TestDesktopManagedIsNotSystemPathEvidence(t *testing.T) {
+	now := time.Now()
+	s := healthyState(now)
+	s.Manifest.Mode = Daily
+	intent := policy.DefaultIntent()
+	s.DesiredChannels, s.AppliedChannels = &intent, &intent
+	s.ChannelGeneration, s.AppliedGeneration, s.TakeoverActive = 1, 1, true
+	s.LastReady = time.Time{}
+	desktopPhase(&s, now)
+	if s.Phase == "ready" || !s.LastReady.IsZero() || publicStatus(s, now).Channels["personal"].State == "ready" {
+		t.Fatal("missing system-TUN proof became ready", s.Phase)
+	}
+	for name, h := range s.Channels {
+		h.ProbeScope = "system_tun"
+		s.Channels[name] = h
+	}
+	desktopPhase(&s, now)
+	if s.Phase != "ready" || s.LastReady != now {
+		t.Fatal("complete system proof was not retained")
+	}
+	h := s.Channels["personal"]
+	h.ProbeScope = "mixed_ingress"
+	s.Channels["personal"] = h
+	desktopPhase(&s, now.Add(time.Second))
+	if s.Phase == "ready" || s.LastReady != now {
+		t.Fatal("mixed ingress renewed system health")
+	}
+	intent.Personal = false
+	s.PersonalFallback = false
+	s.Channels["direct"] = ChannelHealth{ChannelStatus: ChannelStatus{State: "unavailable", Reason: "tcp_unavailable", CheckedAt: now, ProbeScope: "system_tun"}, Network: s.Manifest.Network}
+	desktopPhase(&s, now)
+	if s.Phase == "ready" || publicStatus(s, now).Channels["direct"].State != "unavailable" {
+		t.Fatal("manual direct intent hid actual direct failure")
+	}
+}

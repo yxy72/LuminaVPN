@@ -21,7 +21,33 @@ import (
 	"netlaunch/internal/winnet"
 )
 
+type companyUnavailableError struct{ cause error }
+
+func (e *companyUnavailableError) Error() string { return "company ingress unavailable" }
+func (e *companyUnavailableError) Unwrap() error { return e.cause }
+
+func companyUnavailable(err error) bool {
+	var unavailable *companyUnavailableError
+	return errors.As(err, &unavailable)
+}
+
+func startDesktopCompany(ctx context.Context, run string) (*companyRuntime, error) {
+	if err := desktopCompanyMayStart(); err != nil {
+		return nil, err
+	}
+	return startCompany(ctx, run)
+}
+func desktopCompanyMayStart() error {
+	if platform.ForeignVPN() {
+		return &companyUnavailableError{errors.New("another OpenConnect is active or cannot be queried")}
+	}
+	return nil
+}
+
 func startCompany(ctx context.Context, run string) (*companyRuntime, error) {
+	return startCompanyWithIngress(ctx, run, nil)
+}
+func startCompanyWithIngress(ctx context.Context, run string, fixed *desktopCompanyIngress) (*companyRuntime, error) {
 	s, e := load(run)
 	if e != nil {
 		return nil, e
@@ -30,9 +56,14 @@ func startCompany(ctx context.Context, run string) (*companyRuntime, error) {
 	if e != nil {
 		return nil, e
 	}
-	l, e := net.Listen("tcp4", "127.0.0.1:0")
+	var l net.Listener
+	if fixed != nil {
+		l, e = fixed.listen()
+	} else {
+		l, e = net.Listen("tcp4", "127.0.0.1:0")
+	}
 	if e != nil {
-		return nil, e
+		return nil, &companyUnavailableError{e}
 	}
 	secret := make([]byte, 32)
 	if _, e = rand.Read(secret); e != nil {
@@ -40,6 +71,9 @@ func startCompany(ctx context.Context, run string) (*companyRuntime, error) {
 		return nil, e
 	}
 	credentials := companyproxy.Credentials{Username: "company", Password: hex.EncodeToString(secret)}
+	if fixed != nil {
+		credentials = fixed.credentials
+	}
 	proxy, e := companyproxy.Proxy(l.Addr().String(), credentials)
 	if e != nil {
 		l.Close()
@@ -49,17 +83,29 @@ func startCompany(ctx context.Context, run string) (*companyRuntime, error) {
 	loopback, e := windowsLoopback()
 	if e != nil {
 		l.Close()
-		return nil, e
+		if fixed != nil {
+			return nil, e
+		}
+		return nil, &companyUnavailableError{e}
 	}
 	proxy["interface-name"] = loopback
-	c := &companyRuntime{run: run, authority: a, proxy: proxy, done: make(chan error, 1)}
+	if fixed != nil {
+		if loopback != fixed.proxy["interface-name"] {
+			l.Close()
+			return nil, errors.New("fixed company loopback identity changed")
+		}
+		proxy = fixed.proxy
+	}
+	work, cancel := context.WithCancel(ctx)
+	c := &companyRuntime{run: run, authority: a, proxy: proxy, done: make(chan error, 1), cancel: cancel}
 	server, e := companyproxy.New(credentials, c.dial)
 	if e != nil {
+		cancel()
 		l.Close()
 		return nil, e
 	}
-	go func() { c.done <- server.Serve(ctx, l); a.Revoke() }()
-	go c.maintain(ctx)
+	go func() { defer close(c.done); c.done <- server.Serve(work, l); a.Revoke() }()
+	go c.maintain(work)
 	return c, nil
 }
 
@@ -74,7 +120,7 @@ func (c *companyRuntime) maintain(ctx context.Context) {
 		case <-ticker.C:
 		}
 		s, e := load(c.run)
-		if e != nil || guard(c.run, &s) != nil || !s.VPN.Bootstrap {
+		if e != nil || guard(c.run, &s) != nil || !s.VPN.Bootstrap || !currentIntent(s).Company {
 			c.revoke()
 			continue
 		}
@@ -103,6 +149,9 @@ func (c *companyRuntime) maintain(ctx context.Context) {
 		go session.MaintainPrepared(func(queryCtx context.Context, host string) ([]dnswire.Answer, error) {
 			var last error
 			for _, dns := range s.Manifest.Config.Company.DNS {
+				if _, e := c.state(generation); e != nil {
+					return nil, e
+				}
 				a, e := dnswire.Query(queryCtx, windowsBound(s), dns, host)
 				if e == nil {
 					return a, nil
@@ -155,7 +204,7 @@ func (c *companyRuntime) prepare(ctx context.Context, generation, host string, a
 			if e := guard(c.run, s); e != nil {
 				return e
 			}
-			if !s.VPN.Bootstrap || s.VPN.Generation != generation || !validVPN(*s) {
+			if !currentIntent(*s).Company || !s.VPN.Bootstrap || s.VPN.Generation != generation || !validVPN(*s) {
 				return errors.New("company generation changed")
 			}
 			return nil
@@ -250,7 +299,7 @@ func (c *companyRuntime) state(generation string) (State, error) {
 	if e = guard(c.run, &s); e != nil {
 		return s, e
 	}
-	if !s.VPN.Bootstrap || s.VPN.Generation != generation || !validVPN(s) {
+	if !currentIntent(s).Company || !s.VPN.Bootstrap || s.VPN.Generation != generation || !validVPN(s) {
 		return s, lease.ErrRevoked
 	}
 	return s, nil

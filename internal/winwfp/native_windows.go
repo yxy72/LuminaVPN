@@ -244,6 +244,8 @@ func conditionEqual(a, b condition) bool {
 	switch a.Value.Type {
 	case 1:
 		return byte(a.Value.Data) == byte(b.Value.Data)
+	case 3:
+		return uint32(a.Value.Data) == uint32(b.Value.Data)
 	case 4:
 		if a.Value.Data == 0 || b.Value.Data == 0 {
 			return false

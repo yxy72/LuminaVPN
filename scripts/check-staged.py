@@ -17,7 +17,7 @@ def allowed_path(name):
     p = PurePosixPath(name)
     if not p.parts:
         return False
-    if any(part.startswith('.') and part not in {'.gitignore', '.githooks'} for part in p.parts):
+    if any(part.startswith('.') and part not in {'.gitignore', '.gitattributes', '.githooks'} for part in p.parts):
         return False
     if any(part in {'private', 'profiles', 'runtime', 'dist', '__pycache__'} for part in p.parts):
         return False
@@ -42,8 +42,14 @@ def allowed_path(name):
             'desktop/vitest.config.ts', 'desktop/playwright.config.ts',
             'desktop/electron-builder.yml', 'desktop/scripts/build-backend.mjs',
             'desktop/scripts/generate-icons.mjs', 'desktop/assets/icon.svg',
+            'desktop/scripts/windows-client-bootstrap.nsh',
+            'desktop/scripts/windows-client-package.mjs',
+            'desktop/scripts/windows-release-stage.mjs',
             'desktop/protocol/types.ts', 'desktop/protocol/validation.ts',
+            'desktop/protocol/client.ts', 'desktop/protocol/validation-base.ts',
             'desktop/protocol/schema.json', 'desktop/protocol/fixtures.json',
+            'desktop/tests/windows-client-package.test.mjs',
+            'desktop/tests/windows-release-stage.test.mjs',
         }
         if name in fixed:
             return True
@@ -56,7 +62,7 @@ def allowed_path(name):
         if len(p.parts) >= 3 and p.parts[:2] == ('desktop', 'tests'):
             return p.name.endswith(('.test.ts', '.electron.ts'))
         return False
-    if name in {'.gitignore', 'README.md', 'THIRD_PARTY.md', 'LICENSE', 'LICENSE.md', 'AGENTS.md', 'go.mod', 'go.sum', '.githooks/pre-commit'}:
+    if name in {'.gitignore', '.gitattributes', 'README.md', 'THIRD_PARTY.md', 'LICENSE', 'LICENSE.md', 'AGENTS.md', 'go.mod', 'go.sum', '.githooks/pre-commit'}:
         return True
     if p.parts[0] in {'internal', 'cmd'} and p.suffix == '.go':
         return True
@@ -65,6 +71,12 @@ def allowed_path(name):
     if name in {'examples/policy.json', 'examples/bootstrap.json'}:
         return True
     if name == 'scripts/package-windows.ps1':
+        return True
+    if name in {
+        'scripts/patches/mihomo-v1.19.32-fakeip-pool-reuse.patch',
+        'scripts/patches/mihomo-v1.19.32-fakeip-pool-reuse.provenance.json',
+        'scripts/patches/mihomo-v1.19.32.LICENSE',
+    }:
         return True
     if p.parent == PurePosixPath('scripts/entries-windows') and p.name in {
         '初始化.cmd', '检查环境.cmd', '启动.cmd', '状态.cmd', '停止与恢复.cmd',

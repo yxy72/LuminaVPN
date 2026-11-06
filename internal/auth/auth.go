@@ -1,7 +1,6 @@
 package auth
 
 import (
-	"encoding/json"
 	"errors"
 	"net/url"
 	"os"
@@ -98,7 +97,11 @@ func Save(dir string, vpn policy.VPN, s Session) error {
 	if e := s.Validate(vpn); e != nil {
 		return e
 	}
-	return securefile.Write(filepath.Join(dir, "session.json"), cached{vpn.Server, vpn.EndpointIPv4, s})
+	value, e := cacheEncode(vpn, s)
+	if e != nil {
+		return e
+	}
+	return securefile.Write(filepath.Join(dir, "session.json"), value)
 }
 func Load(dir string, vpn policy.VPN) (Session, bool) {
 	p := filepath.Join(dir, "session.json")
@@ -106,14 +109,20 @@ func Load(dir string, vpn policy.VPN) (Session, bool) {
 	if e != nil {
 		return Session{}, false
 	}
-	var c cached
-	if json.Unmarshal(b, &c) != nil || c.Server != vpn.Server || c.Endpoint != vpn.EndpointIPv4 || c.Session.Validate(vpn) != nil {
+	s, e := cacheDecode(vpn, b)
+	if e != nil {
+		if removeInvalidCache {
+			_ = os.Remove(p)
+		}
 		return Session{}, false
 	}
-	age := time.Since(c.Session.Created)
-	if age < 0 || age > MaxAge {
+	if !s.ValidAt(time.Now()) {
 		_ = os.Remove(p)
 		return Session{}, false
 	}
-	return c.Session, true
+	return s, true
+}
+
+func (s Session) ValidAt(now time.Time) bool {
+	return !s.Created.IsZero() && !now.Before(s.Created) && now.Before(s.Created.Add(MaxAge))
 }

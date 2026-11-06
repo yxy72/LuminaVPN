@@ -17,12 +17,32 @@ type PlannedRule struct {
 }
 
 func RulePlan(c Config) ([]PlannedRule, error) {
-	if err := c.Validate(); err != nil {
+	return RulePlanForIntent(c, DefaultIntent())
+}
+
+func RulePlanForIntent(c Config, intent ChannelIntent) ([]PlannedRule, error) {
+	if err := c.ValidateForIntent(intent); err != nil {
 		return nil, err
 	}
+	return rulePlan(c, intent), nil
+}
+
+// RulePlanForStorage describes the saved configuration even before the base
+// runtime is configured. It does not provide runtime authorization or readiness.
+func RulePlanForStorage(c Config) ([]PlannedRule, error) {
+	if err := c.ValidateForStorage(); err != nil {
+		return nil, err
+	}
+	return rulePlan(c, DefaultIntent()), nil
+}
+
+func rulePlan(c Config, intent ChannelIntent) []PlannedRule {
 	var plan []PlannedRule
 	for channelIndex, ch := range []Channel{c.Company, c.Personal} {
 		target := []string{"company", "personal"}[channelIndex]
+		if channelIndex == 0 && !intent.Company {
+			target = "reject"
+		}
 		for i, domain := range ch.Domains {
 			r := PlannedRule{Rule: Rule{Type: "DOMAIN", Value: domain, Target: target}, Source: target + ".domains", Index: i + 1}
 			plan = append(plan, r)
@@ -35,6 +55,12 @@ func RulePlan(c Config) ([]PlannedRule, error) {
 			r.Target, r.Guard = "reject", true
 			plan = append(plan, r)
 		}
+		if channelIndex == 0 {
+			overrides, _ := c.environmentRules(intent)
+			for i, r := range overrides {
+				plan = append(plan, PlannedRule{Rule: r, Source: intent.Environment + "_overrides", Index: i + 1})
+			}
+		}
 	}
 	for i, p := range c.Probes {
 		if p.Channel == "direct" {
@@ -46,7 +72,7 @@ func RulePlan(c Config) ([]PlannedRule, error) {
 		plan = append(plan, PlannedRule{Rule: r, Source: "personal_rules", Index: i + 1})
 	}
 	plan = append(plan, PlannedRule{Rule: Rule{Type: "IP-CIDR", Value: "198.18.0.0/15", Target: "reject"}, Source: "fake_ip_guard", Guard: true}, PlannedRule{Rule: Rule{Type: "MATCH", Target: "direct"}, Source: "default"})
-	return plan, nil
+	return plan
 }
 
 func (r PlannedRule) CoreRule() string {

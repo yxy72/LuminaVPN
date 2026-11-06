@@ -20,6 +20,9 @@ func watch(run string) error {
 	if e != nil {
 		return e
 	}
+	if e = s.Manifest.ValidateMode(); e != nil {
+		return e
+	}
 	me, e := platform.Process(os.Getpid())
 	if e != nil {
 		return e
@@ -28,8 +31,16 @@ func watch(run string) error {
 		return errors.New("unpublished or mutable watchdog")
 	}
 	deadline := s.Windows.ValidationDeadline
-	if windowsFlowIsolationReady && deadline.IsZero() {
+	if windowsFlowIsolationReady && s.Manifest.EffectiveMode() != Daily && deadline.IsZero() {
 		return errors.New("validation watchdog has no hard deadline")
+	}
+	if s.Manifest.EffectiveMode() == Daily && !deadline.IsZero() {
+		return errors.New("daily watchdog cannot have a validation deadline")
+	}
+	if s.Manifest.Service != nil {
+		if e = verifyServiceHostPin(*s.Manifest.Service); e != nil {
+			return recoverRun(run, "service_owner_verification_failed")
+		}
 	}
 	power, e := winnet.WatchPower()
 	if e != nil {
@@ -63,6 +74,11 @@ func watch(run string) error {
 		actual, e := platform.Process(s.Runner.PID)
 		if e != nil || !sameProcess(s.Runner, actual) {
 			reason = "coordinator_exited"
+		}
+		if s.Manifest.Service != nil {
+			if err := serviceHostAliveWith(*s.Manifest.Service, platform.Process); err != nil {
+				reason = "service_owner_lost"
+			}
 		}
 		now, awake := power.Epoch()
 		if now != epoch {
@@ -203,7 +219,11 @@ func recoverRun(run, reason string) error {
 	} else {
 		until := time.Now().Add(10 * time.Second)
 		for {
-			e = m.Recover()
+			if s.Manifest.Mode != "" {
+				e = m.RecoverNetwork()
+			} else {
+				e = m.Recover()
+			}
 			if e == nil {
 				break
 			}
@@ -219,8 +239,23 @@ func recoverRun(run, reason string) error {
 	if e = VerifyOwnedInterfaces(run); e != nil {
 		return failed(e)
 	}
+	if s.Manifest.Service != nil {
+		journal, err := m.Store.Load()
+		if err != nil {
+			return failed(err)
+		}
+		if err = requireServiceAdaptersAbsent(s, journal); err != nil {
+			return failed(err)
+		}
+	}
+	if s.Manifest.Mode != "" && s.Windows.IPv6Guard != nil {
+		if e = m.ReleaseIPv6(); e != nil {
+			return failed(e)
+		}
+	}
 	if e = update(run, func(s *State) error {
 		s.Phase = "stopped"
+		s.TakeoverActive = false
 		s.Personal = selector.Reject
 		s.Error = ""
 		s.Leases = nil

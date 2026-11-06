@@ -1,0 +1,331 @@
+diff --git a/component/fakeip/lumina_pool_reuse_test.go b/component/fakeip/lumina_pool_reuse_test.go
+new file mode 100644
+index 00000000..73d79f14
+--- /dev/null
++++ b/component/fakeip/lumina_pool_reuse_test.go
+@@ -0,0 +1,55 @@
++package fakeip
++
++import (
++	"net/netip"
++	"testing"
++)
++
++func TestLuminaCanReuseFrom(t *testing.T) {
++	memory := func(prefix string) *Pool {
++		pool, err := New(Options{IPNet: netip.MustParsePrefix(prefix), Size: 128})
++		if err != nil {
++			t.Fatal(err)
++		}
++		return pool
++	}
++	a := memory("198.19.0.1/16")
++	b := memory("198.19.123.99/16")
++	if !b.CanReuseFrom(a) || !a.CanReuseFrom(a) {
++		t.Fatal("canonical same-prefix memory pools should be reusable")
++	}
++	if memory("198.18.0.1/16").CanReuseFrom(a) {
++		t.Fatal("different prefix must not reuse")
++	}
++	smaller, err := New(Options{IPNet: a.ipnet, Size: 64})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if smaller.CanReuseFrom(a) || a.CanReuseFrom(smaller) {
++		t.Fatal("different memory capacity must not reuse")
++	}
++	v6 := memory("2001:db8:1::1/112")
++	if !memory("2001:db8:1::99/112").CanReuseFrom(v6) {
++		t.Fatal("canonical IPv6 prefix should be reusable")
++	}
++	if v6.CanReuseFrom(a) {
++		t.Fatal("different address family must not reuse")
++	}
++	// Store-kind checks do not open a database or use global persistence.
++	persistent := &Pool{ipnet: a.ipnet, store: &cachefileStore{}}
++	persistent2 := &Pool{ipnet: b.ipnet, store: &cachefileStore{}}
++	if persistent2.CanReuseFrom(persistent) {
++		t.Fatal("persistent pools must retain the legacy clone branch")
++	}
++	if persistent.CanReuseFrom(a) || a.CanReuseFrom(persistent) {
++		t.Fatal("persistence kind change must not reuse")
++	}
++	var absent *Pool
++	var nilMemory *memoryStore
++	var nilPersistent *cachefileStore
++	for _, invalid := range []*Pool{absent, {}, {ipnet: a.ipnet}, {ipnet: a.ipnet, store: nilMemory}, {ipnet: a.ipnet, store: nilPersistent}} {
++		if invalid.CanReuseFrom(a) || a.CanReuseFrom(invalid) {
++			t.Fatal("incomplete pool must not reuse")
++		}
++	}
++}
+diff --git a/component/fakeip/pool.go b/component/fakeip/pool.go
+index 0417e20c..c5ff1b3a 100644
+--- a/component/fakeip/pool.go
++++ b/component/fakeip/pool.go
+@@ -37,6 +37,7 @@ type Pool struct {
+ 	mux     sync.Mutex
+ 	ipnet   netip.Prefix
+ 	store   store
++	size    int
+ }
+ 
+ // Lookup return a fake ip with host
+@@ -86,6 +87,25 @@ func (p *Pool) IPNet() netip.Prefix {
+ 	return p.ipnet
+ }
+ 
++// CanReuseFrom reports whether the new configuration can keep the old memory pool.
++// Reusing the pool keeps its mutex, mappings and allocation cursor together,
++// including lookups by handlers that still reference the old DNS service.
++// The prefix, size and backing store are immutable after New returns.
++// Persistent pools retain the existing CloneFrom behavior: constructing a new
++// persistent pool can restore or flush its shared cache before PatchFrom runs.
++func (p *Pool) CanReuseFrom(o *Pool) bool {
++	if p == nil || o == nil || !p.ipnet.IsValid() || !o.ipnet.IsValid() || p.ipnet.Masked() != o.ipnet.Masked() || p.size != o.size {
++		return false
++	}
++	switch current := p.store.(type) {
++	case *memoryStore:
++		previous, ok := o.store.(*memoryStore)
++		return current != nil && ok && previous != nil
++	default:
++		return false
++	}
++}
++
+ // CloneFrom clone cache from old pool
+ func (p *Pool) CloneFrom(o *Pool) {
+ 	o.store.CloneTo(p.store)
+@@ -175,6 +195,7 @@ func New(options Options) (*Pool, error) {
+ 		offset:  first.Prev(),
+ 		cycle:   false,
+ 		ipnet:   options.IPNet,
++		size:    options.Size,
+ 	}
+ 	if options.Persistence {
+ 		pool.store = newCachefileStore(cachefile.Cache(), options.IPNet)
+diff --git a/dns/enhancer.go b/dns/enhancer.go
+index 9cf3e194..cdbf00d4 100644
+--- a/dns/enhancer.go
++++ b/dns/enhancer.go
+@@ -140,11 +140,19 @@ func (h *ResolverEnhancer) PatchFrom(o *ResolverEnhancer) {
+ 	}
+ 
+ 	if h.fakeIPPool != nil && o.fakeIPPool != nil {
+-		h.fakeIPPool.CloneFrom(o.fakeIPPool)
++		if h.fakeIPPool.CanReuseFrom(o.fakeIPPool) {
++			h.fakeIPPool = o.fakeIPPool
++		} else {
++			h.fakeIPPool.CloneFrom(o.fakeIPPool)
++		}
+ 	}
+ 
+ 	if h.fakeIPPool6 != nil && o.fakeIPPool6 != nil {
+-		h.fakeIPPool6.CloneFrom(o.fakeIPPool6)
++		if h.fakeIPPool6.CanReuseFrom(o.fakeIPPool6) {
++			h.fakeIPPool6 = o.fakeIPPool6
++		} else {
++			h.fakeIPPool6.CloneFrom(o.fakeIPPool6)
++		}
+ 	}
+ }
+ 
+diff --git a/dns/lumina_pool_reuse_test.go b/dns/lumina_pool_reuse_test.go
+new file mode 100644
+index 00000000..ceb5b108
+--- /dev/null
++++ b/dns/lumina_pool_reuse_test.go
+@@ -0,0 +1,192 @@
++package dns
++
++import (
++	"context"
++	"fmt"
++	"net/netip"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/metacubex/mihomo/component/fakeip"
++	C "github.com/metacubex/mihomo/constant"
++	D "github.com/miekg/dns"
++)
++
++func luminaEnhancer(t *testing.T, prefix string, qtype uint16) *ResolverEnhancer {
++	t.Helper()
++	pool, err := fakeip.New(fakeip.Options{IPNet: netip.MustParsePrefix(prefix), Size: 128})
++	if err != nil {
++		t.Fatal(err)
++	}
++	cfg := EnhancerConfig{EnhancedMode: C.DNSFakeIP, FakeIPSkipper: &fakeip.Skipper{}, FakeIPTTL: 1, IPv6: qtype == D.TypeAAAA}
++	if qtype == D.TypeA {
++		cfg.FakeIPPool = pool
++	} else {
++		cfg.FakeIPPool6 = pool
++	}
++	return NewEnhancer(cfg)
++}
++
++func luminaPool(h *ResolverEnhancer, qtype uint16) *fakeip.Pool {
++	if qtype == D.TypeA {
++		return h.fakeIPPool
++	}
++	return h.fakeIPPool6
++}
++
++func luminaAnswer(service *Service, host string, qtype uint16) (netip.Addr, error) {
++	request := new(D.Msg)
++	request.SetQuestion(host+".", qtype)
++	response, err := service.ServeMsg(context.Background(), request)
++	if err != nil {
++		return netip.Addr{}, err
++	}
++	if response == nil || response.Rcode != D.RcodeSuccess || len(response.Answer) != 1 {
++		return netip.Addr{}, fmt.Errorf("unexpected fake-IP response: %v", response)
++	}
++	switch answer := response.Answer[0].(type) {
++	case *D.A:
++		address, ok := netip.AddrFromSlice(answer.A)
++		if ok {
++			return address.Unmap(), nil
++		}
++	case *D.AAAA:
++		address, ok := netip.AddrFromSlice(answer.AAAA)
++		if ok {
++			return address, nil
++		}
++	}
++	return netip.Addr{}, fmt.Errorf("unexpected fake-IP answer: %T", response.Answer[0])
++}
++
++func luminaMustAnswer(t *testing.T, service *Service, host string, qtype uint16) netip.Addr {
++	t.Helper()
++	address, err := luminaAnswer(service, host, qtype)
++	if err != nil {
++		t.Fatal(err)
++	}
++	return address
++}
++
++func TestLuminaPoolReuseOldServiceAndNewService(t *testing.T) {
++	for _, scene := range []struct {
++		name, prefix, canonical string
++		qtype                   uint16
++	}{
++		{"v4", "198.19.0.1/16", "198.19.99.1/16", D.TypeA},
++		{"v6", "2001:db8:1::1/112", "2001:db8:1::99/112", D.TypeAAAA},
++	} {
++		t.Run(scene.name, func(t *testing.T) {
++			old := luminaEnhancer(t, scene.prefix, scene.qtype)
++			oldService := NewService(nil, old) // Captures old middleware/pool; no network resolver is available.
++			alpha := luminaMustAnswer(t, oldService, "alpha.example", scene.qtype)
++			captured, release := make(chan struct{}), make(chan struct{})
++			var once sync.Once
++			t.Cleanup(func() { once.Do(func() { close(release) }) })
++			type result struct {
++				address netip.Addr
++				err     error
++			}
++			finished := make(chan result, 1)
++			go func(service *Service) {
++				close(captured)
++				<-release // Old service has been captured; allocation starts after the new service allocates beta.
++				address, err := luminaAnswer(service, "gamma.example", scene.qtype)
++				finished <- result{address, err}
++			}(oldService)
++			<-captured
++			next := luminaEnhancer(t, scene.canonical, scene.qtype)
++			next.PatchFrom(old)
++			if luminaPool(next, scene.qtype) != luminaPool(old, scene.qtype) {
++				t.Fatal("same-prefix pool identity changed")
++			}
++			newService := NewService(nil, next)
++			beta := luminaMustAnswer(t, newService, "beta.example", scene.qtype)
++			once.Do(func() { close(release) })
++			var gamma netip.Addr
++			select {
++			case result := <-finished:
++				if result.err != nil {
++					t.Fatal(result.err)
++				}
++				gamma = result.address
++			case <-time.After(2 * time.Second):
++				t.Fatal("old service did not finish")
++			}
++			if alpha == beta || alpha == gamma || beta == gamma {
++				t.Fatal("live services aliased addresses", alpha, beta, gamma)
++			}
++			for host, address := range map[string]netip.Addr{"alpha.example": alpha, "beta.example": beta, "gamma.example": gamma} {
++				for _, current := range []*ResolverEnhancer{old, next} {
++					if got := luminaMustAnswer(t, NewService(nil, current), host, scene.qtype); got != address {
++						t.Fatal("forward mapping changed", host, got, address)
++					}
++					if got, ok := luminaPool(current, scene.qtype).LookBack(address); !ok || got != host {
++						t.Fatal("reverse mapping changed", host, got, ok)
++					}
++				}
++			}
++		})
++	}
++}
++
++func TestLuminaRepeatedCanonicalReloadKeepsPool(t *testing.T) {
++	for _, scene := range []struct {
++		prefix, canonical string
++		qtype             uint16
++	}{
++		{"198.19.0.1/16", "198.19.99.1/16", D.TypeA},
++		{"2001:db8:1::1/112", "2001:db8:1::99/112", D.TypeAAAA},
++	} {
++		current := luminaEnhancer(t, scene.prefix, scene.qtype)
++		original := luminaPool(current, scene.qtype)
++		alpha := luminaMustAnswer(t, NewService(nil, current), "alpha.example", scene.qtype)
++		seen := map[netip.Addr]string{alpha: "alpha.example"}
++		for index := 0; index < 16; index++ {
++			next := luminaEnhancer(t, scene.canonical, scene.qtype)
++			next.PatchFrom(current)
++			if luminaPool(next, scene.qtype) != original {
++				t.Fatal("A-to-A reload replaced pool")
++			}
++			host := fmt.Sprintf("reload-%d.example", index)
++			address := luminaMustAnswer(t, NewService(nil, next), host, scene.qtype)
++			if previous, exists := seen[address]; exists {
++				t.Fatal("reload reused live address", previous, host, address)
++			}
++			seen[address] = host
++			if luminaMustAnswer(t, NewService(nil, next), "alpha.example", scene.qtype) != alpha {
++				t.Fatal("alpha changed across repeated reload")
++			}
++			current = next
++		}
++		for address, host := range seen {
++			if got, ok := original.LookBack(address); !ok || got != host {
++				t.Fatal("reverse mapping lost", host, got, ok)
++			}
++		}
++	}
++}
++
++func TestLuminaDifferentPrefixRetainsLegacyCloneBranch(t *testing.T) {
++	for _, scene := range []struct {
++		old, next string
++		qtype     uint16
++	}{
++		{"198.19.0.1/16", "198.18.0.1/16", D.TypeA},
++		{"2001:db8:1::1/112", "2001:db8:2::1/112", D.TypeAAAA},
++	} {
++		old := luminaEnhancer(t, scene.old, scene.qtype)
++		address := luminaMustAnswer(t, NewService(nil, old), "alpha.example", scene.qtype)
++		next := luminaEnhancer(t, scene.next, scene.qtype)
++		allocated := luminaPool(next, scene.qtype)
++		next.PatchFrom(old)
++		if luminaPool(next, scene.qtype) != allocated || allocated == luminaPool(old, scene.qtype) {
++			t.Fatal("different prefix reused pointer")
++		}
++		// Deliberately preserve upstream's legacy clone branch. This does not certify cross-prefix cached-IP safety.
++		if got, ok := allocated.LookBack(address); !ok || got != "alpha.example" {
++			t.Fatal("legacy cache clone changed", got, ok)
++		}
++	}
++}

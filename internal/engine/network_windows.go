@@ -14,13 +14,16 @@ import (
 	"strconv"
 )
 
-const windowsFlowIsolationReady = platform.WindowsValidationBuild || platform.WindowsHomeBuild
+const windowsFlowIsolationReady = platform.WindowsValidationBuild || platform.WindowsHomeBuild || platform.WindowsClientBuild
 
 var windowsPower *winnet.PowerWatch // Set once, before company workers start.
 func validVPN(s State) bool {
 	return validateVPN(s) == nil
 }
 func validateVPN(s State) error {
+	if !currentIntent(s).Company {
+		return errors.New("company channel is disabled")
+	}
 	if windowsPower == nil || s.Windows == nil || !s.VPN.Bootstrap {
 		return errors.New("VPN bootstrap is not active")
 	}
@@ -45,6 +48,9 @@ func validateVPN(s State) error {
 }
 func takeoverDNS(run string) error {
 	return update(run, func(s *State) error {
+		if e := s.Manifest.ValidateMode(); e != nil {
+			return e
+		}
 		if e := guard(run, s); e != nil {
 			return e
 		}
@@ -151,6 +157,14 @@ func hook(run string) (returned error) {
 				return errors.New("VPN callback selected a pre-existing adapter")
 			}
 		}
+		if s.Manifest.Service != nil {
+			if e = bindOwnedAdapterIntent(s, "vpn", adapter); e != nil {
+				return e
+			}
+			if e = save(run, s); e != nil {
+				return e
+			}
+		}
 		stage = "isolation"
 		m, e := networkManager(run)
 		if e != nil {
@@ -240,6 +254,9 @@ func discoverTUN(run string) error {
 			return e
 		}
 		s.Windows.TUNAdapter = a
+		if s.Manifest.Service != nil {
+			return bindOwnedAdapterIntent(s, "core", a)
+		}
 		return nil
 	})
 }

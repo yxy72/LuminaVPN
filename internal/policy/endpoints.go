@@ -8,7 +8,22 @@ import (
 
 // Control endpoints are physical bootstrap paths, not business authorizations.
 func ValidateEndpoints(c Config, nodes []Node) error {
-	control := []string{c.VPN.EndpointIPv4}
+	return validateEndpoints(c, nodes, true)
+}
+func ValidateEndpointsForIntent(c Config, nodes []Node, intent ChannelIntent) error {
+	return validateEndpoints(c, nodes, intent.Company)
+}
+func ValidateEndpointsForStorage(c Config, nodes []Node) error {
+	if err := c.ValidateForStorage(); err != nil {
+		return err
+	}
+	return validateEndpoints(c, nodes, false)
+}
+func validateEndpoints(c Config, nodes []Node, company bool) error {
+	control := []string{}
+	if company || c.VPN.EndpointIPv4 != "" {
+		control = append(control, c.VPN.EndpointIPv4)
+	}
 	for _, n := range nodes {
 		if ip, ok := n["server"].(string); ok {
 			control = append(control, ip)

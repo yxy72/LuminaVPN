@@ -71,7 +71,12 @@ func decodeState(raw []byte, readSpec func() ([]byte, error)) (State, error) {
 	if json.Unmarshal(data, &spec) != nil || spec.Version != 1 || spec.Network != (platform.Network{}) || spec.Binding != (policy.Binding{}) || runSpecDigest(spec) != s.RunSpecDigest {
 		return s, errors.New("immutable run specification failed verification; preserve recovery files")
 	}
-	if err := spec.Config.Validate(); err != nil {
+	// Decoding an existing recovery snapshot is not native start authority.
+	// Windows serve/run/watch/hook separately enforce ValidateMode before changes.
+	if err := spec.validateRecoveryMode(); err != nil {
+		return s, err
+	}
+	if err := spec.Config.ValidateForIntent(spec.InitialChannels()); err != nil {
 		return s, err
 	}
 	network, binding := s.Manifest.Network, s.Manifest.Binding

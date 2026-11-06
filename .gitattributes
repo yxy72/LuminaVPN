@@ -1,0 +1,4 @@
+# Rebuild inputs are hash-pinned, so keep their bytes stable on Windows.
+scripts/patches/* text eol=lf
+# Unified-diff context contains intentional leading spaces and blank lines.
+scripts/patches/*.patch -text -whitespace

@@ -2,7 +2,7 @@
   "version": 1,
   "os": "windows",
   "arch": "amd64",
-  "mihomo_version": "v1.19.32",
+  "mihomo_version": "v1.19.32-lumina.1",
   "openconnect_version": "v9.21.git.25.70d1e79-0.fc43",
   "files": [
     {
@@ -59,7 +59,7 @@
     },
     {
       "path": "bin/mihomo.exe",
-      "sha256": "beb9878924d7bd38c67176b441ab5e668cc378bfe751c8dc8fef3eb5aaf566d5"
+      "sha256": "afe81988502c39236b0f96e192f622dab667604ae72c4a4bbf5a332f1026dc4c"
     },
     {
       "path": "bin/openconnect.exe",

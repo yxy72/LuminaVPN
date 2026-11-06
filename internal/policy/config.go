@@ -40,14 +40,16 @@ type Rule struct {
 }
 
 type Config struct {
-	Version       int      `json:"version"`
-	PersonalRules []Rule   `json:"personal_rules,omitempty"`
-	Company       Channel  `json:"company"`
-	Personal      Channel  `json:"personal"`
-	DirectDNS     []string `json:"direct_dns"`
-	VPN           VPN      `json:"vpn"`
-	Ports         Ports    `json:"ports"`
-	Probes        []Probe  `json:"probes"`
+	Version         int        `json:"version"`
+	PersonalRules   []Rule     `json:"personal_rules,omitempty"`
+	OfficeOverrides []Override `json:"office_overrides,omitempty"`
+	HomeOverrides   []Override `json:"home_overrides,omitempty"`
+	Company         Channel    `json:"company"`
+	Personal        Channel    `json:"personal"`
+	DirectDNS       []string   `json:"direct_dns"`
+	VPN             VPN        `json:"vpn"`
+	Ports           Ports      `json:"ports"`
+	Probes          []Probe    `json:"probes"`
 }
 
 var domainRE = regexp.MustCompile(`^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
@@ -72,6 +74,19 @@ func IPv4(s string) (netip.Addr, error) {
 	return a, nil
 }
 func Decode(data []byte) (Config, error) {
+	return DecodeForIntent(data, DefaultIntent())
+}
+func DecodeForIntent(data []byte, intent ChannelIntent) (Config, error) {
+	return decode(data, intent, true)
+}
+
+// DecodeForStorage accepts an incomplete first-use profile. It does not
+// authorize a running takeover; every supplied value is still validated.
+func DecodeForStorage(data []byte) (Config, error) {
+	return decode(data, ChannelIntent{}, false)
+}
+
+func decode(data []byte, intent ChannelIntent, requireBase bool) (Config, error) {
 	var c Config
 	if len(data) > 1<<20 {
 		return c, errors.New("policy exceeds 1 MiB")
@@ -85,10 +100,36 @@ func Decode(data []byte) (Config, error) {
 	if d.Decode(&extra) != io.EOF {
 		return c, errors.New("multiple policy values")
 	}
-	return c, c.Validate()
+	return c, c.validate(intent, requireBase)
 }
 
 func (c Config) Validate() error {
+	return c.ValidateForIntent(DefaultIntent())
+}
+
+// ValidateForIntent validates every supplied field, while disabled channels do
+// not require credentials, resolvers or health probes that will never be used.
+func (c Config) ValidateForIntent(intent ChannelIntent) error {
+	return c.validate(intent, true)
+}
+
+// ValidateForStorage validates an editable profile without requiring settings
+// for inactive channels or the base runtime. Starting a takeover must separately
+// use ValidateForIntent with its actual channel intent.
+func (c Config) ValidateForStorage() error {
+	return c.validate(ChannelIntent{}, false)
+}
+
+func (c Config) validate(intent ChannelIntent, requireBase bool) error {
+	if _, err := c.environmentRules(intent); err != nil {
+		return err
+	}
+	if _, err := overrideRules(c.OfficeOverrides); err != nil {
+		return err
+	}
+	if _, err := overrideRules(c.HomeOverrides); err != nil {
+		return err
+	}
 	if err := ValidateRules(c.PersonalRules); err != nil {
 		return err
 	}
@@ -110,7 +151,11 @@ func (c Config) Validate() error {
 	}
 	for i, ch := range []Channel{c.Company, c.Personal} {
 		owner := []string{"company", "personal"}[i]
-		if len(ch.Domains)+len(ch.CIDRs) == 0 || len(ch.Domains)+len(ch.CIDRs) > 128 {
+		enabled := intent.Company
+		if i == 1 {
+			enabled = intent.Personal
+		}
+		if (enabled && len(ch.Domains)+len(ch.CIDRs) == 0) || len(ch.Domains)+len(ch.CIDRs) > 128 {
 			return fieldError(owner, "needs 1–128 explicit targets")
 		}
 		for index, domain := range ch.Domains {
@@ -142,7 +187,7 @@ func (c Config) Validate() error {
 				owner string
 			}{p, owner})
 		}
-		if len(ch.DNS) == 0 || len(ch.DNS) > 4 {
+		if (enabled && len(ch.DNS) == 0) || len(ch.DNS) > 4 {
 			return fieldError(owner+".dns", "needs 1–4 explicit DNS servers")
 		}
 	}
@@ -156,7 +201,7 @@ func (c Config) Validate() error {
 			}
 		}
 	}
-	if len(c.DirectDNS) == 0 || len(c.DirectDNS) > 4 {
+	if (requireBase && len(c.DirectDNS) == 0) || len(c.DirectDNS) > 4 {
 		return fieldError("direct_dns", "needs 1–4 explicit DNS servers")
 	}
 	for index, s := range c.Personal.DNS {
@@ -173,10 +218,10 @@ func (c Config) Validate() error {
 		}
 	}
 	u, err := url.Parse(c.VPN.Server)
-	if err != nil || u.Scheme != "https" || !validPort(u) || !ValidDomain(u.Hostname()) || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+	if (intent.Company || c.VPN.Server != "") && (err != nil || u.Scheme != "https" || !validPort(u) || !ValidDomain(u.Hostname()) || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/")) {
 		return fieldError("vpn.server", "VPN server must be a credential-free HTTPS hostname")
 	}
-	if _, err := IPv4(c.VPN.EndpointIPv4); err != nil {
+	if _, err := IPv4(c.VPN.EndpointIPv4); (intent.Company || c.VPN.EndpointIPv4 != "") && err != nil {
 		return fieldError("vpn.endpoint_ipv4", "VPN needs an explicit IPv4 bootstrap endpoint")
 	}
 	seen := map[string]bool{}
@@ -201,7 +246,7 @@ func (c Config) Validate() error {
 		}
 		seen[p.Channel] = true
 	}
-	if !seen["company"] || !seen["personal"] || !seen["direct"] {
+	if (intent.Company && !seen["company"]) || (intent.Personal && !seen["personal"]) || (requireBase && !seen["direct"]) {
 		return fieldError("probes", "company, personal and direct HTTPS probes are required")
 	}
 	return nil

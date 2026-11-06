@@ -71,6 +71,20 @@ type RuleReport struct {
 }
 
 func Decode(data []byte, base string) (Bootstrap, error) {
+	return DecodeForIntent(data, base, policy.DefaultIntent())
+}
+
+// DecodeForIntent preserves source validation while allowing a disabled channel
+// to be configured later. It never fetches a source or enables a channel.
+func DecodeForIntent(data []byte, base string, intent policy.ChannelIntent) (Bootstrap, error) {
+	return decodeForValidation(data, base, intent, false)
+}
+
+func DecodeForStorage(data []byte, base string) (Bootstrap, error) {
+	return decodeForValidation(data, base, policy.ChannelIntent{}, true)
+}
+
+func decodeForValidation(data []byte, base string, intent policy.ChannelIntent, storage bool) (Bootstrap, error) {
 	var b Bootstrap
 	d := json.NewDecoder(bytes.NewReader(data))
 	d.DisallowUnknownFields()
@@ -81,7 +95,11 @@ func Decode(data []byte, base string) (Bootstrap, error) {
 	if d.Decode(&extra) != io.EOF || b.Version != 1 {
 		return b, errors.New("invalid bootstrap version or trailing data")
 	}
-	if e := b.Policy.Validate(); e != nil {
+	validateErr := b.Policy.ValidateForIntent(intent)
+	if storage {
+		validateErr = b.Policy.ValidateForStorage()
+	}
+	if validateErr != nil {
 		return b, errors.New("invalid bootstrap network policy")
 	}
 	if b.Subscriptions.IntervalMinutes == 0 {

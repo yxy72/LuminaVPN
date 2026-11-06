@@ -1,6 +1,6 @@
 // Package desktopbridge implements the ordinary-permission desktop protocol.
-// The current protocol advertises read-only capabilities; no method launches
-// authentication, authorizes native changes or mutates an existing profile.
+// The default protocol remains read-only. The explicit Windows client build
+// adds bounded service requests; the bridge never owns a network lifecycle.
 package desktopbridge
 
 import (
@@ -99,7 +99,12 @@ func (s *Server) respond(ctx context.Context, r Request) Response {
 		}
 		s.hello = true
 		build := app.DesktopBuild()
-		response.Result = map[string]any{"protocol_major": ProtocolMajor, "session_id": s.session, "build": build.Info, "mode": build.Mode, "capabilities": map[string]any{"read_only": true, "connection_start": false, "connection_stop": false, "config_write": false, "native_lifecycle": build.Capabilities.NativeLifecycle, "methods": Methods}}
+		methods := append([]string{}, Methods...)
+		client := s.Service.ClientEnabled()
+		if client {
+			methods = append(methods, application.ClientMethods...)
+		}
+		response.Result = map[string]any{"protocol_major": ProtocolMajor, "session_id": s.session, "build": build.Info, "mode": build.Mode, "capabilities": map[string]any{"read_only": !client, "connection_start": client, "connection_stop": client, "config_write": client, "windows_client": client, "validation_only": client && build.Capabilities.ValidationOnly, "validation_maximum_seconds": build.Capabilities.ValidationMaximumSeconds, "requires_installed_service": client, "native_lifecycle": build.Capabilities.NativeLifecycle, "methods": methods}}
 		return response
 	}
 	if !s.hello {
@@ -108,7 +113,9 @@ func (s *Server) respond(ctx context.Context, r Request) Response {
 	}
 	var result any
 	var err error
-	if r.Method == "nodes.list" || r.Method == "config.get" {
+	if application.IsClientMethod(r.Method) {
+		result, err = s.Service.ClientRequest(ctx, r.Method, r.Params)
+	} else if r.Method == "nodes.list" || r.Method == "config.get" {
 		var p struct {
 			Offset int  `json:"offset"`
 			Limit  *int `json:"limit"`
@@ -171,8 +178,8 @@ func (s *Server) respond(ctx context.Context, r Request) Response {
 }
 
 func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
-	// One active read is deliberately below the protocol maximum of sixteen.
-	// Snapshot requests never queue unbounded work or create write side effects.
+	// One active request stays below the protocol maximum of sixteen. A submit
+	// only awaits the service's durable acknowledgement, never its worker lifetime.
 	scanner := bufio.NewScanner(in)
 	scanner.Buffer(make([]byte, 4096), MaxFrame+1)
 	write := func(response Response) error {
@@ -206,8 +213,8 @@ func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 				cancel()
 			}
 		}
-		// A disconnected UI cannot authorize additional actions. All operations
-		// in this first bridge are reads, so EOF/EPIPE only end the session.
+		// A disconnected UI cannot authorize additional actions. Already accepted
+		// service operations continue independently; EOF/EPIPE ends this proxy.
 		if err := write(response); err != nil {
 			return nil
 		}

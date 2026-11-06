@@ -54,6 +54,9 @@ type options struct {
 	prepareOnly                 bool
 	validationTimeout           time.Duration
 	sessionTimeout              time.Duration
+	// Explicit desktop intents are never inferred from an omitted CLI option.
+	mode     engine.RunMode
+	channels *policy.ChannelIntent
 }
 
 func DefaultProfile() (string, error) { return defaultProfilePath() }
@@ -63,6 +66,9 @@ func (c CLI) Run(args []string) error {
 	}
 	if c.Err == nil {
 		c.Err = io.Discard
+	}
+	if len(args) > 0 && args[0] == "_service-helper" {
+		return serviceHelperEntry(args, c.Out)
 	}
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" {
 		fmt.Fprintln(c.Out, "NetLaunch "+Version+"\nCommands: init, import, sync, plan, config validate|diff|apply|rollback|history, rules explain TARGET, doctor, check-runtime, auth, up, status, down, version, diagnostics export, runs cleanup\nOptions: --profile DIR --runtime DIR; init --file POLICY_OR_BOOTSTRAP.json; import --file FILE; config validate|diff|apply --file POLICY.json; config apply|rollback --restart; config rollback --revision SHA256; up --prepare-only; version --json; runs cleanup --profile DIR --run DIR [--apply] (administrator terminal)\nmacOS network lifecycle is experimental; config apply/rollback changes the next-start policy unless --restart is specified. Diagnostics exports allowlisted saved status to stdout; it does not check live network health.")
@@ -245,7 +251,11 @@ func (c CLI) Run(args []string) error {
 				if !ok {
 					return errors.New("no valid session to refresh")
 				}
-				return securefile.Write(filepath.Join(run, "auth-refresh.json"), session)
+				protected, err := auth.EncodeRuntime(cfg.VPN, session)
+				if err != nil {
+					return err
+				}
+				return securefile.Write(filepath.Join(run, "auth-refresh.json"), protected)
 			}
 		}
 		return nil
@@ -414,14 +424,21 @@ func (c CLI) startProfile(o options) error {
 	if e := requireCompleteConfigTransaction(o.profile); e != nil {
 		return e
 	}
-	cfg, e := readPolicy(o.profile)
+	intent := launchIntent(o)
+	cfg, e := readLaunchPolicy(o)
 	if e != nil {
 		return e
 	}
-	if e = c.syncSubscriptions(o, cfg, false); e != nil {
-		return e
+	if o.mode == "" {
+		if e = c.syncSubscriptions(o, cfg, false); e != nil {
+			return e
+		}
+	} else if intent.Personal {
+		if e = syncSubscriptionsForIntent(context.Background(), o.profile, cfg, intent, false); e != nil {
+			return e
+		}
 	}
-	cfg, nodes, e := effectiveProfile(o.profile, cfg)
+	cfg, nodes, e := effectiveLaunchProfile(o, cfg)
 	if e != nil {
 		return e
 	}
@@ -433,7 +450,8 @@ func (c CLI) upLocked(o options, cfg policy.Config, nodes []policy.Node) error {
 	if !platform.Supported() {
 		return errors.New("native lifecycle unavailable on this platform")
 	}
-	if e := policy.ValidateEndpoints(cfg, nodes); e != nil {
+	intent := launchIntent(o)
+	if e := policy.ValidateEndpointsForIntent(cfg, nodes, intent); e != nil {
 		return e
 	}
 	var e error
@@ -444,18 +462,24 @@ func (c CLI) upLocked(o options, cfg policy.Config, nodes []policy.Node) error {
 			o.force = true
 		}
 	}
-	if issues, _ := diagnose(o, cfg); len(issues) > 0 {
+	if issues, _ := diagnoseLaunch(o, cfg); len(issues) > 0 {
 		for _, i := range issues {
 			fmt.Fprintln(c.Err, i)
 		}
 		return errors.New("startup stopped before authentication or network changes; resolve doctor findings first")
 	}
-	if e = c.obtainAuth(o, cfg); e != nil {
-		return e
-	}
-	session, ok := auth.Load(o.profile, cfg.VPN)
-	if !ok {
-		return errors.New("local VPN session is unavailable")
+	var session auth.Session
+	haveSession := false
+	if intent.Company {
+		if o.mode == "" {
+			if e = c.obtainAuth(o, cfg); e != nil {
+				return e
+			}
+		}
+		session, haveSession = auth.Load(o.profile, cfg.VPN)
+		if !haveSession && o.mode == "" {
+			return errors.New("local VPN session is unavailable")
+		}
 	}
 	network, e := platform.Discover()
 	if e != nil {
@@ -500,6 +524,7 @@ func (c CLI) upLocked(o options, cfg policy.Config, nodes []policy.Node) error {
 		return e
 	}
 	m := engine.Manifest{Version: 1, Owner: owner, OwnerSID: ownerSID, Config: cfg, Binding: policy.Binding{Physical: network.Interface, VPN: vpn, TUN: tun, ControllerPort: port}, Network: network, Executable: staged, Created: time.Now()}
+	m.Mode, m.Channels = o.mode, o.channels
 	m.ValidationTimeout = o.validationTimeout
 	if e = securefile.Write(filepath.Join(run, "manifest.json"), m); e != nil {
 		return e
@@ -510,8 +535,14 @@ func (c CLI) upLocked(o options, cfg policy.Config, nodes []policy.Node) error {
 	if e = securefile.Write(filepath.Join(run, "nodes.json"), nodes); e != nil {
 		return e
 	}
-	if e = securefile.Write(filepath.Join(run, "auth.json"), session); e != nil {
-		return e
+	if intent.Company && haveSession {
+		protectedSession, encodeErr := auth.EncodeRuntime(cfg.VPN, session)
+		if encodeErr != nil {
+			return encodeErr
+		}
+		if e = securefile.Write(filepath.Join(run, "auth.json"), protectedSession); e != nil {
+			return e
+		}
 	}
 	recovery, e := writeRecoveryEntry(run, staged)
 	if e != nil {
@@ -591,6 +622,33 @@ func copyBinary(from, to string) error {
 }
 
 func validateLaunchOptions(o *options, command string) error {
+	if o.mode != "" {
+		if command != "up" || !platform.WindowsClientBuild || o.channels == nil {
+			return errors.New("explicit desktop mode requires the Windows client service and channel intent")
+		}
+		if platform.WindowsValidationBuild || platform.WindowsHomeBuild {
+			return errors.New("Windows client and legacy preview build gates cannot be combined")
+		}
+		switch o.mode {
+		case engine.Daily:
+			if platform.WindowsClientValidationOnly {
+				return errors.New("this client experiment build accepts validation mode only")
+			}
+			if o.validationTimeout != 0 || o.sessionTimeout != 0 {
+				return errors.New("daily mode does not accept a fixed session deadline")
+			}
+		case engine.Validation:
+			if o.sessionTimeout != 0 || o.validationTimeout < time.Second || o.validationTimeout > 45*time.Minute {
+				return errors.New("validation mode requires an immutable deadline from 1s through 45m")
+			}
+		default:
+			return errors.New("unsupported desktop run mode")
+		}
+		return nil
+	}
+	if command == "up" && platform.WindowsClientBuild && !platform.WindowsValidationBuild && !platform.WindowsHomeBuild {
+		return errors.New("use the installed Windows client service; an omitted mode cannot start a daily run")
+	}
 	if o.prepareOnly && command != "up" {
 		return errors.New("--prepare-only is only valid with up")
 	}

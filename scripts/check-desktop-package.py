@@ -314,7 +314,89 @@ def verify_asar(path):
     return len(entries)
 
 
-def check_package(package):
+WINDOWS_CLIENT_IMAGES = {
+    'service': 'lumina-service.exe', 'user_worker': 'lumina-user-worker.exe',
+    'lifecycle': 'netlaunch.exe', 'core': 'runtime/bin/mihomo.exe',
+    'vpn': 'runtime/bin/openconnect.exe',
+}
+
+
+def windows_client_recovery(release_id):
+    return ('@echo off\nsetlocal DisableDelayedExpansion\n'
+            '"%~dp0..\\..\\releases\\' + release_id + '\\lumina-service.exe" --recover\n'
+            'set "lumina_exit=%errorlevel%"\n'
+            'if not "%lumina_exit%"=="0" echo Recovery is not confirmed. Keep the installed files and retry the recovery entry.\n'
+            'pause\nexit /b %lumina_exit%\n').encode('ascii')
+
+
+def verify_windows_image(path):
+    regular(path)
+    with path.open('rb') as source:
+        prefix = source.read(64)
+        require(len(prefix) == 64 and prefix[:2] == b'MZ', 'CLIENT_IMAGE_ARCHITECTURE_MISMATCH')
+        offset = struct.unpack_from('<I', prefix, 60)[0]
+        require(64 <= offset < 1 << 20, 'CLIENT_IMAGE_ARCHITECTURE_MISMATCH')
+        source.seek(offset)
+        require(source.read(6) == b'PE\0\0\x64\x86', 'CLIENT_IMAGE_ARCHITECTURE_MISMATCH')
+
+
+def check_windows_client(package, resources):
+    catalog_path = package / 'release-catalog.json'
+    regular(catalog_path)
+    require(catalog_path.stat().st_size <= 1 << 20, 'CLIENT_CATALOG_TOO_LARGE')
+    catalog = parse_json(catalog_path.read_bytes())
+    require(isinstance(catalog, dict) and set(catalog) == {'release_id', 'files', 'runtime_manifest_sha256'},
+            'INVALID_CLIENT_CATALOG')
+    release_id = catalog['release_id']
+    require(isinstance(release_id, str) and re.fullmatch('[a-f0-9]{64}', release_id), 'INVALID_CLIENT_RELEASE_ID')
+    pins = catalog['files']
+    require(isinstance(pins, dict) and set(pins) == set(WINDOWS_CLIENT_IMAGES), 'INVALID_CLIENT_IMAGE_PINS')
+    expected = (RUNTIME_FILES['windows'] | NOTICES['windows'] | {'manifest.json'})
+    release_paths = {'runtime/' + name for name in expected} | {'legal/' + name for name in LEGAL_FILES}
+    release_paths |= {'lumina-service.exe', 'lumina-user-worker.exe', 'netlaunch.exe'}
+    require(tree_files(package / 'releases') == {release_id + '/' + name for name in release_paths},
+            'CLIENT_RELEASE_TREE_MISMATCH')
+    release = package / 'releases' / release_id
+    components = verify_runtime(release / 'runtime', 'windows')
+    verify_legal(release / 'legal')
+    require(catalog['runtime_manifest_sha256'] == sha256_file(release / 'runtime/manifest.json'),
+            'CLIENT_MANIFEST_PIN_MISMATCH')
+    for kind, relative in WINDOWS_CLIENT_IMAGES.items():
+        pin = pins[kind]
+        require(isinstance(pin, dict) and set(pin) == {'sha256'}
+                and isinstance(pin['sha256'], str) and re.fullmatch('[a-f0-9]{64}', pin['sha256']),
+                'INVALID_CLIENT_IMAGE_PINS')
+        require(pin['sha256'] == sha256_file(release / relative), 'CLIENT_IMAGE_PIN_MISMATCH')
+        if kind in {'service', 'user_worker', 'lifecycle'}:
+            verify_windows_image(release / relative)
+    identity = {'version': 1, 'files': [{'path': name, 'sha256': sha256_file(release / name)}
+                                      for name in sorted(release_paths)]}
+    identity_bytes = (json.dumps(identity, ensure_ascii=False, separators=(',', ':')) + '\n').encode('utf-8')
+    require(hashlib.sha256(identity_bytes).hexdigest() == release_id, 'CLIENT_RELEASE_CONTENT_ID_MISMATCH')
+    # The ordinary IPC proxy must be the same lifecycle image from this release;
+    # it is never separately rebuilt, edited or signed after pinning.
+    verify_backend(resources / 'backend', 'windows')
+    require(sha256_file(resources / 'backend/netlaunch.exe') == pins['lifecycle']['sha256'],
+            'CLIENT_GUI_BACKEND_MISMATCH')
+    verify_runtime(resources / 'runtime', 'windows')
+    verify_legal(resources / 'legal')
+    for name in expected:
+        require(sha256_file(resources / 'runtime' / name) == sha256_file(release / 'runtime' / name),
+                'CLIENT_GUI_RUNTIME_MISMATCH')
+    for name in LEGAL_FILES:
+        require(sha256_file(resources / 'legal' / name) == sha256_file(release / 'legal' / name),
+                'CLIENT_GUI_LEGAL_MISMATCH')
+    require(tree_files(resources / 'recovery') == {'Stop-and-Recover.cmd'}, 'UNEXPECTED_OR_MISSING_RECOVERY_FILE')
+    recovery = resources / 'recovery/Stop-and-Recover.cmd'
+    require(recovery.stat().st_size <= 64 << 10
+            and recovery.read_bytes().replace(b'\r\n', b'\n') == windows_client_recovery(release_id),
+            'WINDOWS_CLIENT_RECOVERY_ENTRY_INVALID')
+    require(not (resources / 'app.asar.unpacked').exists(), 'UNEXPECTED_UNPACKED_ASAR_PAYLOAD')
+    payload = verify_asar(resources / 'app.asar')
+    return {'platform': 'windows', 'runtime_components': components, 'asar_files': payload, 'client_release': release_id}
+
+
+def check_package(package, windows_client=False):
     package = Path(package)
     require(package.is_dir() and not package.is_symlink(), 'PACKAGE_DIRECTORY_MISSING_OR_LINKED')
     if (package / 'Contents').exists():
@@ -328,6 +410,9 @@ def check_package(package):
         goos, resources = 'windows', package / 'resources'
         regular(package / 'LuminaVPN.exe')
     require(resources.is_dir() and not resources.is_symlink(), 'PACKAGE_RESOURCES_MISSING_OR_LINKED')
+    if windows_client or (package / 'release-catalog.json').exists():
+        require(goos == 'windows', 'WINDOWS_CLIENT_PLATFORM_REQUIRED')
+        return check_windows_client(package, resources)
     # Electron's platform frameworks/resources have their own layout. The
     # custom payload is checked independently rather than treated as source.
     for name in ('backend', 'runtime', 'recovery', 'legal'):
@@ -357,9 +442,10 @@ def check_package(package):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('package', type=Path)
+    parser.add_argument('--windows-client', action='store_true', help='Require the fixed Windows service-client layout')
     args = parser.parse_args()
     try:
-        result = check_package(args.package)
+        result = check_package(args.package, windows_client=args.windows_client)
     except (PackageError, OSError, ValueError, struct.error, RecursionError) as error:
         code = str(error) if isinstance(error, PackageError) else 'PACKAGE_READ_FAILED'
         print('Desktop package check failed: ' + code, file=sys.stderr)

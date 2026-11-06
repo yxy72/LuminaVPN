@@ -32,7 +32,11 @@ func Launch(action, run string) error {
 	if action != "serve" && action != "recover" {
 		return errors.New("invalid administrator action")
 	}
-	m, e := ReadManifest(run)
+	read := ReadManifest
+	if action == "recover" {
+		read = readRecoveryManifest
+	}
+	m, e := read(run)
 	if e != nil {
 		return e
 	}

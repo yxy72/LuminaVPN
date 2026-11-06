@@ -6,9 +6,10 @@ import { resolve } from 'node:path'
 const harness = vi.hoisted(() => ({ spawn: vi.fn() }))
 vi.mock('node:child_process', () => ({ spawn: harness.spawn }))
 import { Bridge } from '../src/main/bridge'
+import { READ_METHODS } from '../protocol/types'
 
 const state = JSON.parse(readFileSync(resolve('protocol/fixtures.json'), 'utf8')).state
-const hello = { protocol_major: 1, session_id: 'fixture', build: { version: '0.2.0-preview.2', os: 'darwin', arch: 'arm64', go_version: 'fixture' }, mode: 'native', capabilities: { read_only: true, connection_start: false, connection_stop: false, config_write: false, native_lifecycle: true, methods: ['state.get'] } }
+const hello = { protocol_major: 1, session_id: 'fixture', build: { version: '0.2.0-preview.2', os: 'darwin', arch: 'arm64', go_version: 'fixture' }, mode: 'native', capabilities: { read_only: true, connection_start: false, connection_stop: false, config_write: false, native_lifecycle: true, methods: [...READ_METHODS] } }
 
 function child(malformed = false) {
   const process = new EventEmitter() as EventEmitter & { stdin: EventEmitter & { write: (frame: string, cb: (error?: Error) => void) => boolean; end: () => void }; stdout: EventEmitter; stderr: EventEmitter; kill: ReturnType<typeof vi.fn>; callbacks: ((error?: Error) => void)[] }

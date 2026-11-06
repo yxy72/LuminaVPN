@@ -108,6 +108,21 @@ func channelView(s State, name string, now time.Time) ChannelStatus {
 	if name == "company" && s.Phase == "stopped" && s.RecoveryReason == "authentication_required" {
 		return ChannelStatus{State: "unavailable", Reason: "authentication_required", NextAction: "run_auth"}
 	}
+	if s.Manifest.Mode != "" && s.TakeoverActive && s.Phase != "stopping" && s.Phase != "stopped" && s.Phase != "recovery_failed" && s.Phase != "network_unavailable" {
+		if (name == "company" || name == "personal") && s.ChannelGeneration != s.AppliedGeneration {
+			return ChannelStatus{State: "unknown", Reason: "intent_pending", NextAction: "wait_for_apply"}
+		}
+		intent := currentIntent(s)
+		if name == "company" && !intent.Company {
+			return ChannelStatus{State: "ready", Reason: "disabled_blocked", PathState: "blocked", CheckedAt: now}
+		}
+		if name == "personal" && !intent.Personal {
+			return ChannelStatus{State: "ready", Reason: "disabled_direct", PathState: "physical_direct", CheckedAt: now}
+		}
+		if name == "personal" && s.PersonalFallback {
+			return ChannelStatus{State: "degraded", Reason: "all_candidates_failed", PathState: "physical_direct", CheckedAt: now}
+		}
+	}
 	switch s.Phase {
 	case "stopped", "stopping":
 		return ChannelStatus{State: "unavailable", Reason: s.Phase, NextAction: "start"}
@@ -119,6 +134,9 @@ func channelView(s State, name string, now time.Time) ChannelStatus {
 	if name == "company" {
 		if s.Phase == "authentication_required" {
 			return ChannelStatus{State: "unavailable", Reason: "authentication_required", NextAction: "run_auth"}
+		}
+		if h.Reason == "company_ingress_unavailable" && s.Manifest.Mode != "" {
+			return out
 		}
 		if !s.VPN.Bootstrap {
 			return ChannelStatus{State: "unavailable", Reason: "vpn_not_ready", NextAction: "wait_for_reconnect"}
@@ -162,7 +180,34 @@ func channelView(s State, name string, now time.Time) ChannelStatus {
 	if out.CheckedAt.IsZero() || now.Before(out.CheckedAt) || now.Sub(out.CheckedAt) > 90*time.Second {
 		return unknown("check_expired")
 	}
+	if s.Manifest.Mode != "" && out.State == "ready" && h.ProbeScope != "system_tun" {
+		return unknown("system_path_not_checked")
+	}
 	return out
+}
+
+// Managed takeover and path health are separate. Only current, complete
+// system-TUN checks can publish ready or advance LastReady on desktop runs.
+func desktopPhase(s *State, now time.Time) {
+	if s.Phase == "authentication_required" && currentIntent(*s).Company {
+		return
+	}
+	ready, failed := true, false
+	var checked time.Time
+	for _, name := range []string{"company", "personal", "direct"} {
+		h := channelView(*s, name, now)
+		ready = ready && h.State == "ready"
+		failed = failed || h.State == "unavailable" || h.State == "degraded"
+		if h.ProbeScope == "system_tun" && (checked.IsZero() || h.CheckedAt.Before(checked)) {
+			checked = h.CheckedAt
+		}
+	}
+	s.Phase = "managed"
+	if ready && !checked.IsZero() {
+		s.Phase, s.LastReady = "ready", checked
+	} else if failed {
+		s.Phase = "degraded"
+	}
 }
 
 func NeedsAuthentication(s Status) bool {
@@ -185,11 +230,11 @@ func publicStatus(s State, now time.Time) Status {
 	case "stopped", "stopping", "recovery_failed":
 		lifecycle = s.Phase
 	default:
-		if !s.LastReady.IsZero() || s.Phase == "ready" {
+		if s.TakeoverActive || !s.LastReady.IsZero() || s.Phase == "ready" {
 			lifecycle = "running"
 		}
 	}
-	return Status{Phase: phase, Updated: s.Updated, Company: channels["company"].State, Personal: s.Personal, LastReady: s.LastReady, Error: s.Error, RecoveryReason: s.RecoveryReason, Experimental: true, Channels: channels, Lifecycle: lifecycle}
+	return Status{Phase: phase, Updated: s.Updated, Company: channels["company"].State, Personal: s.Personal, LastReady: s.LastReady, Error: s.Error, RecoveryReason: s.RecoveryReason, Experimental: true, Channels: channels, Lifecycle: lifecycle, DesiredChannels: s.DesiredChannels, AppliedChannels: s.AppliedChannels, ChannelGeneration: s.ChannelGeneration, AppliedGeneration: s.AppliedGeneration, TakeoverActive: s.TakeoverActive, PersonalFallback: s.PersonalFallback}
 }
 
 func personalUnavailable(s *State, reason string) {

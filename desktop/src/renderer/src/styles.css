@@ -1160,3 +1160,16 @@ a {
     transition-duration: 0.01ms !important;
   }
 }
+
+.client-workspace { display: grid; gap: 18px; padding-bottom: 28px; }
+.client-status,.client-operation,.client-notice { display:flex; flex-wrap:wrap; gap:16px; padding:14px 18px; background:var(--surface,#fff); border:1px solid var(--line,#dce4df); border-radius:10px; font-size:13px; }
+.client-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:18px; }
+.client-card { padding:22px; border:1px solid var(--line,#dce4df); background:var(--surface,#fff); border-radius:12px; min-width:0; }
+.client-card h2 { font-size:17px; margin-bottom:14px; }.client-card p,.client-workspace>p { font-size:13px; color:var(--muted,#627169); line-height:1.7; }
+.client-card label { display:grid; gap:7px; font-size:13px; margin:12px 0; }.client-card label:has(input[type=checkbox]) { display:flex; align-items:center; }
+.client-workspace textarea,.client-workspace input:not([type=checkbox]),.client-workspace select { width:100%; box-sizing:border-box; padding:10px 12px; border:1px solid #cfdad2; border-radius:7px; background:#fff; color:#173128; font:inherit; }
+.client-workspace textarea { min-height:96px; resize:vertical; }.client-workspace .client-json { min-height:220px; font:12px/1.6 ui-monospace,monospace; }
+.client-actions { display:flex; align-items:center; flex-wrap:wrap; gap:10px; }.client-actions>input { max-width:280px; }.client-actions>select { width:auto; }
+.client-workspace button { padding:9px 14px; border:1px solid #a6bfae; border-radius:7px; background:#eff5ef; color:#1c523c; cursor:pointer; font:inherit; font-size:13px; }.client-workspace button:disabled { opacity:.45;cursor:not-allowed; }
+.client-result { white-space:pre-wrap; overflow-wrap:anywhere; max-height:500px; overflow:auto; font:12px/1.6 ui-monospace,monospace; }.client-workspace li { overflow-wrap:anywhere; margin:10px 0; }
+.client-table { width:100%; border-collapse:collapse; font-size:13px; margin:16px 0; }.client-table th,.client-table td { text-align:left; padding:10px; border-bottom:1px solid #e1e9e3; overflow-wrap:anywhere; }.client-table th { color:#526b60; font-weight:600; }

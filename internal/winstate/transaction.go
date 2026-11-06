@@ -21,15 +21,16 @@ type DNSChange struct {
 	State   string             `json:"state"`
 }
 type Journal struct {
-	Version   int             `json:"version"`
-	BootID    string          `json:"boot_id"`
-	Stopping  bool            `json:"stopping"`
-	Routes    []RouteChange   `json:"routes"`
-	DNS       []DNSChange     `json:"dns"`
-	Addresses []AddressChange `json:"addresses,omitempty"`
-	MTU       []MTUChange     `json:"mtu,omitempty"`
-	Guards    []GuardChange   `json:"guards,omitempty"`
-	Pairs     []PairChange    `json:"pairs,omitempty"`
+	Version    int               `json:"version"`
+	BootID     string            `json:"boot_id"`
+	Stopping   bool              `json:"stopping"`
+	Routes     []RouteChange     `json:"routes"`
+	DNS        []DNSChange       `json:"dns"`
+	Addresses  []AddressChange   `json:"addresses,omitempty"`
+	MTU        []MTUChange       `json:"mtu,omitempty"`
+	Guards     []GuardChange     `json:"guards,omitempty"`
+	Pairs      []PairChange      `json:"pairs,omitempty"`
+	IPv6Guards []IPv6GuardChange `json:"ipv6_guards,omitempty"`
 }
 type Storage interface {
 	Lock() (func(), error)
@@ -46,8 +47,9 @@ type Backend interface {
 	SetDNS(winnet.Adapter, winnet.DNSSettings) error
 }
 type Manager struct {
-	Store  Storage
-	Native Backend
+	Store          Storage
+	Native         Backend
+	RetainEvidence bool
 }
 
 func (m Manager) load() (Journal, error) {
@@ -74,14 +76,21 @@ func (m Manager) load() (Journal, error) {
 	if e := validateIsolation(j); e != nil {
 		return j, e
 	}
+	if e := validateIPv6(j); e != nil {
+		return j, e
+	}
 	// Completed entries have no remaining authority. Compact them on the next
 	// transaction so frequent DNS rotation cannot exhaust the bounded journal.
+	if m.RetainEvidence {
+		return j, nil
+	}
 	j.Routes = slices.DeleteFunc(j.Routes, func(v RouteChange) bool { return v.State == "restored" })
 	j.DNS = slices.DeleteFunc(j.DNS, func(v DNSChange) bool { return v.State == "restored" })
 	j.Addresses = slices.DeleteFunc(j.Addresses, func(v AddressChange) bool { return v.State == "restored" })
 	j.MTU = slices.DeleteFunc(j.MTU, func(v MTUChange) bool { return v.State == "restored" })
 	j.Pairs = slices.DeleteFunc(j.Pairs, pairDone)
 	j.Guards = slices.DeleteFunc(j.Guards, func(v GuardChange) bool { return v.State == "restored" })
+	j.IPv6Guards = slices.DeleteFunc(j.IPv6Guards, func(v IPv6GuardChange) bool { return v.State == "restored" })
 	return j, nil
 }
 func validState(s string) bool {
@@ -246,6 +255,14 @@ func (m Manager) SetDNS(adapter winnet.Adapter, desired winnet.DNSSettings) erro
 // changes after a crash, retains failures, and never overwrites external DNS
 // or routes. The caller must stop its core/VPN children before using it.
 func (m Manager) Recover() error {
+	return m.recover(true)
+}
+
+// RecoverNetwork keeps the independent outbound guard until the coordinator
+// has verified exact process and interface exit outside this network journal.
+func (m Manager) RecoverNetwork() error { return m.recover(false) }
+
+func (m Manager) recover(releaseIPv6 bool) error {
 	unlock, e := m.Store.Lock()
 	if e != nil {
 		return e
@@ -306,6 +323,12 @@ func (m Manager) Recover() error {
 	}
 	if e := m.restoreTunnel(&j, nil, boot); e != nil {
 		failures = append(failures, e)
+	}
+	// Keep outbound IPv6 blocked while any earlier restoration is incomplete.
+	if releaseIPv6 && len(failures) == 0 {
+		if e := m.restoreIPv6(&j); e != nil {
+			failures = append(failures, e)
+		}
 	}
 	return errors.Join(failures...)
 }

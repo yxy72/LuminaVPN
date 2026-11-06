@@ -5,6 +5,7 @@ package engine
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -39,8 +40,11 @@ func initialize(run string) (State, error) {
 	if e != nil {
 		return State{}, e
 	}
-	if windowsFlowIsolationReady && m.ValidationTimeout == 0 {
+	if windowsFlowIsolationReady && m.EffectiveMode() != Daily && m.ValidationTimeout == 0 {
 		return State{}, errors.New("Windows validation manifest has no hard deadline")
+	}
+	if e = verifyServicePreparedNativeStart(run, m); e != nil {
+		return State{}, e
 	}
 	files, id, e := winFiles(run)
 	if e != nil {
@@ -51,6 +55,11 @@ func initialize(run string) (State, error) {
 	}
 	if e = files.Dir(id); e != nil {
 		return State{}, e
+	}
+	if m.Service != nil {
+		if e = files.Write(filepath.Join(id, "service-owned.json"), m.Service); e != nil {
+			return State{}, e
+		}
 	}
 	boot, e := winnet.BootID()
 	if e != nil {
@@ -80,6 +89,9 @@ func initialize(run string) (State, error) {
 	}
 	m.Executable = frozenSelf(run)
 	s := State{Version: 1, Manifest: m, Runner: runner, Phase: "preparing", Heartbeat: time.Now(), Personal: selector.Reject, Windows: &WindowsState{BootID: boot, PublicRun: run, Physical: physical, AdapterBefore: before}}
+	intent := m.InitialChannels()
+	s.DesiredChannels = &intent
+	s.ChannelGeneration = 1
 	if e = initializeStateStorage(run, &s); e != nil {
 		return s, e
 	}
@@ -96,9 +108,18 @@ func initialize(run string) (State, error) {
 	if e != nil {
 		return s, e
 	}
+	if m.Service != nil {
+		self = filepath.Join(run, "netlaunch.exe")
+	}
 	binary, e := securefile.Read(self, 128<<20, true)
 	if e != nil {
 		return s, e
+	}
+	if m.Service != nil {
+		sum := sha256.Sum256(binary)
+		if hex.EncodeToString(sum[:]) != m.Service.LifecycleSHA256 {
+			return s, errors.New("protected lifecycle copy differs from frozen release pin")
+		}
 	}
 	if e = files.Bytes(filepath.Join(id, "netlaunch.exe"), binary); e != nil {
 		return s, e
@@ -210,6 +231,13 @@ func (g *windowsChildren) launch(run, role string, args, environment []string, c
 		p, e := job.Start(winproc.Spec{Args: args, Directory: private(run), Environment: environment, Stdin: in, Stdout: log, Stderr: log}, func(id platform.Identity) error {
 			result = Child{Role: role, PID: id.PID, Birth: id.Birth, Native: &id, Released: true, LogName: logRole + "-private.log"}
 			s.Children = append(s.Children, result)
+			if s.Manifest.Service != nil && (role == "core" || role == "vpn") {
+				name := s.Manifest.Binding.TUN
+				if role == "vpn" {
+					name = s.Manifest.Binding.VPN
+				}
+				s.Windows.AdapterIntents = append(s.Windows.AdapterIntents, OwnedAdapterIntent{Role: role, Name: name, Owner: id})
+			}
 			return save(run, s)
 		})
 		process = p
@@ -310,9 +338,12 @@ func startVPN(run string, g *windowsChildren) (Child, error) {
 	if e != nil {
 		return Child{}, e
 	}
-	var session auth.Session
-	if e = winRead(run, "auth.json", &session); e != nil {
-		return Child{}, e
+	if !currentIntent(s).Company {
+		return Child{}, errors.New("company channel is disabled")
+	}
+	session, e := readProtectedAuth(run, s.Manifest.Config.VPN)
+	if e != nil {
+		return Child{}, errVPNAuthenticationRequired
 	}
 	if e = requireVPNAuthentication(session, s.Manifest.Config.VPN, time.Now()); e != nil {
 		return Child{}, e
@@ -344,6 +375,7 @@ func startVPN(run string, g *windowsChildren) (Child, error) {
 			return e
 		}
 		s.Windows.LaunchToken = token
+		s.Windows.AuthExpires = session.Created.Add(auth.MaxAge)
 		s.Manifest.Binding.VPN = vpnName
 		s.VPN.Bootstrap = false
 		return nil
@@ -493,16 +525,29 @@ func serve(run string) (returned error) {
 	if e = readJSON(filepath.Join(run, "nodes.json"), &nodes); e != nil {
 		return e
 	}
-	nodes, e = policy.SanitizeNodes(nodes)
-	if e != nil {
-		return e
+	if len(nodes) != 0 || s.Manifest.InitialChannels().Personal {
+		nodes, e = policy.SanitizeNodes(nodes)
+		if e != nil {
+			return e
+		}
 	}
-	session, e := readAuth(run)
-	if e != nil {
-		return e
-	}
-	if e = winWrite(run, "auth.json", session); e != nil {
-		return e
+	if s.Manifest.InitialChannels().Company {
+		if s.Manifest.Mode != "" {
+			if e = stageDesktopAuth(run, s.Manifest.Config.VPN); e != nil {
+				return e
+			}
+		} else {
+			session, e := readAuth(run)
+			if e != nil {
+				return e
+			}
+			if e = writeProtectedAuth(run, s.Manifest.Config.VPN, session); e != nil {
+				return e
+			}
+			if e = os.Remove(filepath.Join(run, "auth.json")); e != nil && !errors.Is(e, os.ErrNotExist) {
+				return e
+			}
+		}
 	}
 	if e = winWrite(run, "nodes.json", nodes); e != nil {
 		return e
@@ -544,7 +589,14 @@ func startFrozenCoordinator(run string) error {
 				if !s.Windows.ValidationDeadline.IsZero() {
 					return errors.New("validation deadline cannot be renewed")
 				}
-				s.Windows.ValidationDeadline = time.Now().Add(s.Manifest.ValidationTimeout)
+				if s.Manifest.Service != nil {
+					if !time.Now().Before(s.Manifest.Service.Deadline) {
+						return errors.New("immutable service validation deadline already reached")
+					}
+					s.Windows.ValidationDeadline = s.Manifest.Service.Deadline
+				} else {
+					s.Windows.ValidationDeadline = time.Now().Add(s.Manifest.ValidationTimeout)
+				}
 			}
 			return nil
 		}); e != nil {
@@ -587,6 +639,9 @@ func runFrozen(run string) (returned error) {
 	if e != nil {
 		return e
 	}
+	if e = s.Manifest.ValidateMode(); e != nil {
+		return e
+	}
 	me, e := platform.Process(os.Getpid())
 	if e != nil {
 		return e
@@ -594,8 +649,11 @@ func runFrozen(run string) (returned error) {
 	if e = verifyFrozenRunner(run, s, me); e != nil {
 		return e
 	}
-	if windowsFlowIsolationReady && s.Windows.ValidationDeadline.IsZero() {
+	if windowsFlowIsolationReady && s.Manifest.EffectiveMode() != Daily && s.Windows.ValidationDeadline.IsZero() {
 		return errors.New("validation coordinator has no published deadline")
+	}
+	if s.Manifest.EffectiveMode() == Daily && !s.Windows.ValidationDeadline.IsZero() {
+		return errors.New("daily coordinator cannot publish a validation deadline")
 	}
 	data, e := files.Read("active.json", 4096)
 	if e != nil {
@@ -620,7 +678,10 @@ func runFrozen(run string) (returned error) {
 		if returned != nil {
 			_ = update(run, func(s *State) error { s.Error = runtimeFailureReason(returned); return nil })
 		}
-		_ = recoverRun(run, reason)
+		recoveryErr := recoverRun(run, reason)
+		if s.Manifest.Mode != "" {
+			returned = errors.Join(returned, recoveryErr)
+		}
 	}()
 	power, e := winnet.WatchPower()
 	if e != nil {
@@ -639,9 +700,14 @@ func runFrozen(run string) (returned error) {
 	if e = winRead(run, "nodes.json", &nodes); e != nil {
 		return e
 	}
-	nodes, e = policy.SanitizeNodes(nodes)
-	if e != nil {
-		return e
+	if len(nodes) != 0 || currentIntent(s).Personal {
+		nodes, e = policy.SanitizeNodes(nodes)
+		if e != nil {
+			return e
+		}
+	}
+	if s.Manifest.Mode != "" {
+		return runDesktopWindows(ctx, run, children, s, nodes)
 	}
 	if platform.ForeignVPN() {
 		return errors.New("another OpenConnect is active")
@@ -888,25 +954,15 @@ func windowsLoop(ctx context.Context, run string, g *windowsChildren, company *c
 			return e
 		}
 		if _, e = os.Lstat(filepath.Join(run, "auth-refresh.json")); e == nil {
-			var fresh auth.Session
-			if e = readJSON(filepath.Join(run, "auth-refresh.json"), &fresh); e != nil {
-				return e
-			}
-			if e = requireVPNAuthentication(fresh, s.Manifest.Config.VPN, time.Now()); e != nil {
+			if _, e = refreshProtectedAuth(run, s); e != nil {
 				return e
 			}
 			if e = stopVPN(run, g, company); e != nil {
 				return e
 			}
 			disconnected = true
-			if e = winWrite(run, "auth.json", fresh); e != nil {
-				return e
-			}
 			retry.FreshAuthentication(time.Now())
 			delete(g.exits, "vpn")
-			if e = os.Remove(filepath.Join(run, "auth-refresh.json")); e != nil {
-				return e
-			}
 		}
 		vpnAlive := false
 		currentVPN, hasVPN := latestVPN(s)

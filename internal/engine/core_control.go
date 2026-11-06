@@ -92,17 +92,20 @@ func selectPersonal(run, node string) error {
 	return selectPersonalContext(context.Background(), run, node)
 }
 func selectPersonalContext(ctx context.Context, run, node string) error {
-	if e := apiContext(ctx, run, "PUT", "/proxies/PERSONAL", map[string]string{"name": node}, nil); e != nil {
+	return selectCoreGroupContext(ctx, run, "PERSONAL", node)
+}
+func selectCoreGroupContext(ctx context.Context, run, group, node string) error {
+	if e := apiContext(ctx, run, "PUT", "/proxies/"+group, map[string]string{"name": node}, nil); e != nil {
 		return e
 	}
 	var current struct {
 		Now string `json:"now"`
 	}
-	if e := apiContext(ctx, run, "GET", "/proxies/PERSONAL", nil, &current); e != nil {
+	if e := apiContext(ctx, run, "GET", "/proxies/"+group, nil, &current); e != nil {
 		return e
 	}
 	if current.Now != node {
-		return errors.New("personal selection readback mismatch")
+		return errors.New("core group selection readback mismatch")
 	}
 	return nil
 }

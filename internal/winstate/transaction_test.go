@@ -101,7 +101,7 @@ func fixture(t *testing.T) (Manager, *memoryStore, *fakeNative, winnet.Route) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	return Manager{s, n}, s, n, r
+	return Manager{Store: s, Native: n}, s, n, r
 }
 
 func TestDNSFamiliesRecoverIndependentlyAfterCrash(t *testing.T) {

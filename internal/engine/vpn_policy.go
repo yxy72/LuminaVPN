@@ -34,7 +34,7 @@ func runtimeFailureReason(err error) string {
 }
 
 func requireVPNAuthentication(session auth.Session, vpn policy.VPN, now time.Time) error {
-	if session.Validate(vpn) != nil || session.Created.IsZero() || now.Before(session.Created) || now.Sub(session.Created) > auth.MaxAge {
+	if session.Validate(vpn) != nil || !session.ValidAt(now) {
 		return errVPNAuthenticationRequired
 	}
 	return nil

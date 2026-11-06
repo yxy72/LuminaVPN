@@ -3,6 +3,7 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"netlaunch/internal/lease"
 	"sync"
@@ -16,6 +17,14 @@ type companyRuntime struct {
 	generation string
 	proxy      map[string]any
 	done       chan error
+	cancel     context.CancelFunc
+}
+
+func (c *companyRuntime) stop() {
+	if c.cancel != nil {
+		c.cancel()
+	}
+	c.revoke()
 }
 
 func (c *companyRuntime) configure(config map[string]any) error {
@@ -39,7 +48,9 @@ func (c *companyRuntime) current() (*lease.Session, string) {
 func (c *companyRuntime) revoke() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.authority.Revoke()
+	if c.authority != nil {
+		c.authority.Revoke()
+	}
 	c.session = nil
 	c.generation = ""
 }
