@@ -259,8 +259,93 @@ export function restrictWindowsUninstallUtilities(source) {
     Return
   \${EndIf}
   IfFileExists "$PROGRAMFILES64\\LuminaVPN\\Uninstall LuminaVPN.exe" 0 lumina_no_old_uninstaller
-  ExecWait '"$PROGRAMFILES64\\LuminaVPN\\Uninstall LuminaVPN.exe" /S /KEEP_APP_DATA /allusers --updated --keep-shortcuts _?=$PROGRAMFILES64\\LuminaVPN' $R0
+  ; Legacy in-place uninstallers cannot atomically rename their own image.
+  ; These fixed Lumina packages disable DELETE_APP_DATA_ON_UNINSTALL.
+  ExecWait '"$PROGRAMFILES64\\LuminaVPN\\Uninstall LuminaVPN.exe" /S /KEEP_APP_DATA /allusers --keep-shortcuts _?=$PROGRAMFILES64\\LuminaVPN' $R0
   lumina_no_old_uninstaller:
+  \${If} \${Errors}
+    StrCpy $R0 2
+    SetErrors
+    Return
+  \${EndIf}
+  \${If} $R0 != 0
+    Return
+  \${EndIf}
+  Call LuminaCheckUpgradeRemainder
+FunctionEnd
+
+Function LuminaCheckUpgradeRemainder
+  ; The native preflight has checked every old target entry's protected ACL
+  ; and rejected reparse points. The old process has exited before this check.
+  ; Ordinary RMDir may silently leave busy files: never claim/extract over them.
+  Push $0
+  Push $1
+  Push $2
+  Push $3
+  Push $4
+  StrCpy $R0 2
+  System::Call '$SYSDIR\\kernel32.dll::GetFileAttributesW(w "$INSTDIR")i.r0 ?e'
+  Pop $1
+  \${If} $0 == -1
+    \${If} $1 == 2
+    \${OrIf} $1 == 3
+      StrCpy $R0 0
+    \${EndIf}
+    Goto lumina_remainder_done
+  \${EndIf}
+  IntOp $0 $0 & 0x410
+  \${If} $0 <> 0x10
+    Goto lumina_remainder_done
+  \${EndIf}
+  System::Alloc 592 ; Bounded WIN32_FIND_DATAW, Unicode compiler required.
+  Pop $1
+  \${If} $1 == 0
+    Goto lumina_remainder_done
+  \${EndIf}
+  System::Call '$SYSDIR\\kernel32.dll::FindFirstFileW(w "$INSTDIR\\*", p r1)p.r0 ?e'
+  Pop $2
+  \${If} $0 == -1
+    \${If} $2 == 2
+      StrCpy $R0 0
+    \${EndIf}
+    Goto lumina_remainder_free
+  \${EndIf}
+  lumina_remainder_entry:
+    IntOp $3 $1 + 44
+    System::Call '*$3(&w260.r4)'
+    StrCmp $4 "." lumina_remainder_next
+    StrCmp $4 ".." lumina_remainder_next
+    System::Call '*$1(i.r2)'
+    IntOp $2 $2 & 0x410
+    \${If} $2 != 0
+      Goto lumina_remainder_close
+    \${EndIf}
+    StrCmp $4 "Uninstall LuminaVPN.exe" lumina_remainder_next lumina_remainder_close
+  lumina_remainder_next:
+    System::Call '$SYSDIR\\kernel32.dll::FindNextFileW(p r0, p r1)i.r2 ?e'
+    Pop $3
+    \${If} $2 != 0
+      Goto lumina_remainder_entry
+    \${EndIf}
+    \${If} $3 == 18
+      StrCpy $R0 0
+    \${EndIf}
+  lumina_remainder_close:
+  System::Call '$SYSDIR\\kernel32.dll::FindClose(p r0)'
+  lumina_remainder_free:
+  System::Free $1
+  lumina_remainder_done:
+  Pop $4
+  Pop $3
+  Pop $2
+  Pop $1
+  Pop $0
+  \${If} $R0 != 0
+    DetailPrint "Previous installation has busy or unverified remaining entries; upgrade stopped."
+    SetErrors
+  \${Else}
+    ClearErrors
+  \${EndIf}
 FunctionEnd`)
   // These parsers belonged only to the removed mutable registry command path.
   // Drop their definitions instead of suppressing native NSIS unused warnings.
@@ -277,8 +362,11 @@ FunctionEnd`)
 export function restrictWindowsUninstaller(source) {
   source = source.replaceAll('\r\n', '\n')
   const menuRead = 'ReadRegStr $R1 SHELL_CONTEXT "\${INSTALL_REGISTRY_KEY}" MenuDirectory'
-  if (source.split('!insertmacro setLinkVars').length !== 2 || source.split(menuRead).length !== 2) throw new Error('Pinned NSIS uninstaller shortcuts changed')
+  const selfComparison = 'StrCmp "$R0\\$R2" "${UNINSTALL_FILENAME}" 0 +2'
+  if (source.split('!insertmacro setLinkVars').length !== 2 || source.split(menuRead).length !== 2
+      || source.split(selfComparison).length !== 2) throw new Error('Pinned NSIS uninstaller shortcuts or self-image check changed')
   return source.replace('!insertmacro setLinkVars', '!insertmacro LuminaSetLinkVars')
+    .replace(selfComparison, 'StrCmp "$INSTDIR$R0\\$R2" "$EXEPATH" 0 +2')
     .replace(menuRead, 'StrCpy $R1 "" ; Fixed flat product shortcut has no menu directory.')
 }
 

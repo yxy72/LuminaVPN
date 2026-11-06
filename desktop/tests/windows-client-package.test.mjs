@@ -171,7 +171,19 @@ test('fixed registry claims bracket legacy uninstall and registration without mu
   assert.ok(old && !/ReadReg|readReg|PLUGINSDIR|CopyFiles|copyFile/.test(old))
   assert.ok(!/GetInQuotes|GetFileParent/.test(utility), 'unused registry command parsers must not survive the native warning gate')
   assert.deepEqual([...old.matchAll(/ExecWait '([^'\r\n]+)'/g)].map(match => match[1]),
-    ['"$PROGRAMFILES64\\LuminaVPN\\Uninstall LuminaVPN.exe" /S /KEEP_APP_DATA /allusers --updated --keep-shortcuts _?=$PROGRAMFILES64\\LuminaVPN'])
+    ['"$PROGRAMFILES64\\LuminaVPN\\Uninstall LuminaVPN.exe" /S /KEEP_APP_DATA /allusers --keep-shortcuts _?=$PROGRAMFILES64\\LuminaVPN'])
+  assert.ok(old.indexOf('ExecWait') < old.indexOf('Call LuminaCheckUpgradeRemainder'))
+  assert.match(old, /\$\{Errors\}\s+StrCpy \$R0 2\s+SetErrors\s+Return/)
+  assert.match(old, /\$R0 != 0\s+Return[\s\S]*Call LuminaCheckUpgradeRemainder/)
+  const remainder = /^Function LuminaCheckUpgradeRemainder\n([\s\S]*?)^FunctionEnd$/m.exec(utility)?.[1]
+  assert.ok(remainder && !/^\s*(?:Exec|RMDir|Delete|CopyFiles|ReadReg)/m.test(remainder))
+  assert.ok(remainder.includes('IntOp $0 $0 & 0x410') && remainder.includes('IntOp $2 $2 & 0x410'))
+  assert.ok(remainder.includes('StrCmp $4 "Uninstall LuminaVPN.exe" lumina_remainder_next lumina_remainder_close'))
+  assert.match(remainder, /FindNextFileW[^\n]*\?e'\s+Pop \$3[\s\S]*\$3 == 18/)
+  assert.ok(!remainder.includes('GetLastError'), 'error disposition must come from the same native API call')
+  assert.match(remainder, /\$R0 != 0[\s\S]*SetErrors/)
+  assert.ok(uninstaller.includes('StrCmp "$INSTDIR$R0\\$R2" "$EXEPATH" 0 +2'))
+  assert.ok(!uninstaller.includes('StrCmp "$R0\\$R2" "${UNINSTALL_FILENAME}"'))
   assert.ok(section.indexOf('handleUninstallResult SHELL_CONTEXT') < section.indexOf('!insertmacro LuminaClaimRegistry'))
   assert.ok(section.indexOf('!insertmacro LuminaClaimRegistry') < section.indexOf('!insertmacro installApplicationFiles'))
   assert.ok(section.indexOf('!insertmacro LuminaClaimRegistry') < section.indexOf('!insertmacro registryAddInstallInfo'))
@@ -180,6 +192,7 @@ test('fixed registry claims bracket legacy uninstall and registration without mu
   assert.match(include, /!macro LuminaClaimRegistry[\s\S]*--resume-install-preflight[\s\S]*REGISTRY_CLAIM_REJECTED[\s\S]*LuminaBootstrapFatal/)
   assert.throws(() => restrictWindowsUninstallUtilities(utilitySource.replace('Function uninstallOldVersion', 'Function unknown')), /changed/)
   assert.throws(() => restrictWindowsUninstaller(uninstallerSource.replace('MenuDirectory', 'UnknownDirectory')), /changed/)
+  assert.throws(() => restrictWindowsUninstaller(uninstallerSource.replace('"${UNINSTALL_FILENAME}" 0 +2', '"changed" 0 +2')), /changed/)
 })
 
 test('protected bootstrap source uses exclusive files and locks the verified image through the fixed action', async () => {
