@@ -7,6 +7,7 @@ import { healthLabels, verifiedHealthState, type NodeHealthRound } from './node-
 import {ProfileScope,scopedProfileImport} from './profile-scope'
 import { MacLifecycle, macOperationText } from './MacLifecycle'
 import { ChannelProbeStatus } from './ChannelProbeStatus'
+import { MacRecovery, matchesMacDiagnosticRecovery, submitMacDiagnosticRecovery, type MacRecoveryRequest } from './MacRecovery'
 import {initialServiceEvidence,receivedServiceEvidence,lostServiceEvidence,expireServiceEvidence} from './service-evidence'
 
 type Page = 'overview' | 'nodes' | 'rules' | 'diagnostics' | 'settings'
@@ -73,6 +74,7 @@ export function ClientWorkspace({ page, api, refreshInventory, nodes, subscripti
   const mounted = useRef(true), reading = useRef(false), editedChannels = useRef(false), loadedDocument = useRef(false), loadedSettings=useRef(false)
   const pending = useRef<string | null>(null), lastOperation = useRef<string | null>(null)
   const submitting = useRef(false)
+  const diagnosticRecovery = useRef<{ id: string; request: MacRecoveryRequest } | null>(null)
   const latest = useRef<ServiceSnapshot | null>(null)
   const [workspaceActivity, setWorkspaceActivity] = useState<boolean | null>(null)
   const canControl = windowsClient ? snapshot?.service_state === 'available' : workspaceActivity === false
@@ -121,6 +123,7 @@ export function ClientWorkspace({ page, api, refreshInventory, nodes, subscripti
           // An authoritative idle check permits editing again without inferring success.
           if (!windowsClient && mounted.current && pending.current === id && !localActive &&
               isRecord(error) && error.code === 'OPERATION_NOT_FOUND') {
+            if (diagnosticRecovery.current?.id === id) diagnosticRecovery.current = null
             pending.current = null
             setOperation(null)
             setBusy(false)
@@ -131,8 +134,13 @@ export function ClientWorkspace({ page, api, refreshInventory, nodes, subscripti
         }
         if (!mounted.current || submitting.current || pending.current !== id) return
         if (next.operation_id !== id) throw new Error('OPERATION_MISMATCH')
+        const recovery = diagnosticRecovery.current
+        if (recovery?.id === id && !matchesMacDiagnosticRecovery(next, recovery.request)) {
+          throw Object.assign(new Error('MAC_RECOVERY_UNCONFIRMED'), { code: 'MAC_RECOVERY_UNCONFIRMED' })
+        }
         setOperation(next)
         if (next.completed || next.error) {
+          if (recovery?.id === id) diagnosticRecovery.current = null
           pending.current = null
           setBusy(false)
           refreshInventory()
@@ -190,6 +198,7 @@ export function ClientWorkspace({ page, api, refreshInventory, nodes, subscripti
     if (macosClient && next.phase === 'managed_reported') return '网络接管已启动，通道验证结果在总览更新。'
     if (macosClient && next.phase === 'ready_reported') return '已收到运行报告，可在总览查看检查结果。'
     if (macosClient && next.phase === 'stopped_reported') return '已收到停止报告。管理员恢复仍待确认。'
+    if (macosClient && next.kind === 'exit_restore' && next.phase === 'restored' && next.restored) return '管理员已确认本次运行的恢复。'
     return '操作完成。'
   }
   const accepted = (next: ServiceOperation) => { lastOperation.current = next.operation_id; setOperation(next); pending.current = next.completed ? null : next.operation_id; setBusy(!next.completed); if (next.error) setError(safeError(next.error)); else {setNotice(next.completed ? operationNotice(next) : windowsClient ? '后台服务已接受操作。' : next.kind === 'workspace' ? '配置操作进行中，请保持应用打开。' : next.kind === 'auth_begin' ? '请在本机 Terminal 完成公司认证。' : next.kind === 'channels_set' ? '正在应用本次运行的通道设置。' : '网络操作进行中，请留意 macOS 授权提示。');if(next.completed&&next.kind==='workspace')void refreshDocumentMetadata()}; editedChannels.current = false; void refresh() }
@@ -206,6 +215,15 @@ export function ClientWorkspace({ page, api, refreshInventory, nodes, subscripti
     submitting.current = true
     setBusy(true); setError(null); setNotice(null)
     try {
+      if (macosClient && request.kind === 'exit_restore') {
+        const { operation, request: recovery } = await submitMacDiagnosticRecovery(snapshot, crypto.randomUUID(), {
+          snapshot: scopedSnapshot,
+          submit: scopedSubmit,
+        })
+        diagnosticRecovery.current = operation.completed ? null : { id: operation.operation_id, request: recovery }
+        accepted(operation)
+        return
+      }
       if (macosClient && request.kind === 'takeover_stop') {
         if (current.run_ref !== snapshot?.run_ref) throw stale()
         if (macPreemptible) {
@@ -291,7 +309,9 @@ export function ClientWorkspace({ page, api, refreshInventory, nodes, subscripti
       {page==='settings'&&windowsClient&&<section className="client-card"><h2>工作环境与启动设置</h2><button disabled={busy} onClick={()=>{void chooseProfile()}}>选择本机配置目录</button><button disabled={busy} onClick={()=>{void restoreDefaultProfile()}}>恢复默认配置目录</button><p>仅当当前目录明确未登记时，可接回服务已登记的默认目录与现有运行；此操作不修改通道或环境设置。</p><label><input type="checkbox" checked={false} disabled/>自动连接暂不可用（保持关闭）</label><label>当前环境<select value={environment} onChange={e=>setEnvironment(e.target.value as 'office'|'home')}><option value="home">家庭</option><option value="office">办公</option></select></label><div className="client-grid"><OverrideEditor title="办公" value={officeRules} onChange={setOfficeRules}/><OverrideEditor title="家庭" value={homeRules} onChange={setHomeRules}/></div><p>覆盖规则只能使用 personal 或 direct，不改变公司精确授权优先级。</p><button disabled={busy||!canControl||!snapshot?.settings} onClick={applySettings}>保存启动与环境设置</button><p>会话由后台加密保存，最多复用两小时；密码/OTP 不保存。实际认证状态以服务挑战为准。</p></section>}
     </>}
     {page==='nodes'&&<><h1>个人节点与订阅来源</h1><p>仅导入支持的节点与明确允许的规则。节点密钥不通过状态列表或诊断导出回显。</p><div className="client-actions"><button disabled={busy||!canControl} onClick={()=>{void importNodes()}}>选择并导入节点文件</button><button disabled={busy||!canControl} onClick={()=>{void command({action:'sync'})}}>同步已配置来源</button></div><section className="client-card"><h2>来源配置</h2><p>来源状态：{subscriptions?.configured?'已配置':subscriptions?'尚未配置':'未确认'} · 缓存：{subscriptions?.cache_available?'可用':'未确认'}</p><ul>{subscriptions?.sources.map(source=><li key={source.id}>{source.id} · {source.kind} · {source.state}</li>)}</ul><SourceEditor value={sources} onChange={setSources}/><label>高级来源 JSON<textarea className="client-json" value={sources} onChange={e=>setSources(e.target.value)} spellCheck={false}/></label>{sourcesPresent&&<p>此配置已有来源，现有链接不回显。保存将用本次输入替换来源。</p>}{sourcesPresent&&<label><input type="checkbox" checked={sourceReplacement} onChange={e=>setSourceReplacement(e.target.checked)}/>确认替换现有来源</label>}<button disabled={busy||!canControl||!revision||!sources.trim()||sourcesPresent&&!sourceReplacement} onClick={()=>{void command({action:'sources_save',sources_json:sources,expected_revision:revision})}}>校验并保存来源</button></section><section className="client-card"><h2>节点选择与健康</h2><ul aria-label="本机节点库存">{nodes?.items.map(node=><li key={node.id}><code>{node.id}</code> · {node.type}</li>)}</ul><p>节点库存：{nodes?.total??'未确认'}；此列表不含服务器地址或密钥，延迟以后台健康证据为准。</p><div className="client-actions"><button disabled={!nodes||nodes.offset===0} onClick={()=>loadNodes(Math.max(0,(nodes?.offset??0)-100))}>上一页</button><button disabled={!nodes||nodes.offset+nodes.items.length>=nodes.total} onClick={()=>loadNodes((nodes?.offset??0)+100)}>下一页</button><button onClick={refreshInventory}>刷新库存</button></div><p>当前采用自动节点策略，手动选择能力尚未提供。</p>{windowsClient&&<p>候选状态：{healthLabels[healthState(snapshot?.personal)]??'等待后台健康证据'}；只有非空全集在同一健康轮次独立失败才能进入失败回退。unknown/pending/config_empty 与 off 分开处理。</p>}</section></>}
-    {page==='diagnostics'&&<><h1>诊断、版本与恢复</h1><section className="client-card"><h2>环境检查</h2><button disabled={checking} onClick={checkEnvironment}>{checking?'检查中…':'检查运行环境'}</button><ul>{environmentCheck?.checks.map(item=><li key={item.id}>{item.label} · {item.state} · {item.message}</li>)}</ul><button onClick={showRecovery}>显示独立恢复入口</button></section><div className="client-actions">{(['runtime','version','diagnostics','cleanup_preview','history'] as const).map(action=><button key={action} onClick={()=>{void read({action})}}>{({runtime:'运行时检查',version:'版本与能力',diagnostics:'脱敏诊断导出',cleanup_preview:'运行清理预览',history:'配置历史'})[action]}</button>)}</div>{windowsClient&&<section className="client-card"><h2>精确运行恢复</h2><p>恢复要求：{snapshot?.recovery_required?'需要恢复':'以后台证据为准'}；恢复确认：{snapshot?.restored?'已确认':'未确认'}</p><button disabled={!canControl||busy&&(operation?.kind==='takeover_stop'||operation?.kind==='exit_restore')} onClick={()=>{void submit({kind:'takeover_stop',stop:{}})}}>停止并恢复</button><label>清理预览中的运行 ID<input value={cleanupID} onChange={e=>setCleanupID(e.target.value)}/></label><button disabled={busy||!canControl||!cleanupID} onClick={()=>{void command({action:'cleanup',opaque_run_id:cleanupID})}}>清理预览对应运行</button></section>}</>}
+    {page==='diagnostics'&&<><h1>诊断、版本与恢复</h1><section className="client-card"><h2>环境检查</h2><button disabled={checking} onClick={checkEnvironment}>{checking?'检查中…':'检查运行环境'}</button><ul>{environmentCheck?.checks.map(item=><li key={item.id}>{item.label} · {item.state} · {item.message}</li>)}</ul><button onClick={showRecovery}>显示独立恢复入口</button></section><div className="client-actions">{(['runtime','version','diagnostics','cleanup_preview','history'] as const).map(action=><button key={action} onClick={()=>{void read({action})}}>{({runtime:'运行时检查',version:'版本与能力',diagnostics:'脱敏诊断导出',cleanup_preview:'运行清理预览',history:'配置历史'})[action]}</button>)}</div>{macosClient && <MacRecovery snapshot={snapshot} busy={busy || !canControl}
+      recover={() => { void submit({ kind: 'exit_restore', stop: {} }) }} />}
+      {windowsClient&&<section className="client-card"><h2>精确运行恢复</h2><p>恢复要求：{snapshot?.recovery_required?'需要恢复':'以后台证据为准'}；恢复确认：{snapshot?.restored?'已确认':'未确认'}</p><button disabled={!canControl||busy&&(operation?.kind==='takeover_stop'||operation?.kind==='exit_restore')} onClick={()=>{void submit({kind:'takeover_stop',stop:{}})}}>停止并恢复</button><label>清理预览中的运行 ID<input value={cleanupID} onChange={e=>setCleanupID(e.target.value)}/></label><button disabled={busy||!canControl||!cleanupID} onClick={()=>{void command({action:'cleanup',opaque_run_id:cleanupID})}}>清理预览对应运行</button></section>}</>}
     {result&&<section className="client-card"><h2>操作结果 / 差异预览</h2><pre className="client-result">{pretty(result)}</pre></section>}
   </section>
 }
