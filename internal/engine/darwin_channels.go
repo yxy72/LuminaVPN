@@ -90,11 +90,29 @@ func closeDarwinVerification(run string, verification *personalVerification) err
 	return verification.close(run)
 }
 
+func darwinCanRetainCompany(m Manifest, nodes []policy.Node) bool {
+	intent := m.InitialChannels()
+	if intent.Company {
+		return true
+	}
+	if m.Mode == "" {
+		return false
+	}
+	// A managed run can reserve the company ingress ahead of time if its
+	// frozen configuration can safely support the complete company policy.
+	// An incomplete disabled channel keeps the static reject policy.
+	intent.Company = true
+	return m.Config.ValidateForIntent(intent) == nil && policy.ValidateEndpointsForIntent(m.Config, nodes, intent) == nil
+}
+
 func darwinCoreConfig(m Manifest, nodes []policy.Node, secret string, company *companyRuntime, verification *personalVerification) (map[string]any, error) {
 	intent := m.InitialChannels()
-	if (company != nil) != intent.Company || (verification != nil) != intent.Personal {
+	if (intent.Company && company == nil) || (verification != nil) != intent.Personal {
 		return nil, errors.New("macOS channel resources do not match the run intent")
 	}
+	// Keep the same company rules and resolver in both live states. CORP
+	// starts at REJECT and the authenticated ingress needs an active lease.
+	intent.Company = company != nil
 	config, err := policy.CompileWithIntent(m.Config, nodes, m.Binding, secret, intent)
 	if err != nil {
 		return nil, err

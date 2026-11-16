@@ -168,9 +168,9 @@ func serve(run string) (returned error) {
 		}
 	}
 	var company *companyRuntime
-	if intent.Company {
+	if darwinCanRetainCompany(s.Manifest, nodes) {
 		company, e = startCompany(ctx, run)
-		if e != nil {
+		if e != nil && intent.Company {
 			return e
 		}
 	}

@@ -3,16 +3,25 @@
 package engine
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"netlaunch/internal/companyproxy"
+	"netlaunch/internal/dnswire"
+	"netlaunch/internal/platform"
 	"netlaunch/internal/policy"
 	"netlaunch/internal/runtimebundle"
 	"netlaunch/internal/securefile"
@@ -172,5 +181,191 @@ func TestDarwinIntentReadinessRequiresOnlyEnabledChannelsAndDirect(t *testing.T)
 		if s.Phase == "ready" {
 			t.Fatal("disabled evidence hid a missing direct proof")
 		}
+	}
+}
+
+func TestDarwinRetainedCompanyUsesSameBlockedPolicyAcrossIntents(t *testing.T) {
+	intent := policy.ChannelIntent{}
+	m := Manifest{
+		Mode: Daily, Channels: &intent,
+		Binding: policy.Binding{Physical: "en0", VPN: "utun50", TUN: "utun51", ControllerPort: 19091},
+		Config: policy.Config{
+			Version: 1, Ports: policy.Ports{Proxy: 17890, DNS: 53},
+			Company:   policy.Channel{Domains: []string{"company.example"}, CIDRs: []string{"192.0.2.0/24"}, DNS: []string{"192.0.2.53"}},
+			Personal:  policy.Channel{Domains: []string{"personal.example"}},
+			DirectDNS: []string{"198.51.100.53"},
+			VPN:       policy.VPN{Server: "https://vpn.example", EndpointIPv4: "203.0.113.2"},
+			Probes: []policy.Probe{
+				{URL: "https://company.example/health", Channel: "company"},
+				{URL: "https://direct.example/health", Channel: "direct"},
+			},
+		},
+	}
+	if !darwinCanRetainCompany(m, nil) {
+		t.Fatal("complete frozen company policy was rejected")
+	}
+	proxy, err := companyproxy.Proxy("127.0.0.1:19876", companyproxy.Credentials{
+		Username: "company", Password: "loopback-fixture-password",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy["interface-name"] = "lo0"
+	company := &companyRuntime{proxy: proxy}
+	secret := strings.Repeat("s", 32)
+	off, err := darwinCoreConfig(m, nil, secret, company, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent.Company = true
+	on, err := darwinCoreConfig(m, nil, secret, company, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b1, _ := json.Marshal(off)
+	b2, _ := json.Marshal(on)
+	if !bytes.Equal(b1, b2) {
+		t.Fatal("company toggle would require changing the core configuration")
+	}
+	rules := off["rules"].([]string)
+	for _, pair := range [][2]string{
+		{"DOMAIN,company.example,CORP", "DOMAIN,company.example,REJECT"},
+		{"IP-CIDR,192.0.2.0/24,CORP,no-resolve", "IP-CIDR,192.0.2.0/24,REJECT,no-resolve"},
+	} {
+		i := slices.Index(rules, pair[0])
+		if i == -1 || i+1 >= len(rules) || rules[i+1] != pair[1] {
+			t.Fatal("company target is missing its fail-closed guard")
+		}
+	}
+	groups := off["proxy-groups"].([]any)
+	if got := groups[0].(map[string]any)["proxies"].([]string); !slices.Equal(got, []string{selector.Reject, "CORP-BOUND"}) {
+		t.Fatalf("unexpected company selector: %v", got)
+	}
+	dns := off["dns"].(map[string]any)["nameserver-policy"].(map[string]any)
+	if !slices.Equal(dns["company.example"].([]string), []string{"tcp://192.0.2.53:53#CORP"}) ||
+		!slices.Equal(dns["personal.example"].([]string), []string{"udp://198.51.100.53#PHYSICAL"}) {
+		t.Fatal("company or personal DNS crossed the wrong selector")
+	}
+	t.Run("pinned core keeps blocked DNS off physical", func(t *testing.T) {
+		checkDarwinCompanyDNSGate(t, off)
+	})
+	intent.Company = false
+	m.Config.VPN = policy.VPN{}
+	if darwinCanRetainCompany(m, nil) {
+		t.Fatal("incomplete disabled policy reserved a live ingress")
+	}
+}
+
+func checkDarwinCompanyDNSGate(t *testing.T, config map[string]any) {
+	t.Helper()
+	root := os.Getenv("NETLAUNCH_TEST_RUNTIME")
+	if root == "" {
+		t.Skip("set NETLAUNCH_TEST_RUNTIME for the pinned core fixture")
+	}
+	if _, err := runtimebundle.Verify(root); err != nil {
+		t.Fatal(err)
+	}
+	watchConnections := func(hits *atomic.Int32) string {
+		l, err := net.Listen("tcp4", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = l.Close() })
+		go func() {
+			for {
+				conn, err := l.Accept()
+				if err != nil {
+					return
+				}
+				hits.Add(1)
+				_ = conn.Close()
+			}
+		}()
+		return l.Addr().String()
+	}
+	var physicalHits, companyHits atomic.Int32
+	physical := "tcp://" + watchConnections(&physicalHits)
+	company, err := companyproxy.Proxy(watchConnections(&companyHits), companyproxy.Credentials{
+		Username: "company", Password: "loopback-fixture-password",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	company["interface-name"] = "lo0"
+	config["proxies"].([]any)[0] = company
+	config["mixed-port"] = 0
+	config["interface-name"] = "lo0"
+	controllerPort, err := platform.FreePort()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dnsPort, err := platform.FreePort()
+	if err != nil || dnsPort == controllerPort {
+		t.Fatalf("fixture DNS port: %d, %v", dnsPort, err)
+	}
+	controller := net.JoinHostPort("127.0.0.1", strconv.Itoa(controllerPort))
+	dnsAddress := net.JoinHostPort("127.0.0.1", strconv.Itoa(dnsPort))
+	config["external-controller"] = controller
+	dns := config["dns"].(map[string]any)
+	dns["listen"] = dnsAddress
+	for _, key := range []string{"nameserver", "direct-nameserver", "default-nameserver", "proxy-server-nameserver"} {
+		dns[key] = []string{physical}
+	}
+	dns["fake-ip-filter"] = []string{"closed.example", "open.example", "closed-again.example", "direct.example"}
+	dns["nameserver-policy"] = map[string]any{
+		"closed.example":       []string{physical + "#CORP"},
+		"open.example":         []string{physical + "#CORP"},
+		"closed-again.example": []string{physical + "#CORP"},
+	}
+	dir := testutil.PrivateTempDir(t)
+	path := filepath.Join(dir, "core.json")
+	if err := securefile.Write(path, config); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, filepath.Join(root, "bin", "mihomo"), "-d", dir, "-f", path)
+	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+	request := func(ctx context.Context, method, path string, payload any) error {
+		return coreRequest(ctx, controller, config["secret"].(string), method, path, payload, nil)
+	}
+	if err := waitReady(ctx, 4*time.Second, func() error { return nil }, func(c context.Context) error {
+		return request(c, "GET", "/version", nil)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	query := func(host string) {
+		_, _ = dnswire.Query(ctx, func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "tcp4", dnsAddress)
+		}, "192.0.2.53", host)
+	}
+	set := func(node string) {
+		t.Helper()
+		if err := request(ctx, "PUT", "/proxies/CORP", map[string]string{"name": node}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	query("closed.example")
+	if physicalHits.Load() != 0 || companyHits.Load() != 0 {
+		t.Fatal("blocked company DNS escaped the core's closed gate")
+	}
+	set("CORP-BOUND")
+	query("open.example")
+	if companyHits.Load() == 0 || physicalHits.Load() != 0 {
+		t.Fatal("company DNS failed to use only the fixed ingress")
+	}
+	set(selector.Reject)
+	atClosure := companyHits.Load()
+	query("closed-again.example")
+	if companyHits.Load() != atClosure || physicalHits.Load() != 0 {
+		t.Fatal("company DNS escaped after the gate reclosed")
+	}
+	query("direct.example")
+	if physicalHits.Load() == 0 {
+		t.Fatal("fixture did not observe the physical resolver")
 	}
 }
