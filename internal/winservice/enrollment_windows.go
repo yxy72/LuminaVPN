@@ -107,6 +107,8 @@ func captureInstallerEnrollment() (Binding, error) {
 			return Binding{}, errors.New("linked desktop user token required")
 		}
 		defer linked.Close()
+		// Query the kernel's linked handle only. Explorer's own process token
+		// supplies the enrolled identity after both observations match.
 		limited, err = enrollmentTokenFacts(linked)
 		if err != nil {
 			return Binding{}, err

@@ -35,10 +35,15 @@ func ParseCommand(args []string) (Command, error) {
 	return "", errors.New("unsupported service entry")
 }
 
+const (
+	tokenTypePrimary            = 1
+	tokenTypeImpersonation      = 2
+	tokenSecurityIdentification = 1
+)
+
 // EnrollmentFacts are obtained from held OS token/process handles, never
 // decoded from command-line/IPC claims. Full and limited token AuthIDs may
-// differ in split-token mode; that branch persists the limited desktop identity.
-// Unfiltered administrators retain their actual elevated desktop identity.
+// differ in split-token mode; enrollment persists the actual desktop identity.
 type EnrollmentFacts struct {
 	SID, LogonSID, AuthenticationID       string
 	SessionID                             uint32
@@ -51,15 +56,21 @@ type EnrollmentFacts struct {
 }
 
 func verifiedEnrollment(full, linked, shell EnrollmentFacts) (Binding, error) {
-	if !validInteractiveIdentity(full) || full.TokenType != 1 || !full.Elevated || !full.EnabledAdmin || full.AdminDenyOnly || shell.TokenType != 1 {
+	if !validInteractiveIdentity(full) || full.TokenType != tokenTypePrimary || !full.Elevated || !full.EnabledAdmin || full.AdminDenyOnly ||
+		shell.TokenType != tokenTypePrimary {
 		return Binding{}, errors.New("interactive installer enrollment could not be independently verified")
 	}
-	user := linked
 	switch full.ElevationType {
 	case tokenElevationFull:
-		// A split-token installer enrolls its actual limited desktop identity,
-		// whose authentication ID may differ from the elevated installer.
-		if linked.TokenType != 1 || linked.ElevationType != tokenElevationLimited || shell.ElevationType != tokenElevationLimited || desktopTokenMode(linked) != desktopStandard || desktopTokenMode(shell) != desktopStandard || !sameDesktopLogin(linked, shell) || full.SID != linked.SID || full.SessionID != linked.SessionID || full.ProfileID != linked.ProfileID {
+		// TokenLinkedToken may provide an identification-level handle. It is
+		// queried only to corroborate Explorer's independently opened primary
+		// token, including its authentication ID. The full token can have a
+		// different authentication ID in a split login.
+		linkedTypeOK := linked.TokenType == tokenTypePrimary ||
+			(linked.TokenType == tokenTypeImpersonation && linked.ImpersonationLevel == tokenSecurityIdentification)
+		if !linkedTypeOK || linked.ElevationType != tokenElevationLimited || shell.ElevationType != tokenElevationLimited ||
+			desktopTokenMode(linked) != desktopStandard || desktopTokenMode(shell) != desktopStandard ||
+			!sameDesktopLogin(linked, shell) || full.SID != shell.SID || full.SessionID != shell.SessionID || full.ProfileID != shell.ProfileID {
 			return Binding{}, errors.New("linked desktop identity differs from installer enrollment")
 		}
 	case tokenElevationDefault:
@@ -69,11 +80,10 @@ func verifiedEnrollment(full, linked, shell EnrollmentFacts) (Binding, error) {
 		if linked != (EnrollmentFacts{}) || desktopTokenMode(full) != desktopUnfilteredAdmin || desktopTokenMode(shell) != desktopUnfilteredAdmin || !sameDesktopLogin(full, shell) {
 			return Binding{}, errors.New("unfiltered administrator differs from desktop enrollment")
 		}
-		user = full
 	default:
 		return Binding{}, errors.New("unsupported installer token mode")
 	}
-	return Binding{ProfileID: user.ProfileID, OwnerSID: user.SID, LogonSID: user.LogonSID, AuthenticationID: user.AuthenticationID, SessionID: user.SessionID, ExecutorSID: "S-1-5-18", Revision: 1, LogonEpoch: user.LogonEpoch}, nil
+	return Binding{ProfileID: shell.ProfileID, OwnerSID: shell.SID, LogonSID: shell.LogonSID, AuthenticationID: shell.AuthenticationID, SessionID: shell.SessionID, ExecutorSID: "S-1-5-18", Revision: 1, LogonEpoch: shell.LogonEpoch}, nil
 }
 
 type BootstrapState struct {

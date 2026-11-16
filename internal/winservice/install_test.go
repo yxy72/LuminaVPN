@@ -197,6 +197,65 @@ func TestEnrollmentPersistsLimitedShellIdentityNotElevatedAuthID(t *testing.T) {
 	}
 }
 
+func TestSplitEnrollmentAcceptsIdentificationEvidenceOnlyFromLinkedToken(t *testing.T) {
+	shell := testDesktopFacts()
+	full := shell
+	full.AuthenticationID = "elevated-auth"
+	full.ElevationType, full.Elevated, full.EnabledAdmin, full.AdminDenyOnly = tokenElevationFull, true, true, false
+	linked := shell
+	linked.TokenType, linked.ImpersonationLevel = tokenTypeImpersonation, tokenSecurityIdentification
+
+	binding, err := verifiedEnrollment(full, linked, shell)
+	if err != nil || !sameEnrollmentIdentity(binding, Binding{
+		ProfileID: shell.ProfileID, OwnerSID: shell.SID, LogonSID: shell.LogonSID,
+		AuthenticationID: shell.AuthenticationID, SessionID: shell.SessionID, ExecutorSID: "S-1-5-18", LogonEpoch: shell.LogonEpoch,
+	}) {
+		t.Fatalf("identification-level linked evidence did not enroll the matching shell: %v", err)
+	}
+	if requireDesktopProcess(linked) == nil {
+		t.Fatal("linked identity evidence authorized worker execution")
+	}
+	if _, err := verifiedDesktopPrincipal(linked); err == nil {
+		t.Fatal("linked identity evidence authorized pipe impersonation")
+	}
+	for _, level := range []uint32{0, 2, 3, 4} {
+		other := linked
+		other.ImpersonationLevel = level
+		if _, err := verifiedEnrollment(full, other, shell); err == nil {
+			t.Fatalf("unsupported linked token level accepted: %d", level)
+		}
+	}
+	for name, alter := range map[string]func(*EnrollmentFacts){
+		"authentication": func(f *EnrollmentFacts) { f.AuthenticationID = full.AuthenticationID },
+		"owner":          func(f *EnrollmentFacts) { f.SID = "S-1-5-21-2" },
+		"logon":          func(f *EnrollmentFacts) { f.LogonSID = "S-1-5-5-1-2" },
+		"epoch":          func(f *EnrollmentFacts) { f.LogonEpoch = "epoch-2" },
+		"session":        func(f *EnrollmentFacts) { f.SessionID = 2 },
+		"profile":        func(f *EnrollmentFacts) { f.ProfileID = "other" },
+		"noninteractive": func(f *EnrollmentFacts) { f.Interactive = false },
+		"default":        func(f *EnrollmentFacts) { f.ElevationType = tokenElevationDefault },
+		"elevated":       func(f *EnrollmentFacts) { f.Elevated = true },
+		"enabled-admin":  func(f *EnrollmentFacts) { f.EnabledAdmin = true },
+		"unknown-type":   func(f *EnrollmentFacts) { f.TokenType = 0 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			other := linked
+			alter(&other)
+			if _, err := verifiedEnrollment(full, other, shell); err == nil {
+				t.Fatal("unmatched or invalid linked evidence enrolled")
+			}
+		})
+	}
+	if _, err := verifiedEnrollment(full, linked, linked); err == nil {
+		t.Fatal("Explorer enrollment accepted a non-primary token")
+	}
+	installer := full
+	installer.TokenType, installer.ImpersonationLevel = tokenTypeImpersonation, tokenSecurityIdentification
+	if _, err := verifiedEnrollment(installer, linked, shell); err == nil {
+		t.Fatal("installer enrollment accepted a non-primary token")
+	}
+}
+
 func TestEnrollmentUnfilteredAdministratorRequiresExactDesktopLogin(t *testing.T) {
 	full := testUnfilteredAdminFacts()
 	binding, err := verifiedEnrollment(full, EnrollmentFacts{}, full)
