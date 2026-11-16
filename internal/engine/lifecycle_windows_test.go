@@ -23,44 +23,35 @@ func TestDesktopBaseAndStableResolverIdentity(t *testing.T) {
 	}
 	intent := policy.ChannelIntent{}
 	s := State{Manifest: Manifest{Mode: Daily, Channels: &intent, Config: cfg, Binding: policy.Binding{Physical: "Wi-Fi", VPN: "NL-VPN-test", TUN: "NL-TUN-test", ControllerPort: 19091}}}
-	var proxyPool, directPool netip.Prefix
-	for _, direct := range []bool{false, true} {
-		c, err := desktopConfig(s, nil, strings.Repeat("s", 32), nil, direct)
-		if err != nil {
-			t.Fatal(err)
-		}
-		tun := c["tun"].(map[string]any)
-		if tun["enable"] != true || tun["auto-route"] != false {
-			t.Fatal("dual off removed the owned base TUN")
-		}
-		for _, raw := range c["proxies"].([]any) {
-			if p, ok := raw.(map[string]any); ok && p["name"] == "CORP-BOUND" {
-				t.Fatal("dual off configured company ingress")
-			}
-		}
-		dns := c["dns"].(map[string]any)
-		if dns["fake-ip-ttl"] != 1 || dns["enable"] != true {
-			t.Fatal("desktop resolver did not retain its explicit fake-IP lifetime")
-		}
-		if dns["nameserver-policy"].(map[string]any)[cfg.Company.Domains[0]].([]string)[0] != "rcode://refused" {
-			t.Fatal("dual off allowed company DNS fallback")
-		}
-		pool := netip.MustParsePrefix(dns["fake-ip-range"].(string)).Masked()
-		if direct {
-			directPool = pool
-		} else {
-			proxyPool = pool
+	c, err := desktopConfig(s, nil, strings.Repeat("s", 32), nil, desktopCoreStandard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tun := c["tun"].(map[string]any)
+	if tun["enable"] != true || tun["auto-route"] != false {
+		t.Fatal("dual off removed the owned base TUN")
+	}
+	for _, raw := range c["proxies"].([]any) {
+		if p, ok := raw.(map[string]any); ok && p["name"] == "CORP-BOUND" {
+			t.Fatal("dual off configured company ingress")
 		}
 	}
-	if proxyPool != directPool || proxyPool != netip.MustParsePrefix("198.19.0.0/16") {
-		t.Fatal("channel transition replaced the stable fake-IP allocation domain")
+	dns := c["dns"].(map[string]any)
+	if dns["fake-ip-ttl"] != 1 || dns["enable"] != true {
+		t.Fatal("desktop resolver did not retain its explicit fake-IP lifetime")
+	}
+	if dns["nameserver-policy"].(map[string]any)[cfg.Company.Domains[0]].([]string)[0] != "rcode://refused" {
+		t.Fatal("dual off allowed company DNS fallback")
+	}
+	if netip.MustParsePrefix(dns["fake-ip-range"].(string)).Masked() != netip.MustParsePrefix("198.19.0.0/16") {
+		t.Fatal("desktop resolver lost the stable fake-IP allocation domain")
 	}
 	if intent != (policy.ChannelIntent{}) {
 		t.Fatal("runtime compiler changed the immutable initial channel intent")
 	}
 	intent = policy.DefaultIntent()
 	nodes := []policy.Node{{"type": "vless", "server": "203.0.113.7", "port": 443, "uuid": "11111111-1111-1111-1111-111111111111", "tls": true}}
-	c, err := desktopConfig(s, nodes, strings.Repeat("s", 32), &companyRuntime{}, false)
+	c, err = desktopConfig(s, nodes, strings.Repeat("s", 32), &companyRuntime{}, desktopCoreStandard)
 	if err != nil {
 		t.Fatal("company-local outage prevented the personal base config", err)
 	}
@@ -92,11 +83,19 @@ func TestDesktopEnvironmentChangesPolicyWithoutReplacingFakeIPNamespace(t *testi
 	cfg.OfficeOverrides = []policy.Override{{Type: "domain", Value: "transition.example", Target: "personal"}}
 	cfg.HomeOverrides = []policy.Override{{Type: "domain", Value: "transition.example", Target: "direct"}}
 	nodes := []policy.Node{{"type": "vless", "server": "203.0.113.7", "port": 443, "uuid": "11111111-1111-1111-1111-111111111111", "tls": true}}
+	modes := []struct {
+		enabled, lease bool
+		mode           desktopCoreMode
+	}{
+		{true, false, desktopCoreStandard},
+		{false, false, desktopCoreStandard},
+		{true, true, desktopCoreFallback},
+	}
 	for _, environment := range []string{"office", "home", "office"} {
-		for _, direct := range []bool{false, true} {
-			intent := policy.ChannelIntent{Personal: true, Environment: environment}
+		for _, tt := range modes {
+			intent := policy.ChannelIntent{Personal: tt.enabled, Environment: environment}
 			s := State{Manifest: Manifest{Mode: Daily, Config: cfg, Channels: &intent, Binding: policy.Binding{Physical: "WLAN", VPN: "NL-VPN-test", TUN: "NL-TUN-test", ControllerPort: 19091}}}
-			config, err := desktopConfig(s, nodes, strings.Repeat("s", 32), nil, direct)
+			config, err := desktopConfig(s, nodes, strings.Repeat("s", 32), nil, tt.mode)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -105,12 +104,12 @@ func TestDesktopEnvironmentChangesPolicyWithoutReplacingFakeIPNamespace(t *testi
 				t.Fatal("environment/fallback transition replaced the fake-IP namespace")
 			}
 			group := "PHYSICAL"
-			if environment == "office" && !direct {
+			if environment == "office" && tt.enabled {
 				group = "PERSONAL"
 			}
 			for _, server := range dns["nameserver-policy"].(map[string]any)["transition.example"].([]string) {
 				if !strings.HasSuffix(server, "#"+group) {
-					t.Fatal("DNS did not follow the current environment/fallback policy", environment, direct, server)
+					t.Fatal("DNS did not follow the current environment/fallback policy", environment, tt, server)
 				}
 			}
 			trafficGroup := "PHYSICAL"
@@ -118,16 +117,18 @@ func TestDesktopEnvironmentChangesPolicyWithoutReplacingFakeIPNamespace(t *testi
 				trafficGroup = "PERSONAL"
 			}
 			if !strings.Contains(strings.Join(config["rules"].([]string), "\n"), "DOMAIN,transition.example,"+trafficGroup) {
-				t.Fatal("traffic did not follow the same environment/fallback policy", environment, direct)
+				t.Fatal("traffic did not follow the same environment/fallback policy", environment, tt)
 			}
-			if direct && environment == "office" {
-				// The rule keeps its PERSONAL identity; the reload barrier opens
-				// that selector to PHYSICAL only after the resolver is installed.
-				for _, raw := range config["proxy-groups"].([]any) {
-					entry := raw.(map[string]any)
-					if entry["name"] == "PERSONAL" && strings.Join(entry["proxies"].([]string), ",") != "REJECT,PHYSICAL" {
-						t.Fatal("direct fallback did not offer the physical selector")
-					}
+			for _, raw := range config["proxy-groups"].([]any) {
+				entry := raw.(map[string]any)
+				if entry["name"] != "PERSONAL" {
+					continue
+				}
+				if (entry["lumina-fallback-lease"] == true) != tt.lease {
+					t.Fatal("the PERSONAL selector did not use the requested lease mode", environment, tt)
+				}
+				if (tt.lease || !tt.enabled) && strings.Join(entry["proxies"].([]string), ",") != "REJECT,PHYSICAL" {
+					t.Fatal("the PERSONAL selector did not retain its closed default")
 				}
 			}
 		}

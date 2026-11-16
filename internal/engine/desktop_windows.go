@@ -18,7 +18,14 @@ import (
 	"netlaunch/internal/winnet"
 )
 
-func desktopConfig(s State, nodes []policy.Node, secret string, company *companyRuntime, direct bool) (map[string]any, error) {
+type desktopCoreMode uint8
+
+const (
+	desktopCoreStandard desktopCoreMode = iota
+	desktopCoreFallback
+)
+
+func desktopConfig(s State, nodes []policy.Node, secret string, company *companyRuntime, mode desktopCoreMode) (map[string]any, error) {
 	intent := currentIntent(s)
 	stable := company != nil && company.proxy != nil
 	if stable {
@@ -32,10 +39,11 @@ func desktopConfig(s State, nodes []policy.Node, secret string, company *company
 	if intent.Company && (company == nil || company.authority == nil) {
 		intent.Company = false
 	}
-	if direct {
-		intent.Personal = false
+	compile := policy.CompileWithIntent
+	if mode == desktopCoreFallback {
+		compile = policy.CompilePersonalFallback
 	}
-	c, e := policy.CompileWithIntent(s.Manifest.Config, nodes, s.Manifest.Binding, secret, intent)
+	c, e := compile(s.Manifest.Config, nodes, s.Manifest.Binding, secret, intent)
 	if e != nil {
 		return nil, e
 	}
@@ -61,15 +69,16 @@ func desktopConfig(s State, nodes []policy.Node, secret string, company *company
 	dns["fake-ip-ttl"] = 1
 	return c, nil
 }
-func reloadDesktop(ctx context.Context, run string, s State, nodes []policy.Node, secret string, company *companyRuntime, direct bool, verification *personalVerification) error {
+func reloadDesktop(ctx context.Context, run string, s State, nodes []policy.Node, secret string, company *companyRuntime, mode desktopCoreMode, verification *personalVerification) error {
 	if err := verification.close(run); err != nil {
 		return err
 	}
-	c, e := desktopConfig(s, nodes, secret, company, direct)
+	c, e := desktopConfig(s, nodes, secret, company, mode)
 	if e != nil {
 		return e
 	}
 	verification.ingress.configure(c, s.Manifest.Config, candidateNames(nodes))
+	direct := mode == desktopCoreStandard && !currentIntent(s).Personal
 	return applyDesktopConfig(c, filepath.Join(private(run), "core.json"), direct, desktopReloadControl{
 		selectGroup: func(group, target string) error { return selectCoreGroupContext(ctx, run, group, target) },
 		request: func(method, path string, payload, out any) error {
@@ -94,17 +103,23 @@ func desktopDNS(run string) error {
 		return m.SetDNS(s.Windows.Physical.Adapter, winnet.DNSSettings{NameServers: "127.0.0.1"})
 	})
 }
-func publishDesktopApplied(run string, intent policy.ChannelIntent, generation uint64, direct bool) error {
+func publishDesktopApplied(run string, intent policy.ChannelIntent, generation uint64, coreReplaced bool) error {
 	return update(run, func(s *State) error {
+		if err := guard(run, s); err != nil {
+			return err
+		}
 		if s.ChannelGeneration != generation || currentIntent(*s) != intent {
 			return errors.New("channel intent changed while applying")
 		}
 		s.AppliedChannels = &intent
 		s.AppliedGeneration = generation
-		s.PersonalFallback = direct && intent.Personal
+		s.PersonalFallback = false
+		s.PersonalFallbackUntil = nil
 		s.TakeoverActive = true
-		if direct {
+		if !intent.Personal {
 			s.Personal = "PHYSICAL"
+		} else if coreReplaced {
+			s.Personal = selector.Reject
 		}
 		return nil
 	})
@@ -160,8 +175,7 @@ func runDesktopWindows(ctx context.Context, run string, children *windowsChildre
 	if e != nil {
 		return e
 	}
-	direct := !intent.Personal
-	c, e := desktopConfig(s, nodes, secret, company, direct)
+	c, e := desktopConfig(s, nodes, secret, company, desktopCoreStandard)
 	if e != nil {
 		return e
 	}
@@ -220,12 +234,12 @@ func runDesktopWindows(ctx context.Context, run string, children *windowsChildre
 	if e = selectCoreGroupContext(ctx, run, "PHYSICAL", "PHYSICAL-BOUND"); e != nil {
 		return e
 	}
-	if direct {
+	if !intent.Personal {
 		if e = selectPersonalContext(ctx, run, "PHYSICAL"); e != nil {
 			return e
 		}
 	}
-	if e = publishDesktopApplied(run, intent, s.ChannelGeneration, direct); e != nil {
+	if e = publishDesktopApplied(run, intent, s.ChannelGeneration, true); e != nil {
 		return e
 	}
 	selection := selector.New(names)
@@ -239,6 +253,13 @@ func runDesktopWindows(ctx context.Context, run string, children *windowsChildre
 	}()
 	var latest []independentSample
 	var gen personalroute.Generation
+	var proofScope State
+	var fallback desktopFallbackLease
+	defer func() {
+		if !fallback.until.IsZero() {
+			_ = closeDesktopFallbackGate(run)
+		}
+	}()
 	var health *independentScheduler
 	boundChecks, systemChecks := newCompanyProbeSchedule(), newProbeSchedule()
 	resetProbes := func() {
@@ -249,6 +270,7 @@ func runDesktopWindows(ctx context.Context, run string, children *windowsChildre
 	sampledAt := map[string]time.Time{}
 	nextCompanyIngress := time.Now().Add(5 * time.Second)
 	applied := s.ChannelGeneration
+	networkUnavailable := false
 	newGeneration := func(state State) error {
 		token, e := nonce()
 		if e != nil {
@@ -256,6 +278,8 @@ func runDesktopWindows(ctx context.Context, run string, children *windowsChildre
 		}
 		gen = personalroute.Generation{Run: filepath.Base(run), Network: fmt.Sprintf("%s/%d/%s/%s", state.Windows.Physical.Adapter.GUID, state.Windows.Epoch, state.Windows.Physical.Address, state.Windows.Physical.Gateway), Probe: token}
 		latest = nil
+		proofScope = state
+		fallback = desktopFallbackLease{}
 		probes, scope := personalMeasurementTargets(state.Manifest.Config.Probes)
 		health = newIndependentScheduler(nodes, probes, gen, scope)
 		coverageReason = health.coverageReason
@@ -269,6 +293,19 @@ func runDesktopWindows(ctx context.Context, run string, children *windowsChildre
 	}
 	if e = newGeneration(s); e != nil {
 		return e
+	}
+	withdrawFallback := func(state State) error {
+		if err := revokeDesktopFallback(run); err != nil {
+			return err
+		}
+		fallback.until = time.Time{}
+		resetProbes()
+		selection = selector.New(names)
+		sampledAt = map[string]time.Time{}
+		if err := guard(run, &state); err != nil {
+			return err
+		}
+		return reloadDesktop(ctx, run, state, nodes, secret, company, desktopCoreStandard, verification)
 	}
 	for ctx.Err() == nil {
 		if e = pulse(run); e != nil {
@@ -315,6 +352,13 @@ func runDesktopWindows(ctx context.Context, run string, children *windowsChildre
 			resetProbes()
 			companyChanged := wanted.Company != intent.Company
 			personalChanged := wanted.Personal != intent.Personal || wanted.Environment != intent.Environment
+			hadFallback := !fallback.until.IsZero()
+			if hadFallback {
+				if e = revokeDesktopFallback(run); e != nil {
+					return e
+				}
+				fallback.until = time.Time{}
+			}
 			if wanted.Company && company.authority == nil {
 				candidate, e := startDesktopCompanyAt(ctx, run, ingress)
 				if e != nil {
@@ -343,21 +387,21 @@ func runDesktopWindows(ctx context.Context, run string, children *windowsChildre
 				companyIssue = false
 			}
 			intent = wanted
-			if personalChanged {
-				direct = !intent.Personal
-				if e = reloadDesktop(ctx, run, s, nodes, secret, company, direct, verification); e != nil {
+			coreReplaced := personalChanged || hadFallback
+			if coreReplaced {
+				if e = reloadDesktop(ctx, run, s, nodes, secret, company, desktopCoreStandard, verification); e != nil {
 					return e
 				}
 				selection = selector.New(names)
-				if e = newGeneration(s); e != nil {
-					return e
-				}
 			} else {
 				if e = gateDesktopCompany(ctx, run); e != nil {
 					return e
 				}
 			}
-			if e = publishDesktopApplied(run, intent, s.ChannelGeneration, direct); e != nil {
+			if e = publishDesktopApplied(run, intent, s.ChannelGeneration, coreReplaced); e != nil {
+				return e
+			}
+			if e = newGeneration(s); e != nil {
 				return e
 			}
 			applied = s.ChannelGeneration
@@ -379,9 +423,16 @@ func runDesktopWindows(ctx context.Context, run string, children *windowsChildre
 		}
 		observed, networkErr := winnet.Discover()
 		epoch, awake := windowsPower.Epoch()
-		changed := networkErr == nil && (!winnet.SameAdapter(observed.Adapter, s.Windows.Physical.Adapter) || observed.Address != s.Windows.Physical.Address || observed.Gateway != s.Windows.Physical.Gateway)
-		resumed := !awake || epoch != s.Windows.Epoch
-		if networkErr != nil || changed || resumed {
+		changed := networkErr == nil && (!sameDesktopPhysical(observed, s.Windows.Physical) ||
+			!sameDesktopPhysical(observed, proofScope.Windows.Physical))
+		resumed := !awake || epoch != proofScope.Windows.Epoch
+		if networkErr != nil || changed || resumed || networkUnavailable {
+			if !fallback.until.IsZero() {
+				if e = revokeDesktopFallback(run); e != nil {
+					return e
+				}
+				fallback.until = time.Time{}
+			}
 			if err := verification.close(run); err != nil {
 				return err
 			}
@@ -398,6 +449,7 @@ func runDesktopWindows(ctx context.Context, run string, children *windowsChildre
 				return e
 			}
 			if networkErr != nil || !awake {
+				networkUnavailable = true
 				_ = update(run, func(s *State) error { s.Phase = "network_unavailable"; return nil })
 				select {
 				case <-ctx.Done():
@@ -421,8 +473,7 @@ func runDesktopWindows(ctx context.Context, run string, children *windowsChildre
 			if e != nil {
 				return e
 			}
-			direct = !intent.Personal
-			if e = reloadDesktop(ctx, run, s, nodes, secret, company, direct, verification); e != nil {
+			if e = reloadDesktop(ctx, run, s, nodes, secret, company, desktopCoreStandard, verification); e != nil {
 				return e
 			}
 			if e = capture(run); e != nil {
@@ -431,9 +482,88 @@ func runDesktopWindows(ctx context.Context, run string, children *windowsChildre
 			if e = desktopDNS(run); e != nil {
 				return e
 			}
+			if e = publishDesktopApplied(run, intent, applied, true); e != nil {
+				return e
+			}
 			selection = selector.New(names)
 			if e = newGeneration(s); e != nil {
 				return e
+			}
+			networkUnavailable = false
+		}
+		if intent.Personal && pending == nil {
+			work, cancel := context.WithCancel(ctx)
+			cancelSweep = cancel
+			pending = health.start(work, func(c context.Context, path string, out any) error {
+				return apiContext(c, run, "GET", path, nil, out)
+			})
+		}
+		newEvidence := false
+		if pending != nil {
+			select {
+			case result, open := <-pending:
+				if !open {
+					pending = nil
+					cancelSweep()
+					cancelSweep = nil
+				} else if result.Generation == gen {
+					latest = result.Samples
+					coverageReason = result.CoverageReason
+					newEvidence = true
+				}
+			default:
+			}
+		}
+		now := time.Now()
+		decision := fallbackDecisionWithCoverage(intent, nodes, gen, latest, now, coverageReason)
+		deadline := desktopFallbackDeadline(decision, s.Windows.ValidationDeadline, now)
+		if fallback.shouldWithdraw(deadline, now) || (!fallback.until.IsZero() && !desktopFallbackCoreActive(ctx, run)) {
+			if e = withdrawFallback(s); e != nil {
+				return e
+			}
+		}
+		if op, ok := fallback.next(deadline); ok {
+			if op == openFallbackLease {
+				if e = revokeDesktopFallback(run); e != nil {
+					return e
+				}
+				resetProbes()
+				if e = reloadDesktop(ctx, run, s, nodes, secret, company, desktopCoreFallback, verification); e != nil {
+					return e
+				}
+			}
+			cutoff, leaseErr := applyDesktopFallbackLease(ctx, run, proofScope, op, deadline)
+			if leaseErr != nil {
+				if e = withdrawFallback(s); e != nil {
+					return errors.Join(leaseErr, e)
+				}
+			} else {
+				fallback.until = cutoff
+			}
+		}
+		if newEvidence {
+			_ = winWrite(run, "personal-health.json", map[string]any{"generation": gen, "samples": latest, "decision": decision, "coverage_reason": coverageReason})
+		}
+		if intent.Personal && fallback.until.IsZero() && (newEvidence || verification.pending()) {
+			values := map[string]selector.TimedSample{}
+			if newEvidence {
+				for _, sample := range latest {
+					if !sample.Observation.FinishedAt.After(sampledAt[sample.Name]) {
+						continue
+					}
+					switch sample.Observation.Outcome {
+					case personalroute.Healthy:
+						values[sample.Name] = selector.TimedSample{Latency: sample.Latency, StartedAt: sample.Observation.StartedAt, FinishedAt: sample.Observation.FinishedAt}
+					case personalroute.PathFailed:
+						values[sample.Name] = selector.TimedSample{Latency: -1, StartedAt: sample.Observation.StartedAt, FinishedAt: sample.Observation.FinishedAt}
+					}
+				}
+			}
+			if e = applyPersonalTimedSamples(ctx, run, selection, verification, values); e != nil {
+				return e
+			}
+			for name, sample := range values {
+				sampledAt[name] = sample.FinishedAt
 			}
 		}
 		companyOpen := false
@@ -511,84 +641,8 @@ func runDesktopWindows(ctx context.Context, run string, children *windowsChildre
 			}
 			retry.Ready(time.Now(), running && company.ready() == nil)
 		}
-		if intent.Personal && pending == nil {
-			work, cancel := context.WithCancel(ctx)
-			cancelSweep = cancel
-			pending = health.start(work, func(c context.Context, path string, out any) error { return apiContext(c, run, "GET", path, nil, out) })
-		}
-		advancedVerification := false
-		if pending != nil {
-			select {
-			case result, open := <-pending:
-				if !open {
-					pending = nil
-					if cancelSweep != nil {
-						cancelSweep()
-						cancelSweep = nil
-					}
-					break
-				}
-				if result.Generation == gen {
-					latest = result.Samples
-					coverageReason = result.CoverageReason
-					decision := fallbackDecisionWithCoverage(intent, nodes, gen, latest, time.Now(), coverageReason)
-					if decision.DirectAllowed != direct {
-						resetProbes()
-						companyOpen = false
-						direct = decision.DirectAllowed
-						if e = reloadDesktop(ctx, run, s, nodes, secret, company, direct, verification); e != nil {
-							return e
-						}
-						selection.Commit(selector.Reject, time.Now())
-					}
-					if !direct {
-						values := map[string]selector.TimedSample{}
-						for _, sample := range latest {
-							if !sample.Observation.FinishedAt.After(sampledAt[sample.Name]) {
-								continue
-							}
-							switch sample.Observation.Outcome {
-							case personalroute.Healthy:
-								values[sample.Name] = selector.TimedSample{Latency: sample.Latency, StartedAt: sample.Observation.StartedAt, FinishedAt: sample.Observation.FinishedAt}
-							case personalroute.PathFailed:
-								values[sample.Name] = selector.TimedSample{Latency: -1, StartedAt: sample.Observation.StartedAt, FinishedAt: sample.Observation.FinishedAt}
-							}
-						}
-						if e = applyPersonalTimedSamples(ctx, run, selection, verification, values); e != nil {
-							return e
-						}
-						advancedVerification = true
-						for name, sample := range values {
-							sampledAt[name] = sample.FinishedAt
-						}
-					}
-					if e = publishDesktopApplied(run, intent, applied, direct); e != nil {
-						return e
-					}
-					_ = winWrite(run, "personal-health.json", map[string]any{"generation": gen, "samples": latest, "decision": decision, "coverage_reason": coverageReason})
-				}
-			default:
-			}
-		}
-		if !direct && intent.Personal && verification.pending() && !advancedVerification {
-			if e = applyPersonalTimedSamples(ctx, run, selection, verification, nil); e != nil {
-				return e
-			}
-		}
-		if direct && intent.Personal && !fallbackDecisionWithCoverage(intent, nodes, gen, latest, time.Now(), coverageReason).DirectAllowed {
-			resetProbes()
-			companyOpen = false
-			direct = false
-			if e = reloadDesktop(ctx, run, s, nodes, secret, company, false, verification); e != nil {
-				return e
-			}
-			selection.Commit(selector.Reject, time.Now())
-			if e = publishDesktopApplied(run, intent, applied, false); e != nil {
-				return e
-			}
-		}
 		checks := selection
-		if direct {
+		if !intent.Personal || !fallback.until.IsZero() {
 			checks = selector.New(nil)
 		}
 		if !companyOpen {

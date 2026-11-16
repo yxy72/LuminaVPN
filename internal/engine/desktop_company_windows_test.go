@@ -30,7 +30,7 @@ func TestDesktopStableCompanyGateNeverChangesPersonalCoreConfiguration(t *testin
 	for _, enabled := range []bool{false, true, false, true} {
 		intent := policy.ChannelIntent{Company: enabled}
 		s := State{Manifest: Manifest{Mode: Daily, Config: cfg, Channels: &intent, Binding: policy.Binding{Physical: "WLAN", VPN: "NL-VPN-test", TUN: "NL-TUN-test", ControllerPort: 19091}}}
-		config, err := desktopConfig(s, nil, strings.Repeat("s", 32), company, true)
+		config, err := desktopConfig(s, nil, strings.Repeat("s", 32), company, desktopCoreStandard)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -56,7 +56,7 @@ func TestDesktopStableCompanyGateNeverChangesPersonalCoreConfiguration(t *testin
 	cfg.Company.DNS = nil
 	intent := policy.ChannelIntent{}
 	s := State{Manifest: Manifest{Config: cfg, Channels: &intent, Binding: policy.Binding{Physical: "WLAN", VPN: "NL-VPN-test", TUN: "NL-TUN-test", ControllerPort: 19091}}}
-	config, err := desktopConfig(s, nil, strings.Repeat("s", 32), company, true)
+	config, err := desktopConfig(s, nil, strings.Repeat("s", 32), company, desktopCoreStandard)
 	if err != nil {
 		t.Fatal(err)
 	}

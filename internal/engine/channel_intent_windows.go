@@ -38,6 +38,15 @@ func SetChannels(run string, intent policy.ChannelIntent) error {
 		if currentIntent(*s) == intent {
 			return nil
 		}
+		if s.PersonalFallback || s.PersonalFallbackUntil != nil {
+			if err := closeDesktopFallbackGate(run); err != nil {
+				return err
+			}
+			clearDesktopFallback(s)
+			if err := guard(run, s); err != nil {
+				return err
+			}
+		}
 		s.DesiredChannels = &intent
 		s.ChannelGeneration++
 		s.Channels = nil
