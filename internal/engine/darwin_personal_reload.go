@@ -14,11 +14,11 @@ import (
 	"netlaunch/internal/selector"
 )
 
-// This reviewed derivation shares in-memory fake-IP mappings across reloads.
+// This derivation keeps fake-IP mappings across reloads and owns fallback lease expiry.
 func requireDarwinReloadCore(root string) error {
 	const (
-		version = "v1.19.32-lumina.1"
-		digest  = "ee1bf200325a33655bb11bdb7a056ceead0ea2aca51755629659bd797fbdd9ac"
+		version = "v1.19.32-lumina.2"
+		digest  = "ee9a38c416bd18b73a6aee05268163463bc846ffbcc0631508a266c9f008ed03"
 	)
 	bundle, err := runtimebundle.Verify(root)
 	if err != nil {
@@ -29,7 +29,7 @@ func requireDarwinReloadCore(root string) error {
 			return nil
 		}
 	}
-	return errors.New("macOS managed reload requires the reviewed fake-IP runtime")
+	return errors.New("macOS managed reload requires the reviewed fake-IP and fallback lease runtime")
 }
 
 func darwinReloadGroups(config map[string]any) map[string]string {
