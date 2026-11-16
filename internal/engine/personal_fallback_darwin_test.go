@@ -3,9 +3,13 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -88,11 +92,11 @@ func TestDarwinAutomaticFallbackPublishesWithoutChangingIntent(t *testing.T) {
 			t.Fatal("a prepared fallback reported direct")
 		}
 		var calls []string
-		selectGroup := func(group, target string) error {
+		selectGroup := func(_ context.Context, group, target string) error {
 			calls = append(calls, group+"="+target)
 			return nil
 		}
-		if err := publishDarwinAutoFallback(&s, direct, authorize, selectGroup); err != nil {
+		if err := publishDarwinAutoFallback(t.Context(), &s, direct, time.Now().Add(time.Minute), authorize, selectGroup); err != nil {
 			t.Fatal(err)
 		}
 		expected := []string{"PHYSICAL=PHYSICAL-BOUND"}
@@ -104,6 +108,75 @@ func TestDarwinAutomaticFallbackPublishesWithoutChangingIntent(t *testing.T) {
 			currentIntent(s) != want || !s.VPN.Bootstrap {
 			t.Fatal("automatic transition modified unrelated state", calls, s.PersonalFallback)
 		}
+	}
+}
+
+func TestDarwinFallbackGrantCannotOutliveTheValidationRun(t *testing.T) {
+	s := personalChangeFixture(t, true)
+	s.DarwinAutoFallbackPending = true
+	s.Manifest.Created = time.Now()
+	s.Manifest.ValidationTimeout = time.Minute
+	runDeadline := darwinRunDeadline(s.Manifest)
+	proofDeadline := runDeadline.Add(time.Minute)
+	err := publishDarwinAutoFallback(t.Context(), &s, true, proofDeadline, func(State) error { return nil }, func(ctx context.Context, _, _ string) error {
+		deadline, ok := ctx.Deadline()
+		if !ok || !deadline.Equal(runDeadline) {
+			t.Fatalf("controller deadline = %v, want %v", deadline, runDeadline)
+		}
+		return nil
+	})
+	if err != nil || s.DarwinAutoFallbackUntil == nil || !s.DarwinAutoFallbackUntil.Equal(runDeadline) {
+		t.Fatalf("fallback publication did not honor run deadline, got %v: %v", s.DarwinAutoFallbackUntil, err)
+	}
+	if !darwinFallbackCutoff(s, time.Time{}).IsZero() {
+		t.Fatal("validation deadline created missing proof")
+	}
+}
+
+func TestDarwinFallbackReadbackCannotKeepUsingExpiredEvidence(t *testing.T) {
+	s := personalChangeFixture(t, true)
+	s.DarwinAutoFallbackPending = true
+	personalWrite := make(chan struct{}, 1)
+	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == "/proxies/PERSONAL":
+			personalWrite <- struct{}{}
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPut && r.URL.Path == "/proxies/PHYSICAL":
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Path == "/proxies/PHYSICAL":
+			_, _ = w.Write([]byte(`{"now":"PHYSICAL-BOUND"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/proxies/PERSONAL":
+			<-r.Context().Done()
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer controller.Close()
+	address := strings.TrimPrefix(controller.URL, "http://")
+	until := time.Now().Add(300 * time.Millisecond)
+	err := publishDarwinAutoFallback(t.Context(), &s, true, until, func(State) error { return nil }, func(ctx context.Context, group, target string) error {
+		d, ok := ctx.Deadline()
+		if !ok || !d.Equal(until) {
+			t.Fatalf("controller I/O deadline = %v, want %v", d, until)
+		}
+		path := "/proxies/" + group
+		if err := coreRequest(ctx, address, "test-secret", http.MethodPut, path, map[string]string{"name": target}, nil); err != nil {
+			return err
+		}
+		var readback struct{ Now string }
+		return coreRequest(ctx, address, "test-secret", http.MethodGet, path, nil, &readback)
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("stalled readback returned %v", err)
+	}
+	select {
+	case <-personalWrite:
+	default:
+		t.Fatal("the controller did not accept the write before its readback stalled")
+	}
+	if s.PersonalFallback || s.DarwinAutoFallbackUntil != nil || !s.DarwinAutoFallbackPending {
+		t.Fatal("a timed-out readback published fallback evidence")
 	}
 }
 

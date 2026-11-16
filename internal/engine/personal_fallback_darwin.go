@@ -46,25 +46,52 @@ func beginDarwinAutoFallback(s *State, before State, direct bool, allows func(St
 	return nil
 }
 
-func publishDarwinAutoFallback(s *State, direct bool, authorize func(State) error, selectGroup func(group, target string) error) error {
-	if err := authorize(*s); err != nil {
+func darwinFallbackCutoff(s State, proofDeadline time.Time) time.Time {
+	runDeadline := darwinRunDeadline(s.Manifest)
+	if !proofDeadline.IsZero() && !runDeadline.IsZero() && runDeadline.Before(proofDeadline) {
+		return runDeadline
+	}
+	return proofDeadline
+}
+
+func publishDarwinAutoFallback(ctx context.Context, s *State, direct bool, until time.Time, authorize func(State) error, selectGroup func(context.Context, string, string) error) error {
+	if direct {
+		if until.IsZero() {
+			return errDarwinFallbackDeferred
+		}
+		until = darwinFallbackCutoff(*s, until)
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, until)
+		defer cancel()
+	}
+	check := func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if direct && !time.Now().Before(until) {
+			return context.DeadlineExceeded
+		}
+		return authorize(*s)
+	}
+	if err := check(); err != nil {
 		return err
 	}
 	if err := openDesktopConfig(func(group, target string) error {
-		if err := authorize(*s); err != nil {
+		if err := check(); err != nil {
 			return err
 		}
-		return selectGroup(group, target)
+		return selectGroup(ctx, group, target)
 	}, direct); err != nil {
 		return err
 	}
-	if err := authorize(*s); err != nil {
+	if err := check(); err != nil {
 		return err
 	}
 	s.DarwinAutoFallbackPending, s.PersonalFallback = false, direct
 	s.Personal = selector.Reject
 	if direct {
 		s.Personal = "PHYSICAL"
+		s.DarwinAutoFallbackUntil = &until
 	}
 	return nil
 }
@@ -124,7 +151,12 @@ func applyDarwinAutoFallback(ctx context.Context, run string, before State, comp
 		}
 		return nil
 	}
+	fallbackAttempted := false
 	failClosed := func(err error) (*personalVerification, error) {
+		if fallbackAttempted {
+			// The controller may have accepted a selector write before readback failed.
+			return nil, errors.Join(err, closeDarwinFallbackPaths(ctx, run))
+		}
 		return nil, errors.Join(err, closeDarwinBasePaths(ctx, run))
 	}
 	if err := closeDarwinVerification(run, previous); err != nil {
@@ -136,34 +168,32 @@ func applyDarwinAutoFallback(ctx context.Context, run string, before State, comp
 	if err := verifyDarwinPersonalResolverOwnership(before); err != nil {
 		return failClosed(err)
 	}
-	if actual, err := platform.WakeEpoch(); err != nil || actual != wake {
-		return failClosed(errors.New("macOS wake generation changed during fallback"))
+	authorizePublication := func(s State) error {
+		if actual, err := platform.WakeEpoch(); err != nil || actual != wake {
+			return errors.New("macOS wake generation changed during fallback")
+		}
+		return authorize(s)
 	}
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	if err := update(run, func(s *State) error {
-		if err := publishDarwinAutoFallback(s, direct, authorize, func(group, target string) error {
-			return selectCoreGroupContext(ctx, run, group, target)
-		}); err != nil {
-			return err
-		}
+		var until time.Time
 		if direct {
-			until := deadline(*s)
-			if !until.After(time.Now()) {
-				return errors.New("macOS fallback evidence expired during final readback")
-			}
-			s.DarwinAutoFallbackUntil = &until
+			until = deadline(*s)
 		}
-		return nil
+		return publishDarwinAutoFallback(ctx, s, direct, until, authorizePublication, func(work context.Context, group, target string) error {
+			fallbackAttempted = fallbackAttempted || group == "PERSONAL" && target == "PHYSICAL"
+			return selectCoreGroupContext(work, run, group, target)
+		})
 	}); err != nil {
 		return failClosed(err)
 	}
 	return verification, nil
 }
 
-// The heartbeat independently closes the personal selector if the owner is
-// busy when the proof expires. The fallback marker remains until the owning
-// loop finishes restoring the regular resolver.
+// The heartbeat also attempts to revoke the selector and close tracked
+// fallback connections when the owning loop is busy. The fallback marker
+// remains until the owning loop finishes restoring the regular resolver.
 func darwinFallbackExpired(s State, now time.Time) bool {
 	return s.PersonalFallback && s.Personal == "PHYSICAL" &&
 		(s.DarwinAutoFallbackUntil == nil || !now.Before(*s.DarwinAutoFallbackUntil))
@@ -175,15 +205,17 @@ func fenceExpiredDarwinFallback(ctx context.Context, run string) error {
 	if err != nil || !darwinFallbackExpired(s, now.Add(time.Second)) {
 		return err
 	}
-	work, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
 	return update(run, func(current *State) error {
 		if !darwinFallbackExpired(*current, time.Now().Add(time.Second)) {
 			return nil
 		}
-		if err := checkDarwinCompanyOwner(run, *current); err != nil {
+		// Tightening this run's gate is still permitted after STOP or run expiry.
+		if err := requireActiveDarwinOwner(run, *current); err != nil {
 			return err
 		}
+		// Time waiting for state.lock must not prevent the native REJECT attempt.
+		work, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
 		if err := selectPersonalContext(work, run, selector.Reject); err != nil {
 			return err
 		}
@@ -199,14 +231,13 @@ func fenceExpiredDarwinFallback(ctx context.Context, run string) error {
 }
 
 func closeDarwinFallbackPaths(ctx context.Context, run string) error {
-	if err := closeDarwinBasePaths(ctx, run); err != nil {
-		return err
-	}
+	gateErr := closeDarwinBasePaths(ctx, run)
 	work, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 	defer cancel()
-	return drainDarwinFallbackConnections(func(method, path string, payload, out any) error {
+	drainErr := drainDarwinFallbackConnections(func(method, path string, payload, out any) error {
 		return apiContext(work, run, method, path, payload, out)
 	})
+	return errors.Join(gateErr, drainErr)
 }
 
 func drainDarwinFallbackConnections(request func(method, path string, payload, out any) error) error {
@@ -229,7 +260,7 @@ func drainDarwinFallbackConnections(request func(method, path string, payload, o
 }
 
 func renewDarwinFallback(ctx context.Context, run string, before State, deadline func(State) time.Time) error {
-	until := deadline(before)
+	until := darwinFallbackCutoff(before, deadline(before))
 	if before.DarwinAutoFallbackUntil != nil && !until.After(*before.DarwinAutoFallbackUntil) {
 		return nil
 	}
@@ -244,7 +275,7 @@ func renewDarwinFallback(ctx context.Context, run string, before State, deadline
 			darwinManualChangePending(*s) || darwinFallbackExpired(*s, time.Now()) {
 			return nil
 		}
-		until := deadline(*s)
+		until := darwinFallbackCutoff(*s, deadline(*s))
 		if until.After(time.Now()) && (s.DarwinAutoFallbackUntil == nil || until.After(*s.DarwinAutoFallbackUntil)) {
 			s.DarwinAutoFallbackUntil = &until
 		}
