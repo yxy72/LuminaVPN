@@ -255,6 +255,9 @@ func validDesktopStart(start *serviceprotocol.StartPayload) bool {
 	if start == nil {
 		return true
 	}
+	if start.Environment != "" {
+		return false
+	}
 	if platform.WindowsClientValidationOnly {
 		return start.Mode == "validation" && start.ValidationSeconds >= 1 && start.ValidationSeconds <= 2700
 	}

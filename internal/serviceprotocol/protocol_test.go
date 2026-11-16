@@ -18,6 +18,21 @@ func TestExplicitDailyAndBoundedValidationModes(t *testing.T) {
 		}
 	}
 }
+
+func TestStartEnvironmentIsOptionalAndExact(t *testing.T) {
+	for _, value := range []StartEnvironment{"", EnvironmentShared, EnvironmentOffice, EnvironmentHome, "OFFICE", "public"} {
+		m := Mutation{RequestID: "r", ProfileID: "p", Kind: TakeoverStart, Start: &StartPayload{Mode: "daily", Environment: value}}
+		if err := m.Validate(); (err == nil) != (value == "" || value.valid()) {
+			t.Fatalf("%q: %v", value, err)
+		}
+	}
+	for _, raw := range []string{`""`, `null`, `" office "`, `"other"`, `true`} {
+		var start StartPayload
+		if err := json.Unmarshal([]byte(`{"mode":"daily","environment":`+raw+`}`), &start); err == nil {
+			t.Fatalf("explicit invalid environment accepted: %s", raw)
+		}
+	}
+}
 func TestTypedKindsRejectShellPathsAndExtraPayloads(t *testing.T) {
 	for _, body := range []string{`{"version":1,"method":"exec","argv":["cmd.exe"]}`, `{"version":1,"method":"submit","mutation":{"request_id":"r","profile_id":"p","kind":"takeover_stop","stop":{},"exe":"foreign.exe"}}`, `{"version":1,"method":"submit","mutation":{"request_id":"r","profile_id":"../p","kind":"takeover_stop","stop":{}}}`} {
 		if _, err := DecodeRequest([]byte(body)); err == nil {

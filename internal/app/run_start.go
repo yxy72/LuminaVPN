@@ -48,7 +48,7 @@ func StartMacNetworkWithIntent(ctx context.Context, profile, bundle string, vali
 
 // A launch response can fail after the native system has accepted the request.
 // Stop is committed to the original run before returning from unsettled startup.
-func launchPreparedRun(ctx context.Context, stop *RunStop, launch func(context.Context, string, string) error, status func(string) (engine.Status, error), timeout, interval time.Duration) (s engine.Status, resultErr error) {
+func launchPreparedRun(ctx context.Context, stop *RunStop, launch func(context.Context, string, string) error, status func(string) (engine.Status, error), timeout, interval time.Duration, expected *policy.ChannelIntent) (s engine.Status, resultErr error) {
 	finished := false
 	defer func() {
 		if finished || resultErr == nil {
@@ -88,8 +88,12 @@ func launchPreparedRun(ctx context.Context, stop *RunStop, launch func(context.C
 			}
 			switch observed.Phase {
 			case "ready":
-				finished = true
-				return observed, nil
+				if expected == nil || observed.TakeoverActive && observed.ChannelGeneration != 0 &&
+					observed.AppliedGeneration == observed.ChannelGeneration && observed.DesiredChannels != nil &&
+					observed.AppliedChannels != nil && *observed.DesiredChannels == *expected && *observed.AppliedChannels == *expected {
+					finished = true
+					return observed, nil
+				}
 			case "stopped":
 				finished = true
 				if engine.NeedsAuthentication(observed) {

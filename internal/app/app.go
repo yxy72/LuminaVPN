@@ -635,7 +635,11 @@ func (c CLI) upLockedContext(ctx context.Context, o options, cfg policy.Config, 
 		return c.prepared(run)
 	}
 	fmt.Fprintln(c.Out, "Administrator authorization will now appear.")
-	s, e := launchPreparedRun(ctx, stop, engine.LaunchContext, statusFor, startupReadinessWindow, time.Second)
+	var expected *policy.ChannelIntent
+	if macDesktop {
+		expected = &intent
+	}
+	s, e := launchPreparedRun(ctx, stop, engine.LaunchContext, statusFor, startupReadinessWindow, time.Second, expected)
 	if e != nil {
 		return e
 	}

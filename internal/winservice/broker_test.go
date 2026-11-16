@@ -136,6 +136,17 @@ func stopMutation(id, profile, run string) p.Mutation {
 	return p.Mutation{RequestID: id, ProfileID: profile, RunRef: run, ExpectedRevision: 1, Kind: p.ExitRestore, Stop: &p.StopPayload{}}
 }
 
+func TestWindowsStartEnvironmentComesFromServiceSettings(t *testing.T) {
+	b, _, _ := newTestBroker(t, &fakeBackend{}, testBinding("profile"))
+	for _, value := range []p.StartEnvironment{p.EnvironmentShared, p.EnvironmentOffice, p.EnvironmentHome} {
+		start := startMutation("environment", "profile")
+		start.Start.Environment = value
+		if _, err := b.Submit(t.Context(), testPeer(), start); err == nil {
+			t.Fatalf("desktop startup field overrode Windows service settings: %s", value)
+		}
+	}
+}
+
 func TestAcceptedOperationOutlivesCallerReadAndDetach(t *testing.T) {
 	entered, finish := make(chan struct{}), make(chan struct{})
 	b, _, _ := newTestBroker(t, &fakeBackend{execute: func(ctx context.Context, _ AuthorizedOperation, _ func(Progress)) (Completion, error) {

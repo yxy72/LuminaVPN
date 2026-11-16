@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
-import { CLIENT_METHODS, LOCAL_WORKSPACE_METHODS, canPreemptMacRuntimeOperation, validateMacLifecycleMutation, validateWorkspaceActivity, validateClientRequest, validateClientResult } from '../protocol/client'
+import { CLIENT_METHODS, LOCAL_WORKSPACE_METHODS, canPreemptMacRuntimeOperation, validateMacLifecycleMutation, validateWindowsClientMutation, validateWorkspaceActivity, validateClientRequest, validateClientResult } from '../protocol/client'
 import { validateRequest, validateResult } from '../protocol/validation'
 import { READ_METHODS } from '../protocol/types'
 
@@ -52,6 +52,40 @@ describe('Windows client closed boundary', () => {
     expect(validateMacLifecycleMutation({ ...envelope, kind: 'channels_set', channels })).toBe(false)
     expect(validateMacLifecycleMutation({ ...envelope, kind: 'channels_set', run_ref: 'run', channels })).toBe(true)
     expect(validateMacLifecycleMutation({ ...envelope, kind: 'auth_respond', auth: { challenge_id: 'c', sequence: 1 } })).toBe(false)
+  })
+  it('allows a startup environment only for macOS in either run mode', () => {
+    const base = { ...envelope, kind: 'takeover_start' }
+    const channels = { company: false, personal: false }
+    for (const startMode of [{ mode: 'daily' }, { mode: 'validation', validation_seconds: 300 }]) {
+      const withoutChoice = { ...base, start: { ...startMode, channels } }
+      expect(validateMacLifecycleMutation(withoutChoice)).toBe(true)
+      expect(validateWindowsClientMutation(withoutChoice)).toBe(true)
+      for (const environment of ['shared', 'office', 'home']) {
+        const request = { ...base, start: { ...startMode, channels, environment } }
+        expect(validateMacLifecycleMutation(request)).toBe(true)
+        expect(validateWindowsClientMutation(request)).toBe(false)
+      }
+      for (const environment of ['', 'outside', null, ['home']]) {
+        expect(validateClientRequest('service.submit', { ...base, start: { ...startMode, channels, environment } })).toBe(false)
+      }
+    }
+  })
+  it('accepts a report of selected and optionally applied environment on the bound Mac run', () => {
+    const disabled = { desired: false, state: 'unknown', route: 'unknown' }
+    const snapshot = {
+      protocol_version: 1, service_state: 'local', takeover_state: 'managed_reported', profile_id: envelope.profile_id,
+      run_ref: 'run', revision: 1, auto_connect: false, restored: false, recovery_required: true,
+      desired: { company: false, personal: false }, company: disabled, personal: disabled,
+    }
+    expect(validateClientResult('service.snapshot', snapshot)).toBe(true)
+    expect(validateClientResult('service.snapshot', { ...snapshot, mac_environment: { selected: 'office' } })).toBe(true)
+    expect(validateClientResult('service.snapshot', { ...snapshot, mac_environment: { selected: 'home', applied: 'home' } })).toBe(true)
+    for (const mac_environment of [{ applied: 'home' }, { selected: 'private-path' }, { selected: 'shared', applied: false }, { selected: 'office', raw: 'private-path' }]) {
+      expect(validateClientResult('service.snapshot', { ...snapshot, mac_environment })).toBe(false)
+    }
+    const mac_environment = { selected: 'home' }
+    expect(validateClientResult('service.snapshot', { ...snapshot, mac_environment, run_ref: undefined })).toBe(false)
+    expect(validateClientResult('service.snapshot', { ...snapshot, mac_environment, service_state: 'available' })).toBe(false)
   })
   it('scopes macOS channel control and stop preemption to the live operation', () => {
     const channel = { desired: true, state: 'unknown', route: 'unknown' }

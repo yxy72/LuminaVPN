@@ -7,7 +7,7 @@ import { deflateSync } from 'node:zlib'
 import { Bridge } from './bridge'
 import { isRecord, validateRequest } from '../../protocol/validation'
 import { READ_METHODS, type Hello, type ReadMethod, type Profile } from '../../protocol/types'
-import { CLIENT_METHODS, canPreemptMacRuntimeOperation, opaqueID, validateClientRequest, validateMacLifecycleMutation, type ServiceSnapshot, type ServiceOperation, type ClientMethod } from '../../protocol/client'
+import { CLIENT_METHODS, canPreemptMacRuntimeOperation, opaqueID, validateClientRequest, validateMacLifecycleMutation, validateWindowsClientMutation, type ServiceSnapshot, type ServiceOperation, type ClientMethod } from '../../protocol/client'
 import { QuitController, checkMacExitOperation, classifyMacExit, confirmedUninstalledWithoutOwnedState, macExitSnapshotMatches } from './quit-controller'
 import {installedRecoveryScript} from './recovery-entry'
 import { assertLocalWorkspaceIdle, assertProfileMayLeave, commitProfileSelection, desktopHello, windowsClientProfile } from './profile-selection'
@@ -227,7 +227,7 @@ async function assertClientMethod(target: Bridge, method: ClientMethod, params: 
   if (bridge !== target) throw new Error('PROFILE_CHANGED')
   if (capabilities.config_write !== true || !capabilities.methods.includes(method)) throw new Error('CLIENT_UNAVAILABLE')
   if (method === 'service.submit' && (
-    capabilities.macos_client ? !validateMacLifecycleMutation(params) : params.kind === 'auth_begin'
+    capabilities.macos_client ? !validateMacLifecycleMutation(params) : !validateWindowsClientMutation(params)
   )) throw new Error('CLIENT_UNAVAILABLE')
   if (method === 'workspace.read' && (
     params.action === 'activity' && capabilities.windows_client === true ||

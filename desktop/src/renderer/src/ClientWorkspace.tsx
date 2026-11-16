@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
-import type { ClientAPI, DesiredChannels, ServiceMutation, ServiceOperation, ServiceSnapshot, WorkspaceReadBody, WorkspaceWrite, WorkspaceCommand, EnvironmentOverride, ServiceChannel } from '../../../protocol/client'
+import type { ClientAPI, DesiredChannels, MacStartEnvironment, ServiceMutation, ServiceOperation, ServiceSnapshot, WorkspaceReadBody, WorkspaceWrite, WorkspaceCommand, EnvironmentOverride, ServiceChannel } from '../../../protocol/client'
 import { canPreemptMacRuntimeOperation, validateWorkspaceActivity } from '../../../protocol/client'
 import type { Nodes, Subscriptions, Environment, Config } from '../../../protocol/types'
 import { isRecord } from '../../../protocol/validation-base'
@@ -56,6 +56,7 @@ export function ClientWorkspace({ page, api, refreshInventory, nodes, subscripti
   const [evidence,setEvidence]=useState(initialServiceEvidence)
   const snapshot=evidence.snapshot
   const [desired, setDesired] = useState<DesiredChannels>({ company: false, personal: false })
+  const [macEnvironment, setMacEnvironment] = useState<MacStartEnvironment>('shared')
   const [validationSeconds,setValidationSeconds]=useState('')
   const [policyText, setPolicyText] = useState(pretty(initialPolicy()))
   const [revision, setRevision] = useState('')
@@ -192,7 +193,7 @@ export function ClientWorkspace({ page, api, refreshInventory, nodes, subscripti
     if (macosClient && next.phase === 'authenticated') return next.run_ref ? '本次运行的公司会话已更新。' : '公司认证已完成，可以连接网络。'
     if (macosClient && next.phase === 'company_applied') return '公司 VPN 设置已应用到本次运行。'
     if (macosClient && next.phase === 'personal_applied') return '个人代理设置已应用到本次运行。'
-    if (macosClient && next.phase === 'ready_reported') return '已收到运行就绪报告，可在总览查看检查结果。'
+    if (macosClient && next.phase === 'ready_reported') return '已收到运行报告，可在总览查看检查结果。'
     if (macosClient && next.phase === 'stopped_reported') return '已收到停止报告。管理员恢复仍待确认。'
     return '操作完成。'
   }
@@ -257,6 +258,7 @@ export function ClientWorkspace({ page, api, refreshInventory, nodes, subscripti
       : macOperationText(operation)}</div>}
     {page === 'overview' && macosClient && <MacLifecycle snapshot={snapshot} configured={configured}
       busy={busy || workspaceActivity !== false} preemptible={macPreemptible} desired={desired} setDesired={setDesired}
+      environment={macEnvironment} setEnvironment={setMacEnvironment}
       start={start => { void submit({ kind: 'takeover_start', start }) }}
       setChannel={(channel, enabled) => {
         const current = runtimeChannel(channel)

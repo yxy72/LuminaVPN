@@ -113,7 +113,8 @@ func (n *macNetwork) observe(profile string) {
 	if identityChanged || n.current.stop != next.stop || n.current.status.Phase != next.status.Phase ||
 		n.current.status.ChannelGeneration != next.status.ChannelGeneration || n.current.status.AppliedGeneration != next.status.AppliedGeneration ||
 		n.current.status.DarwinCompanyControl != next.status.DarwinCompanyControl ||
-		n.current.status.DarwinPersonalControl != next.status.DarwinPersonalControl {
+		n.current.status.DarwinPersonalControl != next.status.DarwinPersonalControl ||
+		savedMacEnvironment(n.current) != savedMacEnvironment(next) {
 		n.revision++
 	}
 	if identityChanged {
@@ -172,6 +173,28 @@ func savedMacDesired(r macRunReport) p.DesiredChannels {
 	return p.DesiredChannels{Company: true, Personal: true}
 }
 
+func savedMacEnvironment(r macRunReport) p.MacEnvironment {
+	intent := r.status.DesiredChannels
+	if !r.reported || r.identity == nil || intent == nil {
+		return p.MacEnvironment{}
+	}
+	var view p.MacEnvironment
+	switch intent.Environment {
+	case "":
+		view.Selected = p.EnvironmentShared
+	case "office":
+		view.Selected = p.EnvironmentOffice
+	case "home":
+		view.Selected = p.EnvironmentHome
+	default:
+		return p.MacEnvironment{}
+	}
+	if macChannelsSettled(r) {
+		view.Applied = view.Selected
+	}
+	return view
+}
+
 func savedMacChannel(r macRunReport, channel string, desired bool) p.Channel {
 	view := p.Channel{Desired: desired, State: "unknown", Route: "unknown"}
 	h, ok := r.status.Channels[channel]
@@ -210,6 +233,7 @@ func (w *localWorkspace) networkSnapshot(ctx context.Context) (p.Snapshot, error
 	n.observe(w.commands.Profile)
 	r := n.current
 	desired := savedMacDesired(r)
+	environment := savedMacEnvironment(r)
 	s := p.Snapshot{
 		ProtocolVersion: 1, ServiceState: "local", TakeoverState: "idle", ProfileID: w.profile,
 		Revision: n.revision, RunRef: n.runRef, OperationID: w.activeID,
@@ -220,6 +244,9 @@ func (w *localWorkspace) networkSnapshot(ctx context.Context) (p.Snapshot, error
 		MacCompanyControl:  w.activeID == "" && macCompanyEligible(r),
 		MacPersonalControl: w.activeID == "" && macPersonalEligible(r),
 	}
+	if environment.Selected != "" {
+		s.MacEnvironment = &environment
+	}
 	switch {
 	case s.Restored:
 		s.TakeoverState = "restored"
@@ -228,7 +255,8 @@ func (w *localWorkspace) networkSnapshot(ctx context.Context) (p.Snapshot, error
 	case r.present:
 		if phase := oneOf(r.status.Phase, "", "prepared", "preparing", "connecting", "reconnecting", "starting",
 			"ready", "managed", "degraded", "authentication_required", "company_unavailable", "personal_unavailable",
-			"network_unavailable", "stopping", "stopped", "recovery_failed"); phase != "" {
+			"network_unavailable", "stopping", "stopped", "recovery_failed"); phase != "" &&
+			(phase != "ready" || r.status.DesiredChannels == nil || environment.Applied != "") {
 			s.TakeoverState = phase + "_reported"
 		} else {
 			s.TakeoverState = "unconfirmed"
@@ -379,7 +407,11 @@ func (w *localWorkspace) executeNetwork(job context.Context, done context.Cancel
 	switch m.Kind {
 	case p.TakeoverStart:
 		ctx, cancel := context.WithTimeout(job, 8*time.Minute)
-		intent := policy.ChannelIntent{Company: m.Start.Channels.Company, Personal: m.Start.Channels.Personal}
+		environment := m.Start.Environment
+		if environment == p.EnvironmentShared {
+			environment = ""
+		}
+		intent := policy.ChannelIntent{Company: m.Start.Channels.Company, Personal: m.Start.Channels.Personal, Environment: string(environment)}
 		err = w.network.start(ctx, w.commands.Profile, w.commands.Runtime, time.Duration(m.Start.ValidationSeconds)*time.Second, intent)
 		cancel()
 		phase, failureCode = "ready_reported", "MAC_START_FAILED"

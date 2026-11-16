@@ -238,6 +238,9 @@
                       "type": "integer",
                       "minimum": 1,
                       "maximum": 2700
+                    },
+                    "environment": {
+                      "$ref": "#/$defs/MacStartEnvironment"
                     }
                   },
                   "required": [
@@ -1675,6 +1678,22 @@
         "updated_at"
       ]
     },
+    "MacStartEnvironment": {
+      "enum": ["shared", "office", "home"]
+    },
+    "MacEnvironmentReport": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "selected": {
+          "$ref": "#/$defs/MacStartEnvironment"
+        },
+        "applied": {
+          "$ref": "#/$defs/MacStartEnvironment"
+        }
+      },
+      "required": ["selected"]
+    },
     "ServiceSnapshot": {
       "type": "object",
       "additionalProperties": false,
@@ -1720,6 +1739,9 @@
         },
         "mac_personal_control": {
           "type": "boolean"
+        },
+        "mac_environment": {
+          "$ref": "#/$defs/MacEnvironmentReport"
         },
         "operation_id": {
           "type": "string",

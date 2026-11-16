@@ -476,7 +476,7 @@ func (b *Broker) Submit(ctx context.Context, v VerifiedPrincipal, m p.Mutation) 
 	if err := ctx.Err(); err != nil {
 		return p.Operation{}, err
 	}
-	if m.Kind == p.AuthBegin || m.Validate() != nil {
+	if m.Kind == p.AuthBegin || m.Validate() != nil || (m.Start != nil && m.Start.Environment != "") {
 		return p.Operation{}, safeError("INVALID_REQUEST")
 	}
 	raw, _ := json.Marshal(m)

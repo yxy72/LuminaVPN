@@ -607,6 +607,77 @@ func TestMacStartupChannelsAndAuthenticationUseSeparateOperations(t *testing.T) 
 	macErrorCode(t, err, "RECOVERY_REQUIRED")
 }
 
+func TestMacStartupEnvironmentFlowsIntoTheNativeIntent(t *testing.T) {
+	for _, tt := range []struct {
+		wire p.StartEnvironment
+		want string
+	}{
+		{"", ""}, {p.EnvironmentShared, ""}, {p.EnvironmentOffice, "office"}, {p.EnvironmentHome, "home"},
+	} {
+		t.Run(string(tt.wire), func(t *testing.T) {
+			d, current := macBackendFixture(t)
+			expected := policy.ChannelIntent{Personal: true, Environment: tt.want}
+			ready := makeMacReport(t, "ready")
+			ready.status.DesiredChannels, ready.status.AppliedChannels = &expected, &expected
+			ready.status.TakeoverActive = true
+			ready.status.ChannelGeneration, ready.status.AppliedGeneration = 1, 1
+			d.localWorkspace.network.start = func(_ context.Context, _, _ string, _ time.Duration, got policy.ChannelIntent) error {
+				if got != expected {
+					return fmt.Errorf("native startup got %+v, want %+v", got, expected)
+				}
+				current.Store(&ready)
+				return nil
+			}
+			m := macMutation(macSnapshot(t, d), "startup", p.TakeoverStart)
+			m.Start.Channels = p.DesiredChannels{Personal: true}
+			m.Start.Environment = tt.wire
+			if _, err := macCall(t, d, "service.submit", m); err != nil {
+				t.Fatal(err)
+			}
+			if start := macCompleted(t, d, "startup"); start.Error != nil || start.Phase != "ready_reported" {
+				t.Fatal(start)
+			}
+			want := tt.wire
+			if want == "" {
+				want = p.EnvironmentShared
+			}
+			got := macSnapshot(t, d)
+			if got.MacEnvironment == nil || got.MacEnvironment.Selected != want || got.MacEnvironment.Applied != want {
+				t.Fatal(got)
+			}
+		})
+	}
+}
+
+func TestMacSnapshotDoesNotConfirmAnUnsettledEnvironment(t *testing.T) {
+	d, current := macBackendFixture(t)
+	report := makeMacReport(t, "ready")
+	office := policy.ChannelIntent{Company: true, Environment: "office"}
+	home := office
+	home.Environment = "home"
+	report.status.DesiredChannels, report.status.AppliedChannels = &office, &home
+	report.status.TakeoverActive = true
+	report.status.ChannelGeneration, report.status.AppliedGeneration = 1, 1
+	current.Store(&report)
+	pending := macSnapshot(t, d)
+	if pending.TakeoverState == "ready_reported" || pending.MacEnvironment == nil ||
+		pending.MacEnvironment.Selected != p.EnvironmentOffice || pending.MacEnvironment.Applied != "" {
+		t.Fatal(pending)
+	}
+	report.status.AppliedChannels = &office
+	current.Store(&report)
+	applied := macSnapshot(t, d)
+	if applied.TakeoverState != "ready_reported" || applied.MacEnvironment == nil ||
+		applied.MacEnvironment.Applied != p.EnvironmentOffice || applied.Revision == pending.Revision {
+		t.Fatal(applied)
+	}
+	report.stop = true
+	current.Store(&report)
+	if stopped := macSnapshot(t, d); stopped.MacEnvironment.Applied != "" || stopped.TakeoverState == "ready_reported" {
+		t.Fatal(stopped)
+	}
+}
+
 func TestMacSnapshotDistinguishesDesiredFromAppliedChannels(t *testing.T) {
 	d, current := macBackendFixture(t)
 	run := makeMacReport(t, "ready")

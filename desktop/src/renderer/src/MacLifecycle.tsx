@@ -1,7 +1,12 @@
 import { useState } from 'react'
-import type { DesiredChannels, ServiceMutation, ServiceOperation, ServiceSnapshot } from '../../../protocol/client'
+import { isMacStartEnvironment } from '../../../protocol/client'
+import type { DesiredChannels, MacStartEnvironment, ServiceMutation, ServiceOperation, ServiceSnapshot } from '../../../protocol/client'
 
 type MacStart = Extract<ServiceMutation, { kind: 'takeover_start' }>['start']
+
+const environmentLabels: Record<MacStartEnvironment, string> = {
+  shared: '共享基础规则', office: '办公', home: '家庭',
+}
 
 const states: Record<string, string> = {
   idle: '当前配置没有运行',
@@ -33,19 +38,21 @@ export function macOperationText(operation: ServiceOperation): string {
     applying_company: '正在应用公司 VPN', company_applied: '公司 VPN 已应用',
     applying_personal: '正在应用个人代理', personal_applied: '个人代理已应用',
     waiting_for_stop_report: '等待停止报告', recovering: '等待管理员恢复',
-    ready_reported: '运行报告就绪', stopped_reported: '已收到停止报告',
+    ready_reported: '已收到运行报告', stopped_reported: '已收到停止报告',
     restored: '管理员恢复已确认', completed: '已完成', failed: '未完成', cancelled: '已取消',
   }
   return `${actions[operation.kind] ?? '操作'} · ${progress[operation.phase] ?? '待确认'}`
 }
 
-export function MacLifecycle({ snapshot, configured, busy, preemptible, desired, setDesired, start, setChannel, authenticate, stop, exit }: {
+export function MacLifecycle({ snapshot, configured, busy, preemptible, desired, setDesired, environment, setEnvironment, start, setChannel, authenticate, stop, exit }: {
   snapshot: ServiceSnapshot | null
   configured: boolean
   busy: boolean
   preemptible: boolean
   desired: DesiredChannels
   setDesired: (desired: DesiredChannels) => void
+  environment: MacStartEnvironment
+  setEnvironment: (environment: MacStartEnvironment) => void
   start: (request: MacStart) => void
   setChannel: (channel: keyof DesiredChannels, enabled: boolean) => void
   authenticate: (runtime: boolean) => void
@@ -66,9 +73,16 @@ export function MacLifecycle({ snapshot, configured, busy, preemptible, desired,
   const channels = showRun ? snapshot.desired : desired
   const mayStop = local && !!snapshot.run_ref && state !== 'restored' && state !== 'stopped_reported'
   const canAuthenticate = canEditCompany && snapshot.desired.company || canConfigure && configured && desired.company
+  const environmentReport = showRun ? snapshot.mac_environment : undefined
+  const waitingForEnvironment = environmentReport && environmentReport.applied !== environmentReport.selected
+  const status = waitingForEnvironment && (state === 'ready_reported' || state === 'managed_reported')
+    ? '等待本次运行的环境应用报告'
+    : states[state] ?? (snapshot ? '当前运行待确认' : '正在读取网络控制状态')
   return <section className="client-card" aria-labelledby="mac-lifecycle-title">
     <h2 id="mac-lifecycle-title">网络接管</h2>
-    <p role="status">{states[state] ?? (snapshot ? '当前运行待确认' : '正在读取网络控制状态')}</p>
+    <p role="status">{status}</p>
+    {environmentReport && <p>已选择 {environmentLabels[environmentReport.selected]} ·
+      已应用 {environmentReport.applied ? environmentLabels[environmentReport.applied] : '等待报告'}</p>}
     <p>接管期间，关闭公司 VPN 会阻断公司目标，关闭个人代理后个人目标走直连。启动与验证恢复可能需要 macOS 管理员授权。</p>
     <div className="client-actions">
       <label><input type="checkbox" checked={channels.company} disabled={!canConfigure && !canEditCompany}
@@ -88,6 +102,13 @@ export function MacLifecycle({ snapshot, configured, busy, preemptible, desired,
     {showRun && !busy && !canEditPersonal && <p>当前运行无法切换个人代理，可在下次连接时调整。</p>}
     {!configured && <p>请先在工作空间设置中保存有效策略。</p>}
     <div className="client-actions">
+      {mayStart && <label>启动环境<select value={environment} disabled={!canConfigure} onChange={event => {
+        if (isMacStartEnvironment(event.target.value)) setEnvironment(event.target.value)
+      }}>
+        <option value="shared">{environmentLabels.shared}</option>
+        <option value="office">{environmentLabels.office}</option>
+        <option value="home">{environmentLabels.home}</option>
+      </select></label>}
       <label>运行模式<select value={mode} disabled={!canConfigure} onChange={event => setMode(event.target.value === 'validation' ? 'validation' : 'daily')}>
         <option value="daily">日用连接</option>
         <option value="validation">限时验证</option>
@@ -98,7 +119,7 @@ export function MacLifecycle({ snapshot, configured, busy, preemptible, desired,
     <div className="client-actions">
       <button disabled={!canAuthenticate} onClick={() => authenticate(canEditCompany)}>在终端进行公司认证</button>
       <button disabled={!canConfigure || !configured || mode === 'validation' && !validDuration} onClick={() => {
-        start(mode === 'daily' ? { mode, channels: desired } : { mode, channels: desired, validation_seconds: seconds })
+        start(mode === 'daily' ? { mode, channels: desired, environment } : { mode, channels: desired, environment, validation_seconds: seconds })
       }}>连接网络</button>
       <button disabled={!mayStop || busy && !preemptible} onClick={stop}>请求停止</button>
       <button disabled={busy && !preemptible} onClick={exit}>{snapshot?.run_ref && state !== 'restored' ? '验证恢复并退出' : '退出 LuminaVPN'}</button>

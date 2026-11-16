@@ -240,6 +240,8 @@ let run = initialIdle ? undefined : 'fixture-run-1'
 let phase = initialIdle ? 'idle' : 'ready_reported'
 let channels = { company: false, personal: !initialIdle }
 let frozenPool = false
+let selectedEnvironment
+let appliedEnvironment
 let revision = 1
 let active
 const operations = new Map()
@@ -261,6 +263,7 @@ function snapshot() {
       route: running && !channels.personal && active?.phase !== 'applying_personal' ? 'direct_reported' : 'unknown' },
     recovery_required: running && !restored, restored, mac_company_control: !active && running,
     mac_personal_control: !active && running && frozenPool,
+    mac_environment: selectedEnvironment && { selected: selectedEnvironment, applied: appliedEnvironment },
   }
 }
 
@@ -309,6 +312,8 @@ function submit(request) {
       run = 'fixture-run-' + ++runNumber
       channels = request.start.channels
       frozenPool = initialIdle && !existsSync(join(process.cwd(), 'missing-pool'))
+      selectedEnvironment = request.start.environment ?? 'shared'
+      appliedEnvironment = existsSync(join(process.cwd(), 'hold-environment')) ? undefined : selectedEnvironment
       phase = 'ready_reported'
       settle(operation, phase)
       break
@@ -323,6 +328,11 @@ function submit(request) {
 }
 
 function handle(method, params) {
+  const environmentMarker = join(process.cwd(), 'apply-environment')
+  if (selectedEnvironment && existsSync(environmentMarker)) {
+    unlinkSync(environmentMarker)
+    appliedEnvironment = selectedEnvironment
+  }
   if (active?.kind === 'channels_set') {
     const changed = active.phase === 'applying_personal' ? 'personal' : 'company'
     const marker = join(process.cwd(), 'apply-' + changed)
@@ -594,6 +604,38 @@ test('macOS leaves Personal unavailable during a run without frozen candidates',
     await expect(personal).not.toBeChecked()
     await expect(personal).toBeDisabled()
     await expect(page.getByRole('checkbox', { name: '开启公司 VPN', exact: true })).toBeEnabled()
+  } finally { await close() }
+})
+
+test('macOS sends a startup-only environment and waits for its applied report', async () => {
+  test.skip(process.platform !== 'darwin', 'Requires the macOS desktop main process')
+  const { root, application, close } = await launchMacChannelFixture(true)
+  try {
+    const page = await application.firstWindow()
+    const environment = page.getByRole('combobox', { name: '启动环境', exact: true })
+    await expect(environment).toHaveValue('shared')
+    await environment.selectOption('office')
+    await page.getByRole('button', { name: '工作空间设置', exact: true }).click()
+    await page.getByRole('button', { name: /^总览/ }).click()
+    await expect(environment).toHaveValue('office')
+    await page.getByLabel('运行模式').selectOption('validation')
+    await page.getByLabel('验证时长（秒）').fill('45')
+
+    await writeFile(join(root, 'hold-environment'), '')
+    await page.getByRole('button', { name: '连接网络', exact: true }).click()
+    await expect(environment).toHaveCount(0)
+    await expect(page.getByText(/已选择 办公.*已应用 等待报告/)).toBeVisible()
+    await expect(page.getByText('等待本次运行的环境应用报告', { exact: true })).toBeVisible()
+    await expect(page.getByText('运行报告就绪', { exact: true })).toHaveCount(0)
+    const accepted = JSON.parse((await readFile(join(root, 'accepted.jsonl'), 'utf8')).trim())
+    expect(accepted.start).toEqual({
+      mode: 'validation', channels: { company: false, personal: false }, validation_seconds: 45, environment: 'office',
+    })
+
+    await writeFile(join(root, 'apply-environment'), '')
+    await expect(page.getByText(/已选择 办公.*已应用 办公/)).toBeVisible()
+    await expect(page.getByText('运行报告就绪', { exact: true })).toBeVisible()
+    await expect(environment).toHaveCount(0)
   } finally { await close() }
 })
 

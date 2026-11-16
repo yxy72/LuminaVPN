@@ -41,10 +41,32 @@ type DesiredChannels struct {
 	Personal bool `json:"personal"`
 }
 
+type StartEnvironment string
+
+const (
+	EnvironmentShared StartEnvironment = "shared"
+	EnvironmentOffice StartEnvironment = "office"
+	EnvironmentHome   StartEnvironment = "home"
+)
+
+func (e StartEnvironment) valid() bool {
+	return e == EnvironmentShared || e == EnvironmentOffice || e == EnvironmentHome
+}
+
+func (e *StartEnvironment) UnmarshalJSON(raw []byte) error {
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil || !StartEnvironment(value).valid() {
+		return errors.New("invalid macOS startup environment")
+	}
+	*e = StartEnvironment(value)
+	return nil
+}
+
 type StartPayload struct {
-	Channels          DesiredChannels `json:"channels"`
-	Mode              string          `json:"mode"`
-	ValidationSeconds int             `json:"validation_seconds,omitempty"`
+	Channels          DesiredChannels  `json:"channels"`
+	Mode              string           `json:"mode"`
+	ValidationSeconds int              `json:"validation_seconds,omitempty"`
+	Environment       StartEnvironment `json:"environment,omitempty"`
 }
 type StopPayload struct{}
 type AuthBeginPayload struct{}
@@ -207,7 +229,7 @@ func (m Mutation) Validate() error {
 	valid := false
 	switch m.Kind {
 	case TakeoverStart:
-		valid = m.Start != nil
+		valid = m.Start != nil && (m.Start.Environment == "" || m.Start.Environment.valid())
 		if valid {
 			switch m.Start.Mode {
 			case "daily":
@@ -356,6 +378,10 @@ type LocalExitProof struct {
 	ServiceAbsent bool   `json:"service_absent"`
 	NoOwnedState  bool   `json:"no_owned_state"`
 }
+type MacEnvironment struct {
+	Selected StartEnvironment `json:"selected"`
+	Applied  StartEnvironment `json:"applied,omitempty"`
+}
 type Snapshot struct {
 	ProtocolVersion    int              `json:"protocol_version"`
 	ServiceState       string           `json:"service_state"`
@@ -376,6 +402,7 @@ type Snapshot struct {
 	LocalExitProof     *LocalExitProof  `json:"local_exit_proof,omitempty"`
 	MacCompanyControl  bool             `json:"mac_company_control,omitempty"`
 	MacPersonalControl bool             `json:"mac_personal_control,omitempty"`
+	MacEnvironment     *MacEnvironment  `json:"mac_environment,omitempty"`
 }
 
 type Client interface {

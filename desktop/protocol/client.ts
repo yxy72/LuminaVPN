@@ -1,5 +1,7 @@
 import { isRecord } from './validation-base'
 export type DesiredChannels = { company: boolean; personal: boolean }
+export type MacStartEnvironment = 'shared' | 'office' | 'home'
+export interface MacEnvironmentReport { selected: MacStartEnvironment; applied?: MacStartEnvironment }
 export type OperationKind = 'takeover_start' | 'channels_set' | 'takeover_stop' | 'exit_restore' | 'profile_apply' | 'auth_begin' | 'auth_respond' | 'auth_cancel' | 'node_select' | 'settings_apply' | 'workspace' | 'attach_enrollment'
 export interface SafeServiceError { code: string; message: string; retryable: boolean }
 export interface ServiceOperation { operation_id: string; request_id: string; profile_id: string; run_ref?: string; revision: number; kind: OperationKind; phase: string; completed: boolean; restored: boolean; created_at: string; updated_at: string; error?: SafeServiceError; first_failure?: SafeServiceError;alias_of?:string }
@@ -14,10 +16,10 @@ export interface ServiceChannel { desired: boolean; state: string; route: string
 export interface ServiceSettings { auto_connect: boolean; environment: 'office'|'home'; office_overrides: EnvironmentOverride[]; home_overrides: EnvironmentOverride[] }
 export interface AuthField { field_id:string; kind:'username'|'password'|'otp'|'text'|'select'; label_code?:string; choices?:{choice_id:string;label:string}[] }
 export interface AuthFieldValue {field_id:string;value:string}
-export interface ServiceSnapshot { protocol_version: 1; service_state: string; takeover_state: string; profile_id: string; revision: number; run_ref?: string; desired: DesiredChannels; company: ServiceChannel; personal: ServiceChannel; direct?: ServiceChannel; mac_company_control?: boolean; mac_personal_control?: boolean; operation_id?: string; challenge?: { challenge_id: string; kind: string; expires_at: string; sequence:number; fields?:AuthField[] }; recovery_required: boolean; restored: boolean; auto_connect: boolean; settings?: ServiceSettings; local_exit_proof?:{source:'LOCALONLY';service_absent:boolean;no_owned_state:boolean} }
+export interface ServiceSnapshot { protocol_version: 1; service_state: string; takeover_state: string; profile_id: string; revision: number; run_ref?: string; desired: DesiredChannels; company: ServiceChannel; personal: ServiceChannel; direct?: ServiceChannel; mac_company_control?: boolean; mac_personal_control?: boolean; mac_environment?: MacEnvironmentReport; operation_id?: string; challenge?: { challenge_id: string; kind: string; expires_at: string; sequence:number; fields?:AuthField[] }; recovery_required: boolean; restored: boolean; auto_connect: boolean; settings?: ServiceSettings; local_exit_proof?:{source:'LOCALONLY';service_absent:boolean;no_owned_state:boolean} }
 export interface EnvironmentOverride { type: 'domain' | 'domain_suffix' | 'cidr'; value: string; target: 'personal' | 'direct' }
 export type ServiceMutation = { request_id: string; profile_id: string; expected_revision: number; run_ref?: string } & (
-  { kind: 'takeover_start'; start: { channels: DesiredChannels } & ({mode:'daily';validation_seconds?:never}|{mode:'validation';validation_seconds:number}) } | { kind: 'channels_set'; channels: DesiredChannels } |
+  { kind: 'takeover_start'; start: { channels: DesiredChannels; environment?: MacStartEnvironment } & ({mode:'daily';validation_seconds?:never}|{mode:'validation';validation_seconds:number}) } | { kind: 'channels_set'; channels: DesiredChannels } |
   { kind: 'takeover_stop' | 'exit_restore'; stop: Record<string, never> } |
   { kind: 'auth_begin'; begin_auth: Record<string, never> } |
   { kind: 'auth_respond'; auth: { challenge_id: string; sequence:number; username?: string; password?: string; otp?: string; fields?:AuthFieldValue[] } } |
@@ -49,6 +51,8 @@ export function validateWorkspaceActivity(value: unknown): value is WorkspaceAct
 }
 export const opaqueID = (x: unknown): x is string => typeof x === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(x)
 const text = (x: unknown, max = 65536): x is string => typeof x === 'string' && x.length <= max && new TextEncoder().encode(x).byteLength <= max
+export const isMacStartEnvironment = (x: unknown): x is MacStartEnvironment =>
+  x === 'shared' || x === 'office' || x === 'home'
 const uint = (x: unknown): x is number => Number.isSafeInteger(x) && (x as number) >= 0
 const bool = (x: unknown): x is boolean => typeof x === 'boolean'
 const own = (x: Record<string, unknown>, keys: string[]) => Object.keys(x).every(k => keys.includes(k))
@@ -59,7 +63,14 @@ export function validateMutation(value: unknown): value is ServiceMutation {
   const base = ['request_id', 'profile_id', 'expected_revision', 'run_ref', 'kind']
   const payload = (name: string) => own(value, [...base, name]) && isRecord(value[name])
   switch (value.kind) {
-    case 'takeover_start': return payload('start') && own(value.start as Record<string, unknown>, ['channels','mode','validation_seconds']) && channels((value.start as Record<string, unknown>).channels) && (((value.start as Record<string,unknown>).mode === 'daily'&&(value.start as Record<string,unknown>).validation_seconds===undefined)||((value.start as Record<string,unknown>).mode==='validation'&&uint((value.start as Record<string,unknown>).validation_seconds)&&Number((value.start as Record<string,unknown>).validation_seconds)>=1&&Number((value.start as Record<string,unknown>).validation_seconds)<=2700))
+    case 'takeover_start': {
+      const start = value.start
+      if (!payload('start') || !isRecord(start) || !own(start, ['channels', 'mode', 'validation_seconds', 'environment']) ||
+          !channels(start.channels) || start.environment !== undefined && !isMacStartEnvironment(start.environment)) return false
+      if (start.mode === 'daily') return start.validation_seconds === undefined
+      return start.mode === 'validation' && uint(start.validation_seconds) &&
+        start.validation_seconds >= 1 && start.validation_seconds <= 2700
+    }
     case 'channels_set': return own(value, [...base, 'channels']) && channels(value.channels)
     case 'takeover_stop': case 'exit_restore': return payload('stop') && Object.keys(value.stop as object).length === 0
     case 'auth_begin': return payload('begin_auth') && Object.keys(value.begin_auth as object).length === 0
@@ -80,6 +91,10 @@ export function validateMacLifecycleMutation(value: unknown): boolean {
     case 'channels_set': case 'takeover_stop': case 'exit_restore': return opaqueID(value.run_ref)
     default: return false
   }
+}
+export function validateWindowsClientMutation(value: unknown): boolean {
+  if (!validateMutation(value) || value.kind === 'auth_begin') return false
+  return value.kind !== 'takeover_start' || value.start.environment === undefined
 }
 export function canPreemptMacRuntimeOperation(snapshot: ServiceSnapshot, operation?: ServiceOperation | null): boolean {
   if (snapshot.service_state !== 'local' || !opaqueID(snapshot.run_ref) || !operation || operation.completed ||
@@ -130,7 +145,10 @@ export function validateClientResult(method: string, x: unknown): boolean {
   const channel = (v: unknown) => isRecord(v) && own(v,['desired','state','route','reason','health_epoch','ipv6_state','health','probe']) && bool(v.desired) && text(v.state,128) && text(v.route,128) && ['reason','health_epoch','ipv6_state'].every(k=>v[k]===undefined || text(v[k],128)) && health(v.health) && probe(v.probe)
   const macControl = (v: unknown) => v === undefined || bool(v) &&
     x.service_state === 'local' && (v === false || opaqueID(x.run_ref))
-  if (method==='service.snapshot') return own(x,['protocol_version','service_state','takeover_state','profile_id','revision','run_ref','desired','company','personal','direct','mac_company_control','mac_personal_control','operation_id','challenge','recovery_required','restored','auto_connect','settings','local_exit_proof']) && x.protocol_version===1 && text(x.service_state,128) && text(x.takeover_state,128) && opaqueID(x.profile_id) && uint(x.revision) && optionalID(x.run_ref) && optionalID(x.operation_id) && channels(x.desired) && channel(x.company) && channel(x.personal) && (x.direct === undefined || channel(x.direct)) && macControl(x.mac_company_control) && macControl(x.mac_personal_control) && bool(x.auto_connect) && bool(x.restored) && bool(x.recovery_required) && (x.local_exit_proof===undefined || isRecord(x.local_exit_proof) && own(x.local_exit_proof,['source','service_absent','no_owned_state']) && x.local_exit_proof.source==='LOCALONLY' && bool(x.local_exit_proof.service_absent) && bool(x.local_exit_proof.no_owned_state)) && (x.settings===undefined || settings(x.settings)) && (x.challenge===undefined || isRecord(x.challenge) && own(x.challenge,['challenge_id','kind','expires_at','sequence','fields']) && opaqueID(x.challenge.challenge_id) && text(x.challenge.kind,64) && text(x.challenge.expires_at,64) && uint(x.challenge.sequence) && x.challenge.sequence>0 && (x.challenge.fields===undefined||Array.isArray(x.challenge.fields)&&x.challenge.fields.length<=16&&x.challenge.fields.every(field=>isRecord(field)&&own(field,['field_id','kind','label_code','choices'])&&opaqueID(field.field_id)&&['username','password','otp','text','select'].includes(String(field.kind))&&(field.label_code===undefined||opaqueID(field.label_code))&&(field.choices===undefined||Array.isArray(field.choices)&&field.choices.length<=64&&field.choices.every(choice=>isRecord(choice)&&own(choice,['choice_id','label'])&&opaqueID(choice.choice_id)&&text(choice.label,128))))))
+  const macEnvironment = (v: unknown) => v === undefined || isRecord(v) && x.service_state === 'local' &&
+    opaqueID(x.run_ref) && own(v, ['selected', 'applied']) &&
+    isMacStartEnvironment(v.selected) && (v.applied === undefined || isMacStartEnvironment(v.applied))
+  if (method==='service.snapshot') return own(x,['protocol_version','service_state','takeover_state','profile_id','revision','run_ref','desired','company','personal','direct','mac_company_control','mac_personal_control','mac_environment','operation_id','challenge','recovery_required','restored','auto_connect','settings','local_exit_proof']) && x.protocol_version===1 && text(x.service_state,128) && text(x.takeover_state,128) && opaqueID(x.profile_id) && uint(x.revision) && optionalID(x.run_ref) && optionalID(x.operation_id) && channels(x.desired) && channel(x.company) && channel(x.personal) && (x.direct === undefined || channel(x.direct)) && macControl(x.mac_company_control) && macControl(x.mac_personal_control) && macEnvironment(x.mac_environment) && bool(x.auto_connect) && bool(x.restored) && bool(x.recovery_required) && (x.local_exit_proof===undefined || isRecord(x.local_exit_proof) && own(x.local_exit_proof,['source','service_absent','no_owned_state']) && x.local_exit_proof.source==='LOCALONLY' && bool(x.local_exit_proof.service_absent) && bool(x.local_exit_proof.no_owned_state)) && (x.settings===undefined || settings(x.settings)) && (x.challenge===undefined || isRecord(x.challenge) && own(x.challenge,['challenge_id','kind','expires_at','sequence','fields']) && opaqueID(x.challenge.challenge_id) && text(x.challenge.kind,64) && text(x.challenge.expires_at,64) && uint(x.challenge.sequence) && x.challenge.sequence>0 && (x.challenge.fields===undefined||Array.isArray(x.challenge.fields)&&x.challenge.fields.length<=16&&x.challenge.fields.every(field=>isRecord(field)&&own(field,['field_id','kind','label_code','choices'])&&opaqueID(field.field_id)&&['username','password','otp','text','select'].includes(String(field.kind))&&(field.label_code===undefined||opaqueID(field.label_code))&&(field.choices===undefined||Array.isArray(field.choices)&&field.choices.length<=64&&field.choices.every(choice=>isRecord(choice)&&own(choice,['choice_id','label'])&&opaqueID(choice.choice_id)&&text(choice.label,128))))))
   if (method==='service.submit' || method==='service.operation' || method==='workspace.submit') return own(x,['operation_id','request_id','profile_id','run_ref','revision','kind','phase','completed','restored','created_at','updated_at','error','first_failure','alias_of']) && opaqueID(x.operation_id) && opaqueID(x.request_id) && opaqueID(x.profile_id) && uint(x.revision) && optionalID(x.run_ref) && ['takeover_start','channels_set','takeover_stop','exit_restore','profile_apply','auth_begin','auth_respond','auth_cancel','node_select','settings_apply','workspace','attach_enrollment'].includes(String(x.kind)) && text(x.phase,64) && bool(x.completed) && bool(x.restored) && text(x.created_at,64) && text(x.updated_at,64) && error(x.error) && error(x.first_failure) && optionalID(x.alias_of)
   return method==='workspace.read' && opaqueID(x.profile_id)
 }

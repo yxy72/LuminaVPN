@@ -6,6 +6,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -57,7 +59,7 @@ func TestMacCanceledStartPinsStopAfterNativeAuthorization(t *testing.T) {
 	_, err = launchPreparedRun(ctx, stop, launch, func(string) (engine.Status, error) {
 		t.Fatal("late native success should not begin polling readiness")
 		return engine.Status{}, nil
-	}, time.Second, time.Millisecond)
+	}, time.Second, time.Millisecond, nil)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
@@ -75,7 +77,7 @@ func TestMacUnsettledStartTimeoutRequestsIndependentStop(t *testing.T) {
 	}
 	defer stop.Close()
 	_, err = launchPreparedRun(t.Context(), stop, func(context.Context, string, string) error { return nil },
-		func(string) (engine.Status, error) { return engine.Status{Phase: "starting"}, nil }, 20*time.Millisecond, time.Millisecond)
+		func(string) (engine.Status, error) { return engine.Status{Phase: "starting"}, nil }, 20*time.Millisecond, time.Millisecond, nil)
 	if err == nil {
 		t.Fatal("an unresolved launch was reported ready")
 	}
@@ -92,11 +94,90 @@ func TestMacSuccessfulStartLeavesRunActive(t *testing.T) {
 	}
 	defer stop.Close()
 	status, err := launchPreparedRun(t.Context(), stop, func(context.Context, string, string) error { return nil },
-		func(string) (engine.Status, error) { return engine.Status{Phase: "ready"}, nil }, time.Second, time.Millisecond)
+		func(string) (engine.Status, error) { return engine.Status{Phase: "ready"}, nil }, time.Second, time.Millisecond, nil)
 	if err != nil || status.Phase != "ready" {
 		t.Fatal(status.Phase, err)
 	}
 	requireNoStopMarker(t, first)
+}
+
+func TestMacStartupReadinessRequiresTheExactAppliedEnvironment(t *testing.T) {
+	_, first, _ := macStopFixture(t)
+	stop, err := bindRunStop(t.Context(), options{run: first})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop.Close()
+	expected := policy.ChannelIntent{Personal: true, Environment: "office"}
+	wrong := expected
+	wrong.Environment = "home"
+	calls := 0
+	ready, err := launchPreparedRun(t.Context(), stop, func(context.Context, string, string) error { return nil },
+		func(string) (engine.Status, error) {
+			calls++
+			s := engine.Status{Phase: "ready", TakeoverActive: true, DesiredChannels: &expected,
+				AppliedChannels: &expected, ChannelGeneration: 1, AppliedGeneration: 1}
+			switch calls {
+			case 1:
+				s.AppliedChannels = &wrong
+			case 2:
+				s.AppliedGeneration = 0
+			}
+			return s, nil
+		}, time.Second, time.Millisecond, &expected)
+	if err != nil || ready.Phase != "ready" || calls != 3 {
+		t.Fatalf("startup used a wrong or unsettled environment report: phase=%s checks=%d err=%v", ready.Phase, calls, err)
+	}
+	requireNoStopMarker(t, first)
+}
+
+func TestMacLaunchEnvironmentSelectsExistingCoreTrafficAndResolverOverrides(t *testing.T) {
+	profile := testutil.PrivateTempDir(t)
+	cfg, err := policy.Decode([]byte(Example))
+	if err != nil {
+		t.Fatal(err)
+	}
+	domain := cfg.Personal.Domains[0]
+	const homeDomain = "home-only.example"
+	cfg.OfficeOverrides = []policy.Override{{Type: "domain", Value: domain, Target: "direct"}}
+	cfg.HomeOverrides = []policy.Override{{Type: "domain", Value: homeDomain, Target: "personal"}}
+	if err := securefile.Write(filepath.Join(profile, "policy.json"), cfg); err != nil {
+		t.Fatal(err)
+	}
+	raw := []policy.Node{{"type": "vless", "server": "203.0.113.7", "port": 443, "uuid": "fixture-node", "tls": true}}
+	if err := securefile.Write(filepath.Join(profile, "nodes.json"), raw); err != nil {
+		t.Fatal(err)
+	}
+	binding := policy.Binding{Physical: "en0", VPN: "utun40", TUN: "utun41", ControllerPort: 19091}
+	for _, test := range []struct{ env, target, route, resolver string }{
+		{"", domain, "PERSONAL", "https://1.1.1.1/dns-query#PERSONAL"},
+		{"office", domain, "PHYSICAL", "udp://223.5.5.5#PHYSICAL"},
+		{"home", homeDomain, "PERSONAL", "https://1.1.1.1/dns-query#PERSONAL"},
+	} {
+		intent := policy.ChannelIntent{Personal: true, Environment: test.env}
+		o := options{profile: profile, mode: engine.Daily, channels: &intent}
+		selected, err := readLaunchPolicy(o)
+		if err != nil {
+			t.Fatal(err)
+		}
+		effective, nodes, err := effectiveLaunchProfile(o, selected)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, err := policy.CompileWithIntent(effective, nodes, binding, strings.Repeat("s", 32), launchIntent(o))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resolver, _ := out["dns"].(map[string]any)["nameserver-policy"].(map[string]any)[test.target].([]string)
+		rules := out["rules"].([]string)
+		index := slices.IndexFunc(rules, func(rule string) bool { return strings.HasPrefix(rule, "DOMAIN,"+test.target+",") })
+		if index < 0 || rules[index] != "DOMAIN,"+test.target+","+test.route || !slices.Equal(resolver, []string{test.resolver}) {
+			t.Fatalf("incorrect core traffic or DNS for %q: %v %v", test.env, rules, resolver)
+		}
+		if test.env != "home" && slices.Contains(rules, "DOMAIN,"+homeDomain+",PERSONAL") {
+			t.Fatal("Home override leaked into another environment")
+		}
+	}
 }
 
 func TestLateAuthReceiptCannotRecreateOrWriteIntoReplacedRequest(t *testing.T) {
