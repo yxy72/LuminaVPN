@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "upstream": "https://github.com/MetaCubeX/mihomo",
+  "upstream_tag": "v1.19.32",
+  "upstream_commit": "88dcbf7f1614a67c3b36b848ee3592dfa92ada36",
+  "upstream_commit_build_time": "2026-09-30T22:35:49+08:00",
+  "source_archive_sha256": "a1cf2b8f4ffb3c90c9bb7a37a27a94862933a456a998f85d619e5917f4384b38",
+  "license": "GPL-3.0",
+  "license_file": "mihomo-v1.19.32.LICENSE",
+  "base_recipe_sha256": "5bc96e74488de0f5cf6a60afd284033227786ca0098692ff8f99ac2d09472da1",
+  "lease_patch_sha256": "bcb01530f8c593ce7e53d5e9d30788edbd3a994c7571f310080fda262478351b",
+  "binary_version": "v1.19.32-lumina.2",
+  "go_version": "go1.27.3",
+  "compiler_sha256": {
+    "darwin/arm64": "aa355b078a81158d418079a3f8c776719eb99cc6f527e39ffa3250c66566aafb",
+    "windows/amd64": "83b7ba66215e696414fa49462d0db2da4f4cf15c7bebd42f0b189fa04866999d"
+  },
+  "binary_sha256": {
+    "darwin/arm64": "ee9a38c416bd18b73a6aee05268163463bc846ffbcc0631508a266c9f008ed03",
+    "windows/amd64": "2db75d1949e893b3bf2d2e1992a4b5a139e3f259cde49f110f10a387018a2c47"
+  }
+}
