@@ -135,7 +135,21 @@ test('desktop reads real fixtures, protects IPC and ages evidence', async () => 
     if (macClient) {
       await expect(connect).toBeEnabled()
       const snapshot = await page.evaluate(() => window.lumina.client!.snapshot())
-      expect(snapshot).toMatchObject({ service_state: 'local', takeover_state: 'idle', restored: false })
+      expect(snapshot).toMatchObject({ service_state: 'local', takeover_state: 'idle', restored: false,
+        desired: { company: false, personal: false } })
+      const company = page.getByRole('checkbox', { name: '开启公司 VPN', exact: true })
+      const personal = page.getByRole('checkbox', { name: '开启个人代理', exact: true })
+      const auth = page.getByRole('button', { name: '在终端进行公司认证', exact: true })
+      await expect(company).not.toBeChecked()
+      await expect(personal).not.toBeChecked()
+      await expect(auth).toBeDisabled()
+      await personal.check()
+      await expect(company).not.toBeChecked()
+      await expect(auth).toBeDisabled()
+      await company.check()
+      await expect(auth).toBeEnabled()
+      await personal.uncheck()
+      await expect(company).toBeChecked()
       const denied = await page.evaluate(async snap => {
         try {
           await window.lumina.client!.submit({ request_id: 'fixture-forbidden', profile_id: snap.profile_id,
@@ -150,7 +164,7 @@ test('desktop reads real fixtures, protects IPC and ages evidence', async () => 
       await page.getByLabel('验证时长（秒）').fill('20')
       await expect(connect).toBeEnabled()
       await expect(page.getByRole('button', { name: '请求停止', exact: true })).toBeDisabled()
-      // The fixture deliberately never presses the real start button.
+      // The fixture deliberately never requests native start or opens Terminal.
     } else {
       await expect(connect).toBeDisabled()
     }

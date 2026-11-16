@@ -11,6 +11,7 @@ import (
 
 	"netlaunch/internal/engine"
 	"netlaunch/internal/policy"
+	"netlaunch/internal/securefile"
 	"netlaunch/internal/testutil"
 )
 
@@ -117,5 +118,43 @@ func TestLateAuthReceiptCannotRecreateOrWriteIntoReplacedRequest(t *testing.T) {
 	}
 	if err := writeAuthReceipt(path, identity, "done"); err == nil {
 		t.Fatal("late helper wrote an authentication receipt into a different request")
+	}
+}
+
+func TestMacCompanyAuthUsesBoundPolicyWithoutPersonalConfiguration(t *testing.T) {
+	profile := testutil.PrivateTempDir(t)
+	request, err := securefile.TempDir(profile, macCompanyAuthPrefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := policy.Decode([]byte(Example))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Personal = policy.Channel{}
+	cfg.Probes = []policy.Probe{cfg.Probes[0], cfg.Probes[3]}
+	if err := securefile.Write(filepath.Join(profile, "policy.json"), cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readPolicy(profile); err == nil {
+		t.Fatal("test fixture must require company-only validation")
+	}
+	o := options{profile: profile, run: request}
+	if _, err := readAuthenticationPolicy(o); err == nil {
+		t.Fatal("a company-only request requires a bound endpoint")
+	}
+	if err := securefile.Write(filepath.Join(request, macCompanyAuthRequest), cfg.VPN); err != nil {
+		t.Fatal(err)
+	}
+	verified, err := readAuthenticationPolicy(o)
+	if err != nil || verified.VPN != cfg.VPN {
+		t.Fatalf("a company-only profile should authorize its bound endpoint: %v", err)
+	}
+	cfg.VPN.EndpointIPv4 = "203.0.113.88"
+	if err := securefile.Write(filepath.Join(profile, "policy.json"), cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readAuthenticationPolicy(o); err == nil {
+		t.Fatal("changed endpoint was accepted by an old authentication request")
 	}
 }

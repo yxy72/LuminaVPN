@@ -161,7 +161,7 @@ func oneOf(value, fallback string, choices ...string) string {
 }
 
 var reasonCodes = []string{
-	"not_checked", "stopped", "stopping", "recovery_failed", "authentication_required", "physical_network_unavailable", "company_check_failed", "generation_changed", "vpn_not_ready", "lease_unavailable", "no_verified_node", "selection_changed", "network_changed", "check_expired", "probe_budget_expired", "path_verified", "service_healthy", "http_status_rejected", "core_ingress_unavailable", "tcp_unavailable", "tls_certificate_invalid", "tls_failed", "tls_timeout", "http_response_missing", "http_write_failed", "path_probe_failed", "company_authorization_unavailable", "verification_budget_expired", "personal_verification_timeout", "pending_or_unclassified", "core_control_unavailable",
+	"not_checked", "stopped", "stopping", "recovery_failed", "authentication_required", "physical_network_unavailable", "company_check_failed", "generation_changed", "vpn_not_ready", "lease_unavailable", "no_verified_node", "selection_changed", "network_changed", "check_expired", "probe_budget_expired", "path_verified", "service_healthy", "http_status_rejected", "core_ingress_unavailable", "tcp_unavailable", "tls_certificate_invalid", "tls_failed", "tls_timeout", "http_response_missing", "http_write_failed", "path_probe_failed", "company_authorization_unavailable", "verification_budget_expired", "personal_verification_timeout", "pending_or_unclassified", "core_control_unavailable", "disabled_blocked", "disabled_direct", "intent_pending", "all_candidates_failed",
 }
 var nodeID = regexp.MustCompile(`^P[0-9]{3}$`)
 var subscriptionRuleSource = regexp.MustCompile(`^subscriptions\.(nodes|rules\[[0-7]\])$`)
@@ -213,7 +213,7 @@ func (d *Desktop) GetState() State {
 		if !exists {
 			continue
 		}
-		s.Status.Channels[name] = Channel{State: oneOf(h.State, "unknown", "ready", "unavailable", "unknown"), Reason: oneOf(h.Reason, "not_checked", reasonCodes...), CheckedAt: timestamp(h.CheckedAt), NextAction: oneOf(h.NextAction, "check_status", "wait_for_probe", "wait_for_selection", "wait_for_reconnect", "wait_for_renewal", "check_company", "check_personal", "check_direct", "check_runtime", "check_network", "check_service_expectation", "check_status", "run_auth", "run_down", "start"), PathState: oneOf(h.PathState, "unknown", "verified", "failed", "unknown"), ServiceState: oneOf(h.ServiceState, "not_checked", "healthy", "failed", "not_checked", "unknown"), ProbeScope: oneOf(h.ProbeScope, "", "system_tun", "mixed_ingress", "company_binding")}
+		s.Status.Channels[name] = Channel{State: oneOf(h.State, "unknown", "ready", "unavailable", "degraded"), Reason: oneOf(h.Reason, "not_checked", reasonCodes...), CheckedAt: timestamp(h.CheckedAt), NextAction: oneOf(h.NextAction, "check_status", "wait_for_probe", "wait_for_selection", "wait_for_reconnect", "wait_for_renewal", "check_company", "check_personal", "check_direct", "check_runtime", "check_network", "check_service_expectation", "check_status", "run_auth", "run_down", "start", "wait_for_apply"), PathState: oneOf(h.PathState, "unknown", "verified", "failed", "blocked", "physical_direct"), ServiceState: oneOf(h.ServiceState, "not_checked", "healthy", "failed", "not_checked", "unknown"), ProbeScope: oneOf(h.ProbeScope, "", "system_tun", "mixed_ingress", "company_binding")}
 	}
 	if s.Status.Phase == "ready" {
 		for _, channel := range s.Status.Channels {

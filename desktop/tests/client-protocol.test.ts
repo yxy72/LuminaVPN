@@ -34,7 +34,15 @@ describe('Windows client closed boundary', () => {
     const channels = { company: true, personal: true }
     const daily = { ...envelope, kind: 'takeover_start', start: { channels, mode: 'daily' } }
     expect(validateMacLifecycleMutation(daily)).toBe(true)
-    expect(validateMacLifecycleMutation({ ...daily, start: { ...daily.start, channels: { company: true, personal: false } } })).toBe(false)
+    for (const company of [false, true]) for (const personal of [false, true]) {
+      expect(validateMacLifecycleMutation({ ...daily, start: { ...daily.start, channels: { company, personal } } })).toBe(true)
+    }
+    expect(validateMacLifecycleMutation({ ...daily, start: { ...daily.start, channels: { company: false } } })).toBe(false)
+    const auth = { ...envelope, kind: 'auth_begin', begin_auth: {} }
+    expect(validateMacLifecycleMutation(auth)).toBe(true)
+    expect(validateMacLifecycleMutation({ ...auth, begin_auth: { password: 'secret' } })).toBe(false)
+    expect(validateMacLifecycleMutation({ ...auth, profile: '/private/other' })).toBe(false)
+    expect(validateClientResult('service.operation', { ...operation, kind: 'auth_begin', phase: 'authenticated' })).toBe(true)
     expect(validateMacLifecycleMutation({ ...daily, start: { channels, mode: 'validation', validation_seconds: 2700 } })).toBe(true)
     expect(validateMacLifecycleMutation({ ...daily, start: { channels, mode: 'validation', validation_seconds: 2701 } })).toBe(false)
     expect(validateMacLifecycleMutation({ ...envelope, kind: 'takeover_stop', run_ref: 'run', stop: {} })).toBe(true)

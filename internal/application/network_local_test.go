@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -12,6 +13,7 @@ import (
 
 	"netlaunch/internal/app"
 	"netlaunch/internal/engine"
+	"netlaunch/internal/policy"
 	p "netlaunch/internal/serviceprotocol"
 )
 
@@ -76,9 +78,12 @@ func macSnapshot(t *testing.T, d *Desktop) p.Snapshot {
 
 func macMutation(s p.Snapshot, id string, kind p.Kind) p.Mutation {
 	m := p.Mutation{RequestID: id, Kind: kind, ProfileID: s.ProfileID, RunRef: s.RunRef, ExpectedRevision: s.Revision}
-	if kind == p.TakeoverStart {
+	switch kind {
+	case p.TakeoverStart:
 		m.Start = &p.StartPayload{Mode: "validation", ValidationSeconds: 90, Channels: p.DesiredChannels{Company: true, Personal: true}}
-	} else {
+	case p.AuthBegin:
+		m.BeginAuth = &p.AuthBeginPayload{}
+	default:
 		m.Stop = &p.StopPayload{}
 	}
 	return m
@@ -115,8 +120,8 @@ func TestMacNetworkUsesNativeLifecycleForBoundRun(t *testing.T) {
 	n := d.localWorkspace.network
 	started, release := make(chan struct{}), make(chan struct{})
 	running := makeMacReport(t, "ready")
-	n.start = func(ctx context.Context, profile, bundle string, duration time.Duration) error {
-		if profile != d.Profile || bundle != d.Runtime || duration != 90*time.Second {
+	n.start = func(ctx context.Context, profile, bundle string, duration time.Duration, intent policy.ChannelIntent) error {
+		if profile != d.Profile || bundle != d.Runtime || duration != 90*time.Second || intent != policy.DefaultIntent() {
 			return errors.New("start not scoped to desktop")
 		}
 		close(started)
@@ -252,7 +257,7 @@ func TestMacNetworkDoesNotRetargetRestoreOrReuseItsProof(t *testing.T) {
 func TestMacNetworkCloseCancelsPendingStart(t *testing.T) {
 	d, _ := macBackendFixture(t)
 	started := make(chan struct{})
-	d.localWorkspace.network.start = func(ctx context.Context, _, _ string, _ time.Duration) error {
+	d.localWorkspace.network.start = func(ctx context.Context, _, _ string, _ time.Duration, _ policy.ChannelIntent) error {
 		close(started)
 		<-ctx.Done()
 		return ctx.Err()
@@ -281,7 +286,7 @@ func TestMacNetworkStopsOnlyExplicitValidLifecycleRequests(t *testing.T) {
 	current.Store(&run)
 	report := macSnapshot(t, d)
 	partial := macMutation(report, "partial", p.TakeoverStart)
-	partial.Start.Channels.Company = false
+	partial.Start.ValidationSeconds = 2701
 	_, err := macCall(t, d, "service.submit", partial)
 	macErrorCode(t, err, "INVALID_PARAMS")
 	toggle := p.Mutation{RequestID: "toggle", ProfileID: report.ProfileID, RunRef: report.RunRef, ExpectedRevision: report.Revision, Kind: p.ChannelsSet, Channels: &p.DesiredChannels{}}
@@ -307,5 +312,110 @@ func TestMacSavedRunPresentsNoPrivateFileValues(t *testing.T) {
 	got := macSnapshot(t, d)
 	if got.Personal.Reason != "" || got.Personal.State != "ready_reported" || got.Personal.Route != "unknown" {
 		t.Fatal(got)
+	}
+}
+
+func TestMacStartupChannelsAndAuthenticationUseSeparateOperations(t *testing.T) {
+	d, current := macBackendFixture(t)
+	n := d.localWorkspace.network
+	var authCalls atomic.Int32
+	n.auth = func(_ context.Context, profile, bundle string) error {
+		if profile != d.Profile || bundle != d.Runtime {
+			return errors.New("authentication target escaped desktop scope")
+		}
+		authCalls.Add(1)
+		return nil
+	}
+	n.start = func(_ context.Context, profile, bundle string, duration time.Duration, intent policy.ChannelIntent) error {
+		if profile != d.Profile || bundle != d.Runtime || duration != 0 {
+			return errors.New("start not scoped to desktop")
+		}
+		if intent.Company && authCalls.Load() == 0 {
+			return errors.Join(app.ErrMacAuthenticationRequired, errors.New("private failure omitted"))
+		}
+		return nil
+	}
+	for _, desired := range []p.DesiredChannels{{}, {Personal: true}, {Company: true}, {Company: true, Personal: true}} {
+		s := macSnapshot(t, d)
+		id := fmt.Sprintf("start-%t-%t", desired.Company, desired.Personal)
+		m := macMutation(s, id, p.TakeoverStart)
+		m.Start = &p.StartPayload{Mode: "daily", Channels: desired}
+		if _, err := macCall(t, d, "service.submit", m); err != nil {
+			t.Fatal(err)
+		}
+		completed := macCompleted(t, d, id)
+		if desired.Company {
+			if completed.Error == nil || completed.Error.Code != "MAC_AUTH_REQUIRED" || !completed.Error.Retryable {
+				t.Fatal(completed)
+			}
+		} else if completed.Error != nil {
+			t.Fatal(completed)
+		}
+	}
+	if authCalls.Load() != 0 {
+		t.Fatal("starting unexpectedly initiated authentication")
+	}
+	partial := map[string]any{"request_id": "missing-channel", "profile_id": d.ClientProfileID(),
+		"expected_revision": macSnapshot(t, d).Revision, "kind": p.TakeoverStart,
+		"start": map[string]any{"mode": "daily", "channels": map[string]any{"company": false}}}
+	_, err := macCall(t, d, "service.submit", partial)
+	macErrorCode(t, err, "INVALID_PARAMS")
+	s := macSnapshot(t, d)
+	auth := macMutation(s, "auth", p.AuthBegin)
+	_, err = macCall(t, d, "service.submit", map[string]any{
+		"kind": p.AuthBegin, "request_id": "foreign", "profile_id": s.ProfileID, "expected_revision": s.Revision,
+		"begin_auth": map[string]any{"profile": "/foreign"},
+	})
+	macErrorCode(t, err, "INVALID_PARAMS")
+	if _, err := macCall(t, d, "service.submit", auth); err != nil {
+		t.Fatal(err)
+	}
+	if completed := macCompleted(t, d, "auth"); completed.Error != nil || completed.Phase != "authenticated" || authCalls.Load() != 1 {
+		t.Fatal(completed, authCalls.Load())
+	}
+	if _, err := macCall(t, d, "service.submit", auth); err != nil || authCalls.Load() != 1 {
+		t.Fatal("idempotent auth re-opened the terminal", err, authCalls.Load())
+	}
+	s = macSnapshot(t, d)
+	resume := macMutation(s, "start-authorized", p.TakeoverStart)
+	resume.Start = &p.StartPayload{Mode: "daily", Channels: p.DesiredChannels{Company: true}}
+	if _, err := macCall(t, d, "service.submit", resume); err != nil {
+		t.Fatal(err)
+	}
+	if completed := macCompleted(t, d, "start-authorized"); completed.Error != nil || completed.Phase != "ready_reported" {
+		t.Fatal(completed)
+	}
+	active := makeMacReport(t, "ready")
+	current.Store(&active)
+	_, err = macCall(t, d, "service.submit", macMutation(macSnapshot(t, d), "unresolved-auth", p.AuthBegin))
+	macErrorCode(t, err, "RECOVERY_REQUIRED")
+}
+
+func TestMacSnapshotDistinguishesDesiredFromAppliedChannels(t *testing.T) {
+	d, current := macBackendFixture(t)
+	run := makeMacReport(t, "ready")
+	run.status.DesiredChannels = &policy.ChannelIntent{}
+	run.status.AppliedChannels = &policy.ChannelIntent{}
+	run.status.TakeoverActive = true
+	run.status.ChannelGeneration, run.status.AppliedGeneration = 2, 1
+	run.status.Channels = map[string]engine.ChannelStatus{
+		"company":  {State: "ready", Reason: "disabled_blocked", PathState: "blocked"},
+		"personal": {State: "ready", Reason: "disabled_direct", PathState: "physical_direct"},
+	}
+	current.Store(&run)
+	if s := macSnapshot(t, d); s.Desired.Company || s.Desired.Personal || s.Company.Route != "unknown" || s.Personal.Route != "unknown" {
+		t.Fatal(s)
+	}
+	applied := run
+	applied.status.AppliedGeneration = applied.status.ChannelGeneration
+	current.Store(&applied)
+	if s := macSnapshot(t, d); s.Company.Route != "blocked_reported" || s.Personal.Route != "direct_reported" {
+		t.Fatal(s)
+	}
+	stopped := applied
+	stopped.stop = true
+	current.Store(&stopped)
+	if s := macSnapshot(t, d); s.Company.Route != "unknown" || s.Personal.Route != "unknown" {
+		t.Fatal(s)
 	}
 }

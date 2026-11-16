@@ -14,7 +14,7 @@ const initialPolicy = (): PolicyDocument => ({ version: 1, company: { domains: [
 const pretty = (x: unknown) => JSON.stringify(x, null, 2)
 const listText = (x: unknown): string => Array.isArray(x) ? x.filter(x => typeof x === 'string').join('\n') : ''
 const lines = (x: string): string[] => x.split(/[\r\n,]+/).map(x => x.trim()).filter(Boolean)
-function safeError(error: unknown): string { const code = isRecord(error) && typeof error.code === 'string' && /^[A-Z_]{1,64}$/.test(error.code) ? error.code : 'CLIENT_OPERATION_FAILED'; return ({ SERVICE_UNAVAILABLE: '后台服务不可用。请检查安装状态；现有连接是否已恢复尚未确认。', PROFILE_NOT_ENROLLED:'此配置尚未登记到后台服务。配置标识不能代替系统登记，连接状态未确认。', PROFILE_UNAVAILABLE:'后台尚无此配置的可信登记。连接状态未确认。', REVISION_CONFLICT: '配置已被其他操作更新，请重新读取并检查差异。', AUTH_REQUIRED: '请完成新的认证挑战。', CLIENT_UNAVAILABLE: '当前平台未提供此操作。', PROFILE_BUSY: '已有配置操作或配置切换正在进行。', EXIT_WORKSPACE_BUSY: '当前操作还在进行，请等待完成后退出。', EXIT_WORKSPACE_STATUS_UNAVAILABLE: '无法确认配置操作已完成。请刷新工作空间后重试。', OPERATION_NOT_FOUND: '操作记录已失效，请重新读取已保存配置。', MAC_START_FAILED: '连接未完成。请检查配置、公司会话和 macOS 授权。', MAC_OPERATION_INTERRUPTED: '网络操作已中断，请检查运行并按需使用恢复入口。', MAC_RECOVERY_UNCONFIRMED: '管理员恢复未确认。请检查诊断页后重试。', MAC_STOP_UNCONFIRMED: '停止报告尚未收到，请检查诊断页。', RECOVERY_REQUIRED: '上一运行需要先确认恢复。', RUN_UNCONFIRMED: '无法绑定当前运行，请刷新诊断页。', EXIT_RESTORE_UNAVAILABLE: '当前运行的管理员恢复未确认，窗口保持打开。', EXIT_RESTORE_FAILED: '恢复操作未完成，窗口保持打开。', EXIT_RESTORE_UNCONFIRMED: '管理员恢复未确认，窗口保持打开。', EXIT_OPERATION_MISMATCH: '当前运行与恢复操作不匹配，请刷新诊断。', EXIT_RESTORE_TIMEOUT: '等待管理员恢复超时，窗口保持打开。' } as Record<string,string>)[code] ?? '操作未完成。请保留恢复入口，刷新状态后检查。' }
+function safeError(error: unknown): string { const code = isRecord(error) && typeof error.code === 'string' && /^[A-Z_]{1,64}$/.test(error.code) ? error.code : 'CLIENT_OPERATION_FAILED'; return ({ SERVICE_UNAVAILABLE: '后台服务不可用。请检查安装状态；现有连接是否已恢复尚未确认。', PROFILE_NOT_ENROLLED:'此配置尚未登记到后台服务。配置标识不能代替系统登记，连接状态未确认。', PROFILE_UNAVAILABLE:'后台尚无此配置的可信登记。连接状态未确认。', REVISION_CONFLICT: '配置已被其他操作更新，请重新读取并检查差异。', AUTH_REQUIRED: '请完成新的认证挑战。', CLIENT_UNAVAILABLE: '当前平台未提供此操作。', PROFILE_BUSY: '已有配置操作或配置切换正在进行。', EXIT_WORKSPACE_BUSY: '当前操作还在进行，请等待完成后退出。', EXIT_WORKSPACE_STATUS_UNAVAILABLE: '无法确认配置操作已完成。请刷新工作空间后重试。', OPERATION_NOT_FOUND: '操作记录已失效，请重新读取已保存配置。', MAC_START_FAILED: '连接未完成。请检查所选通道的配置及 macOS 授权。', MAC_AUTH_REQUIRED: '公司 VPN 需要有效会话，请在终端完成公司认证后再连接。', MAC_AUTH_FAILED: '公司认证未完成。请检查公司配置或终端提示。', MAC_OPERATION_INTERRUPTED: '网络操作已中断，请检查运行并按需使用恢复入口。', MAC_RECOVERY_UNCONFIRMED: '管理员恢复未确认。请检查诊断页后重试。', MAC_STOP_UNCONFIRMED: '停止报告尚未收到，请检查诊断页。', RECOVERY_REQUIRED: '上一运行需要先确认恢复。', RUN_UNCONFIRMED: '无法绑定当前运行，请刷新诊断页。', EXIT_RESTORE_UNAVAILABLE: '当前运行的管理员恢复未确认，窗口保持打开。', EXIT_RESTORE_FAILED: '恢复操作未完成，窗口保持打开。', EXIT_RESTORE_UNCONFIRMED: '管理员恢复未确认，窗口保持打开。', EXIT_OPERATION_MISMATCH: '当前运行与恢复操作不匹配，请刷新诊断。', EXIT_RESTORE_TIMEOUT: '等待管理员恢复超时，窗口保持打开。' } as Record<string,string>)[code] ?? '操作未完成。请保留恢复入口，刷新状态后检查。' }
 function healthState(channel?: ServiceChannel): keyof typeof healthLabels {
   if (!channel) return 'unknown'
   if (channel.state === 'off' || channel.state === 'config_empty') return channel.state
@@ -180,11 +180,12 @@ export function ClientWorkspace({ page, api, refreshInventory, nodes, subscripti
   const read = async (request: WorkspaceReadBody) => { setError(null); try { const value = await scopedRead(request); setResult(value); if (request.action === 'document') { if (typeof value.policy_json === 'string') setPolicyText(value.policy_json); else if (isRecord(value.policy)) setPolicyText(pretty(value.policy)); if (typeof value.revision === 'string') setRevision(value.revision) } } catch (e) { setError(safeError(e)) } }
   const operationNotice = (next: ServiceOperation): string => {
     if (next.kind === 'workspace' || next.kind === 'settings_apply') return '配置操作已完成，请重新读取保存结果。'
+    if (macosClient && next.phase === 'authenticated') return '公司认证已完成，可以连接网络。'
     if (macosClient && next.phase === 'ready_reported') return '已收到运行就绪报告，可在总览查看检查结果。'
     if (macosClient && next.phase === 'stopped_reported') return '已收到停止报告。管理员恢复仍待确认。'
     return '操作完成。'
   }
-  const accepted = (next: ServiceOperation) => { lastOperation.current = next.operation_id; setOperation(next); pending.current = next.completed ? null : next.operation_id; setBusy(!next.completed); if (next.error) setError(safeError(next.error)); else {setNotice(next.completed ? operationNotice(next) : windowsClient ? '后台服务已接受操作。' : next.kind === 'workspace' ? '配置操作进行中，请保持应用打开。' : '网络操作进行中，请留意 macOS 授权提示。');if(next.completed&&next.kind==='workspace')void refreshDocumentMetadata()}; editedChannels.current = false; void refresh() }
+  const accepted = (next: ServiceOperation) => { lastOperation.current = next.operation_id; setOperation(next); pending.current = next.completed ? null : next.operation_id; setBusy(!next.completed); if (next.error) setError(safeError(next.error)); else {setNotice(next.completed ? operationNotice(next) : windowsClient ? '后台服务已接受操作。' : next.kind === 'workspace' ? '配置操作进行中，请保持应用打开。' : next.kind === 'auth_begin' ? '请在本机 Terminal 完成公司认证。' : '网络操作进行中，请留意 macOS 授权提示。');if(next.completed&&next.kind==='workspace')void refreshDocumentMetadata()}; editedChannels.current = false; void refresh() }
   const command = async (request: WorkspaceCommand) => {
     if (!canControl) {setError(windowsClient ? '后台服务尚未确认可用。' : '请等待当前配置操作完成，或刷新工作空间。');return}
     setBusy(true); setError(null); setNotice(null)
@@ -220,7 +221,9 @@ export function ClientWorkspace({ page, api, refreshInventory, nodes, subscripti
       ? `后台操作记录 ${operation.kind} · ${operation.phase}${operation.restored ? ' · 此操作曾确认恢复' : ''}${!snapshot ? ' · 当前恢复状态 unknown' : busy ? ' · 执行中' : ''}`
       : macOperationText(operation)}</div>}
     {page === 'overview' && macosClient && <MacLifecycle snapshot={snapshot} configured={configured}
-      busy={busy || workspaceActivity !== false} start={start => { void submit({ kind: 'takeover_start', start }) }}
+      busy={busy || workspaceActivity !== false} desired={desired} setDesired={setDesired}
+      start={start => { void submit({ kind: 'takeover_start', start }) }}
+      authenticate={() => { void submit({ kind: 'auth_begin', begin_auth: {} }) }}
       stop={() => { void submit({ kind: 'takeover_stop', stop: {} }) }} exit={() => { void api.exit() }} />}
     {page === 'overview' && windowsClient && <>
       <h1>连接工作空间</h1><p>默认流量走直连，公司与个人通道独立控制。策略要求公司白名单目标在公司通道关闭时阻断；实际保护与个人回退状态以后台接管证据为准。</p>

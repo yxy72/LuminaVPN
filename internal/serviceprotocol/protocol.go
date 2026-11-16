@@ -27,6 +27,7 @@ const (
 	TakeoverStop     Kind = "takeover_stop"
 	ExitRestore      Kind = "exit_restore"
 	ProfileApply     Kind = "profile_apply"
+	AuthBegin        Kind = "auth_begin"
 	AuthRespond      Kind = "auth_respond"
 	AuthCancel       Kind = "auth_cancel"
 	NodeSelect       Kind = "node_select"
@@ -46,6 +47,7 @@ type StartPayload struct {
 	ValidationSeconds int             `json:"validation_seconds,omitempty"`
 }
 type StopPayload struct{}
+type AuthBeginPayload struct{}
 type AttachPayload struct{}
 type ProfilePayload struct {
 	Policy policy.Config `json:"policy"`
@@ -172,6 +174,7 @@ type Mutation struct {
 	Channels         *DesiredChannels   `json:"channels,omitempty"`
 	Stop             *StopPayload       `json:"stop,omitempty"`
 	Profile          *ProfilePayload    `json:"profile,omitempty"`
+	BeginAuth        *AuthBeginPayload  `json:"begin_auth,omitempty"`
 	Auth             *AuthPayload       `json:"auth,omitempty"`
 	CancelAuth       *CancelAuthPayload `json:"cancel_auth,omitempty"`
 	Selection        *SelectionPayload  `json:"selection,omitempty"`
@@ -193,7 +196,7 @@ func (m Mutation) Validate() error {
 	}
 	count := 0
 	for _, exists := range []bool{m.Start != nil, m.Channels != nil, m.Stop != nil, m.Profile != nil,
-		m.Auth != nil, m.CancelAuth != nil, m.Selection != nil, m.Settings != nil, m.Workspace != nil, m.Attach != nil} {
+		m.BeginAuth != nil, m.Auth != nil, m.CancelAuth != nil, m.Selection != nil, m.Settings != nil, m.Workspace != nil, m.Attach != nil} {
 		if exists {
 			count++
 		}
@@ -233,6 +236,8 @@ func (m Mutation) Validate() error {
 				return errors.New("profile node validation failed")
 			}
 		}
+	case AuthBegin:
+		valid = m.BeginAuth != nil
 	case AuthRespond:
 		valid = m.Auth != nil && m.Auth.Validate() == nil
 	case AuthCancel:

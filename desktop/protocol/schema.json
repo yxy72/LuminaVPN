@@ -423,6 +423,44 @@
                   "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
                 },
                 "kind": {
+                  "const": "auth_begin"
+                },
+                "begin_auth": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {},
+                  "required": []
+                }
+              },
+              "required": [
+                "request_id",
+                "profile_id",
+                "expected_revision",
+                "kind",
+                "begin_auth"
+              ]
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "request_id": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+                },
+                "profile_id": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+                },
+                "expected_revision": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "run_ref": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+                },
+                "kind": {
                   "const": "auth_respond"
                 },
                 "auth": {
@@ -1562,6 +1600,7 @@
             "takeover_stop",
             "exit_restore",
             "profile_apply",
+            "auth_begin",
             "auth_respond",
             "auth_cancel",
             "node_select",

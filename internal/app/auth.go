@@ -3,10 +3,13 @@ package app
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -26,6 +29,67 @@ func (b *limitedBuffer) Write(p []byte) (int, error) {
 	}
 	return b.Buffer.Write(p)
 }
+
+const (
+	macCompanyAuthPrefix  = "auth-company-"
+	macCompanyAuthRequest = "company-vpn.json"
+)
+
+// AuthenticateMacCompany refreshes the local company session in the ordinary
+// user's Terminal. This does not stage or start network takeover.
+func AuthenticateMacCompany(ctx context.Context, profile, bundle string) error {
+	if runtime.GOOS != "darwin" || os.Geteuid() == 0 {
+		return errors.New("macOS desktop authentication requires the ordinary user")
+	}
+	if !filepath.IsAbs(profile) || filepath.Clean(profile) != profile ||
+		!filepath.IsAbs(bundle) || filepath.Clean(bundle) != bundle {
+		return errors.New("local desktop profile or runtime is unavailable")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := securefile.CheckDir(profile); err != nil {
+		return err
+	}
+	unlock, err := securefile.Lock(filepath.Join(profile, "launch.lock"), time.Second)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := requireCompleteConfigTransaction(profile); err != nil {
+		return err
+	}
+	intent := policy.ChannelIntent{Company: true}
+	cfg, err := readPolicyForIntent(profile, intent)
+	if err != nil {
+		return err
+	}
+	c := CLI{Out: io.Discard, Err: io.Discard}
+	return c.obtainAuthContext(ctx, options{profile: profile, runtime: bundle, force: true, channels: &intent}, cfg)
+}
+
+func readAuthenticationPolicy(o options) (policy.Config, error) {
+	if runtime.GOOS != "darwin" || !strings.HasPrefix(filepath.Base(o.run), macCompanyAuthPrefix) {
+		return readPolicy(o.profile)
+	}
+	raw, err := securefile.Read(filepath.Join(o.run, macCompanyAuthRequest), 4096, true)
+	if err != nil {
+		return policy.Config{}, err
+	}
+	var vpn policy.VPN
+	if json.Unmarshal(raw, &vpn) != nil {
+		return policy.Config{}, errors.New("invalid company authentication request")
+	}
+	cfg, err := readPolicyForIntent(o.profile, policy.ChannelIntent{Company: true})
+	if err != nil {
+		return policy.Config{}, err
+	}
+	if cfg.VPN != vpn {
+		return policy.Config{}, errors.New("company authentication endpoint changed")
+	}
+	return cfg, nil
+}
+
 func (c CLI) obtainAuth(o options, cfg policy.Config) error {
 	return c.obtainAuthContext(context.Background(), o, cfg)
 }
@@ -62,11 +126,22 @@ func (c CLI) obtainAuthContext(parent context.Context, o options, cfg policy.Con
 		}
 	}
 	// A unique marker avoids treating a previous terminal's result as this request's result.
-	marker, e := securefile.TempDir(o.profile, "auth-")
+	prefix := "auth-"
+	if runtime.GOOS == "darwin" && o.channels != nil {
+		prefix = macCompanyAuthPrefix
+	}
+	marker, e := securefile.TempDir(o.profile, prefix)
 	if e != nil {
 		return e
 	}
 	defer os.RemoveAll(marker)
+	if prefix == macCompanyAuthPrefix {
+		// The Terminal helper independently validates this exact endpoint
+		// against the selected profile before executing OpenConnect.
+		if err := securefile.Write(filepath.Join(marker, macCompanyAuthRequest), cfg.VPN); err != nil {
+			return err
+		}
+	}
 	if e := parent.Err(); e != nil {
 		return e
 	}
@@ -129,7 +204,7 @@ func (c CLI) authenticate(o options) (returned error) {
 		// not recreate it after the caller has retired the request.
 		_ = writeAuthReceipt(o.run, request, name)
 	}()
-	cfg, e := readPolicy(o.profile)
+	cfg, e := readAuthenticationPolicy(o)
 	if e != nil {
 		return e
 	}
@@ -141,6 +216,9 @@ func (c CLI) authenticate(o options) (returned error) {
 		return e
 	}
 	defer unlock()
+	if !sameAuthRequest(o.run, request) {
+		return errors.New("local company authentication request is no longer active")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	go watchAuthRequest(ctx, cancel, o.run, request)

@@ -210,7 +210,9 @@ async function assertClientMethod(target: Bridge, method: ClientMethod, params: 
   const capabilities = hello.capabilities
   if (bridge !== target) throw new Error('PROFILE_CHANGED')
   if (capabilities.config_write !== true || !capabilities.methods.includes(method)) throw new Error('CLIENT_UNAVAILABLE')
-  if (method === 'service.submit' && capabilities.macos_client && !validateMacLifecycleMutation(params)) throw new Error('CLIENT_UNAVAILABLE')
+  if (method === 'service.submit' && (
+    capabilities.macos_client ? !validateMacLifecycleMutation(params) : params.kind === 'auth_begin'
+  )) throw new Error('CLIENT_UNAVAILABLE')
   if (method === 'workspace.read' && (
     params.action === 'activity' && capabilities.windows_client === true ||
     params.action === 'recovery_entry' && capabilities.windows_client !== true

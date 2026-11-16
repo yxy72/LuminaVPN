@@ -172,9 +172,23 @@ func (d *Desktop) ClientRequest(ctx context.Context, method string, raw json.Raw
 			return nil, unavailable("INVALID_PARAMS", "The typed service mutation is invalid.")
 		}
 		if d.MacClientEnabled() {
+			if mutation.Kind == serviceprotocol.TakeoverStart {
+				// Start must declare each channel, including an explicit false.
+				var required struct {
+					Start struct {
+						Channels struct {
+							Company  *bool `json:"company"`
+							Personal *bool `json:"personal"`
+						} `json:"channels"`
+					} `json:"start"`
+				}
+				if json.Unmarshal(raw, &required) != nil || required.Start.Channels.Company == nil || required.Start.Channels.Personal == nil {
+					return nil, unavailable("INVALID_PARAMS", "Both channel selections are required.")
+				}
+			}
 			return d.localWorkspace.submitNetwork(ctx, mutation)
 		}
-		if !validDesktopStart(mutation.Start) {
+		if mutation.Kind == serviceprotocol.AuthBegin || !validDesktopStart(mutation.Start) {
 			return nil, unavailable("INVALID_PARAMS", "The typed service mutation is invalid.")
 		}
 		operation, err := d.Control.Submit(ctx, mutation)

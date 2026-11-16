@@ -13,6 +13,7 @@ import (
 
 	"netlaunch/internal/app"
 	"netlaunch/internal/engine"
+	"netlaunch/internal/policy"
 	p "netlaunch/internal/serviceprotocol"
 )
 
@@ -47,7 +48,8 @@ func (r macRunReport) sameRun(other macRunReport) bool {
 }
 
 type macNetwork struct {
-	start    func(context.Context, string, string, time.Duration) error
+	start    func(context.Context, string, string, time.Duration, policy.ChannelIntent) error
+	auth     func(context.Context, string, string) error
 	bind     func(context.Context, string) (macRunStop, error)
 	inspect  func(string) macRunReport
 	revision uint64
@@ -69,7 +71,8 @@ func (d *Desktop) EnableLocalNetwork(ctx context.Context) {
 		return
 	}
 	d.localWorkspace.network = &macNetwork{
-		start: app.StartMacNetwork,
+		start: app.StartMacNetworkWithIntent,
+		auth:  app.AuthenticateMacCompany,
 		bind: func(ctx context.Context, profile string) (macRunStop, error) {
 			run, err := app.BindCurrentRunStop(ctx, profile)
 			if err != nil {
@@ -119,8 +122,9 @@ func (n *macNetwork) stoppedReport() bool {
 func validMacNetworkMutation(m p.Mutation) bool {
 	switch m.Kind {
 	case p.TakeoverStart:
-		// Mutation.Validate already checks daily vs. the validation window.
-		return m.Start != nil && m.Start.Channels.Company && m.Start.Channels.Personal
+		return m.Start != nil
+	case p.AuthBegin:
+		return m.BeginAuth != nil
 	case p.TakeoverStop, p.ExitRestore:
 		return m.RunRef != ""
 	default:
@@ -128,16 +132,41 @@ func validMacNetworkMutation(m p.Mutation) bool {
 	}
 }
 
-func savedMacChannel(r macRunReport, channel string) p.Channel {
-	view := p.Channel{Desired: true, State: "unknown", Route: "unknown"}
+func savedMacDesired(r macRunReport) p.DesiredChannels {
 	if !r.reported {
+		return p.DesiredChannels{}
+	}
+	if intent := r.status.DesiredChannels; intent != nil {
+		return p.DesiredChannels{Company: intent.Company, Personal: intent.Personal}
+	}
+	// Runs made by the legacy CLI used both channels.
+	return p.DesiredChannels{Company: true, Personal: true}
+}
+
+func savedMacChannel(r macRunReport, channel string, desired bool) p.Channel {
+	view := p.Channel{Desired: desired, State: "unknown", Route: "unknown"}
+	h, ok := r.status.Channels[channel]
+	if !r.reported || !ok {
 		return view
 	}
-	if h, ok := r.status.Channels[channel]; ok {
-		if state := oneOf(h.State, "unknown", "ready", "unavailable"); state != "unknown" {
-			view.State = state + "_reported"
+	if state := oneOf(h.State, "unknown", "ready", "unavailable", "degraded"); state != "unknown" {
+		view.State = state + "_reported"
+	}
+	view.Reason = oneOf(h.Reason, "", reasonCodes...)
+	applied := r.status.AppliedChannels
+	if !r.stop && r.status.TakeoverActive && applied != nil &&
+		r.status.ChannelGeneration != 0 && r.status.ChannelGeneration == r.status.AppliedGeneration {
+		switch {
+		case channel == "company" && !desired && !applied.Company && h.State == "ready" && h.Reason == "disabled_blocked" && h.PathState == "blocked":
+			view.Route, view.Reason = "blocked_reported", h.Reason
+		case channel == "personal" && !desired && !applied.Personal && h.State == "ready" && h.Reason == "disabled_direct" && h.PathState == "physical_direct":
+			view.Route, view.Reason = "direct_reported", h.Reason
+		case channel == "personal" && desired && applied.Personal && r.status.PersonalFallback && h.State == "degraded" && h.Reason == "all_candidates_failed" && h.PathState == "physical_direct":
+			view.Route, view.Reason = "direct_reported", h.Reason
 		}
-		view.Reason = oneOf(h.Reason, "", reasonCodes...)
+	}
+	if view.Route == "unknown" && (view.Reason == "disabled_blocked" || view.Reason == "disabled_direct" || view.Reason == "all_candidates_failed") {
+		view.State, view.Reason = "unknown", "intent_pending"
 	}
 	return view
 }
@@ -151,11 +180,12 @@ func (w *localWorkspace) networkSnapshot(ctx context.Context) (p.Snapshot, error
 	n := w.network
 	n.observe(w.commands.Profile)
 	r := n.current
+	desired := savedMacDesired(r)
 	s := p.Snapshot{
 		ProtocolVersion: 1, ServiceState: "local", TakeoverState: "idle", ProfileID: w.profile,
 		Revision: n.revision, RunRef: n.runRef, OperationID: w.activeID,
-		Desired: p.DesiredChannels{Company: true, Personal: true},
-		Company: savedMacChannel(r, "company"), Personal: savedMacChannel(r, "personal"),
+		Desired: desired,
+		Company: savedMacChannel(r, "company", desired.Company), Personal: savedMacChannel(r, "personal", desired.Personal),
 		RecoveryRequired: n.lost.present || r.present && !n.restored() && !n.stoppedReport(),
 		Restored:         n.restored(),
 	}
@@ -175,7 +205,7 @@ func (w *localWorkspace) networkSnapshot(ctx context.Context) (p.Snapshot, error
 	}
 	if w.activeID != "" {
 		switch operation := w.records[w.activeID].operation; operation.Kind {
-		case p.TakeoverStart, p.TakeoverStop, p.ExitRestore:
+		case p.TakeoverStart, p.TakeoverStop, p.ExitRestore, p.AuthBegin:
 			s.TakeoverState = operation.Phase
 		}
 	}
@@ -206,11 +236,14 @@ func (w *localWorkspace) submitNetwork(ctx context.Context, m p.Mutation) (p.Ope
 	}
 	var target macRunStop
 	var phase string
-	if m.Kind == p.TakeoverStart {
+	if m.Kind == p.TakeoverStart || m.Kind == p.AuthBegin {
 		if n.lost.present || n.current.present && !n.stoppedReport() && !n.restored() {
 			return p.Operation{}, unavailable("RECOVERY_REQUIRED", "The previous run's state must be resolved before starting.")
 		}
 		phase = "starting"
+		if m.Kind == p.AuthBegin {
+			phase = "authenticating"
+		}
 	} else {
 		// Resolve and retain the exact run before dispatch. A changed profile
 		// pointer must not authorize STOP or recovery for a newer run.
@@ -250,9 +283,15 @@ func (w *localWorkspace) executeNetwork(m p.Mutation, target macRunStop, bound m
 	switch m.Kind {
 	case p.TakeoverStart:
 		ctx, cancel := context.WithTimeout(w.ctx, 8*time.Minute)
-		err = w.network.start(ctx, w.commands.Profile, w.commands.Runtime, time.Duration(m.Start.ValidationSeconds)*time.Second)
+		intent := policy.ChannelIntent{Company: m.Start.Channels.Company, Personal: m.Start.Channels.Personal}
+		err = w.network.start(ctx, w.commands.Profile, w.commands.Runtime, time.Duration(m.Start.ValidationSeconds)*time.Second, intent)
 		cancel()
 		phase, failureCode = "ready_reported", "MAC_START_FAILED"
+	case p.AuthBegin:
+		ctx, cancel := context.WithTimeout(w.ctx, 6*time.Minute)
+		err = w.network.auth(ctx, w.commands.Profile, w.commands.Runtime)
+		cancel()
+		phase, failureCode = "authenticated", "MAC_AUTH_FAILED"
 	case p.TakeoverStop:
 		ctx, cancel := context.WithTimeout(w.ctx, 20*time.Second)
 		err = target.Request(ctx)
@@ -287,7 +326,10 @@ func (w *localWorkspace) executeNetwork(m p.Mutation, target macRunStop, bound m
 			failureCode = "MAC_OPERATION_INTERRUPTED"
 		}
 		op.Phase = "failed"
-		op.Error = &p.Error{Code: failureCode, Message: "The local network operation could not be confirmed."}
+		op.Error = &p.Error{Code: failureCode, Message: "The local operation could not be confirmed."}
+		if errors.Is(err, app.ErrMacAuthenticationRequired) {
+			op.Error = &p.Error{Code: "MAC_AUTH_REQUIRED", Message: "Authenticate in the local Terminal before starting the company channel.", Retryable: true}
+		}
 	} else if m.Kind == p.ExitRestore {
 		op.Restored = true
 	}
