@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +19,34 @@ import (
 	"netlaunch/internal/runtimebundle"
 	"netlaunch/internal/securefile"
 )
+
+func publishDarwinCompanyRefresh(ctx context.Context, run *RunStop, generation uint64, vpn policy.VPN, session any) error {
+	if err := run.check(ctx); err != nil {
+		return err
+	}
+	if _, err := run.dir.Lstat("STOP"); !errors.Is(err, os.ErrNotExist) {
+		return nil // ordinary cache is still available for the next run
+	}
+	raw, err := json.Marshal(map[string]any{"generation": generation, "vpn": vpn, "session": session})
+	if err != nil {
+		return err
+	}
+	defer clear(raw)
+	name := ".auth-refresh-" + rand.Text()
+	f, err := run.dir.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return err
+	}
+	defer run.dir.Remove(name)
+	_, err = f.Write(raw)
+	if err := errors.Join(err, f.Sync(), f.Close()); err != nil {
+		return err
+	}
+	if err := run.check(ctx); err != nil {
+		return err
+	}
+	return run.dir.Rename(name, "auth-refresh.json")
+}
 
 func quote(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
 

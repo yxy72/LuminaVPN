@@ -78,6 +78,9 @@ func (c CLI) RunContext(ctx context.Context, args []string) error {
 	if len(args) > 0 && args[0] == "_service-helper" {
 		return serviceHelperEntry(args, c.Out)
 	}
+	if len(args) > 0 && args[0] == "_company-intent" {
+		return companyIntentEntry(args[1:], c.Err)
+	}
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" {
 		fmt.Fprintln(c.Out, "NetLaunch "+Version+"\nCommands: init, import, sync, plan, config validate|diff|apply|rollback|history, rules explain TARGET, doctor, check-runtime, auth, up, status, down, version, diagnostics export, runs cleanup\nOptions: --profile DIR --runtime DIR; init --file POLICY_OR_BOOTSTRAP.json; import --file FILE; config validate|diff|apply --file POLICY.json; config apply|rollback --restart; config rollback --revision SHA256; up --prepare-only; version --json; runs cleanup --profile DIR --run DIR [--apply] (administrator terminal)\nmacOS network lifecycle is experimental; config apply/rollback changes the next-start policy unless --restart is specified. Diagnostics exports allowlisted saved status to stdout; it does not check live network health.")
 		return nil
@@ -246,9 +249,21 @@ func (c CLI) RunContext(ctx context.Context, args []string) error {
 	}
 	if args[0] == "auth" {
 		run, runErr := currentRun(opts)
+		var authTarget *RunStop
+		var generation uint64
 		if runErr == nil {
-			if st, e := statusFor(run); e == nil && requiresFreshAuthentication(opts.profile, cfg, st) {
-				opts.force = true
+			if st, e := statusFor(run); e == nil {
+				if requiresFreshAuthentication(opts.profile, cfg, st) {
+					opts.force = true
+				}
+				if runtime.GOOS == "darwin" && st.ChannelGeneration != 0 {
+					generation = st.ChannelGeneration
+					authTarget, e = bindRunStop(ctx, options{profile: opts.profile, run: run})
+					if e != nil {
+						return e
+					}
+					defer authTarget.Close()
+				}
 			}
 		}
 		if e := c.obtainAuth(opts, cfg); e != nil {
@@ -256,6 +271,12 @@ func (c CLI) RunContext(ctx context.Context, args []string) error {
 		}
 		if runErr == nil {
 			if st, e := statusFor(run); e == nil && st.Phase != "stopped" && st.Phase != "recovery_failed" {
+				if runtime.GOOS == "darwin" && st.ChannelGeneration != 0 {
+					if authTarget == nil || st.ChannelGeneration != generation ||
+						st.DesiredChannels == nil || !st.DesiredChannels.Company {
+						return nil // keep the ordinary profile cache for a later authentication
+					}
+				}
 				session, ok := auth.Load(opts.profile, cfg.VPN)
 				if !ok {
 					return errors.New("no valid session to refresh")
@@ -263,6 +284,9 @@ func (c CLI) RunContext(ctx context.Context, args []string) error {
 				protected, err := auth.EncodeRuntime(cfg.VPN, session)
 				if err != nil {
 					return err
+				}
+				if generation != 0 {
+					return publishDarwinCompanyRefresh(ctx, authTarget, generation, cfg.VPN, protected)
 				}
 				return securefile.Write(filepath.Join(run, "auth-refresh.json"), protected)
 			}

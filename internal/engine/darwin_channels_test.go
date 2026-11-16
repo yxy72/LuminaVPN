@@ -283,16 +283,24 @@ func checkDarwinCompanyDNSGate(t *testing.T, config map[string]any) {
 		}()
 		return l.Addr().String()
 	}
-	var physicalHits, companyHits atomic.Int32
+	var physicalHits, companyHits, personalHits atomic.Int32
 	physical := "tcp://" + watchConnections(&physicalHits)
-	company, err := companyproxy.Proxy(watchConnections(&companyHits), companyproxy.Credentials{
+	credentials := companyproxy.Credentials{
 		Username: "company", Password: "loopback-fixture-password",
-	})
+	}
+	company, err := companyproxy.Proxy(watchConnections(&companyHits), credentials)
 	if err != nil {
 		t.Fatal(err)
 	}
 	company["interface-name"] = "lo0"
 	config["proxies"].([]any)[0] = company
+	personal, err := companyproxy.Proxy(watchConnections(&personalHits), credentials)
+	if err != nil {
+		t.Fatal(err)
+	}
+	personal["name"], personal["interface-name"] = "P-FIXTURE", "lo0"
+	config["proxies"] = append(config["proxies"].([]any), personal)
+	config["proxy-groups"].([]any)[1].(map[string]any)["proxies"] = []string{selector.Reject, "P-FIXTURE"}
 	config["mixed-port"] = 0
 	config["interface-name"] = "lo0"
 	controllerPort, err := platform.FreePort()
@@ -311,11 +319,15 @@ func checkDarwinCompanyDNSGate(t *testing.T, config map[string]any) {
 	for _, key := range []string{"nameserver", "direct-nameserver", "default-nameserver", "proxy-server-nameserver"} {
 		dns[key] = []string{physical}
 	}
-	dns["fake-ip-filter"] = []string{"closed.example", "open.example", "closed-again.example", "direct.example"}
+	dns["fake-ip-filter"] = []string{
+		"closed.example", "open.example", "closed-again.example", "direct.example", "personal-first.example", "personal-last.example",
+	}
 	dns["nameserver-policy"] = map[string]any{
-		"closed.example":       []string{physical + "#CORP"},
-		"open.example":         []string{physical + "#CORP"},
-		"closed-again.example": []string{physical + "#CORP"},
+		"closed.example":         []string{physical + "#CORP"},
+		"open.example":           []string{physical + "#CORP"},
+		"closed-again.example":   []string{physical + "#CORP"},
+		"personal-first.example": []string{physical + "#PERSONAL"},
+		"personal-last.example":  []string{physical + "#PERSONAL"},
 	}
 	dir := testutil.PrivateTempDir(t)
 	path := filepath.Join(dir, "core.json")
@@ -343,26 +355,36 @@ func checkDarwinCompanyDNSGate(t *testing.T, config map[string]any) {
 			return (&net.Dialer{}).DialContext(ctx, "tcp4", dnsAddress)
 		}, "192.0.2.53", host)
 	}
-	set := func(node string) {
+	set := func(group, node string) {
 		t.Helper()
-		if err := request(ctx, "PUT", "/proxies/CORP", map[string]string{"name": node}); err != nil {
+		if err := request(ctx, "PUT", "/proxies/"+group, map[string]string{"name": node}); err != nil {
 			t.Fatal(err)
 		}
+	}
+	set("PERSONAL", "P-FIXTURE")
+	query("personal-first.example")
+	if personalHits.Load() == 0 {
+		t.Fatal("fixture did not observe personal DNS before company changes")
 	}
 	query("closed.example")
 	if physicalHits.Load() != 0 || companyHits.Load() != 0 {
 		t.Fatal("blocked company DNS escaped the core's closed gate")
 	}
-	set("CORP-BOUND")
+	set("CORP", "CORP-BOUND")
 	query("open.example")
 	if companyHits.Load() == 0 || physicalHits.Load() != 0 {
 		t.Fatal("company DNS failed to use only the fixed ingress")
 	}
-	set(selector.Reject)
+	set("CORP", selector.Reject)
 	atClosure := companyHits.Load()
 	query("closed-again.example")
 	if companyHits.Load() != atClosure || physicalHits.Load() != 0 {
 		t.Fatal("company DNS escaped after the gate reclosed")
+	}
+	beforePersonal := personalHits.Load()
+	query("personal-last.example")
+	if personalHits.Load() <= beforePersonal || physicalHits.Load() != 0 {
+		t.Fatal("closing company disrupted the selected personal resolver")
 	}
 	query("direct.example")
 	if physicalHits.Load() == 0 {

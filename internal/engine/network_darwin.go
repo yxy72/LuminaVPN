@@ -290,10 +290,14 @@ func retireDarwinVPNAttempt(s *State) {
 	}
 }
 
-func fenceDarwinCompanyTraffic(s *State, persist, closeGate func() error) error {
+func revokeDarwinCompanyState(s *State) {
 	s.VPN.Bootstrap = false
 	s.Leases = nil
 	delete(s.Channels, "company")
+}
+
+func fenceDarwinCompanyTraffic(s *State, persist, closeGate func() error) error {
+	revokeDarwinCompanyState(s)
 	// Persist the revoked authority before contacting the core so the bound
 	// ingress rejects new dials even if the controller does not acknowledge.
 	if err := persist(); err != nil {

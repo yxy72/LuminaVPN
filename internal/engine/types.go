@@ -57,6 +57,16 @@ type VPNSession struct {
 	Bootstrap  bool   `json:"bootstrap"`
 	WakeEpoch  string `json:"wake_epoch,omitempty"`
 }
+
+// The presence of this root journal record confirms startup with a retained
+// authenticated loopback company ingress.
+type darwinCompanyControl struct {
+	RequestID         string `json:"request_id,omitempty"`
+	RequestGeneration uint64 `json:"request_generation,omitempty"`
+	Enabled           bool   `json:"enabled,omitempty"`
+	Pending           bool   `json:"pending,omitempty"`
+}
+
 type State struct {
 	DesiredChannels   *policy.ChannelIntent    `json:"desired_channels,omitempty"`
 	ChannelGeneration uint64                   `json:"channel_generation,omitempty"`
@@ -68,6 +78,7 @@ type State struct {
 	Channels          map[string]ChannelHealth `json:"channels,omitempty"`
 	Version           int                      `json:"version"`
 	Windows           *WindowsState            `json:"windows,omitempty"`
+	DarwinCompany     *darwinCompanyControl    `json:"darwin_company,omitempty"`
 	Phase             string                   `json:"phase"`
 	Updated           time.Time                `json:"updated"`
 	Heartbeat         time.Time                `json:"heartbeat"`

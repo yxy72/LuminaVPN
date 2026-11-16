@@ -340,15 +340,23 @@ func serve(run string) (returned error) {
 	}); e != nil {
 		return e
 	}
+	if s.Manifest.Mode != "" && company != nil {
+		if e = update(run, func(s *State) error {
+			if err := checkDarwinCompanyOwner(run, *s); err != nil {
+				return err
+			}
+			s.DarwinCompany = &darwinCompanyControl{}
+			return nil
+		}); e != nil {
+			return e
+		}
+	}
 	sampling := &personalSampling{}
 	defer sampling.close()
 	lastHealth := time.Now()
-	lastResumeRequest := ""
-	if !intent.Company {
-		lastResumeRequest, e = platform.WakeEpoch()
-		if e != nil {
-			return e
-		}
+	lastResumeRequest, e := platform.WakeEpoch()
+	if e != nil {
+		return e
 	}
 	var companyDone <-chan error
 	if company != nil {
@@ -370,13 +378,26 @@ func serve(run string) (returned error) {
 		if e != nil {
 			return e
 		}
+		if current.DarwinCompany != nil && current.DarwinCompany.Pending {
+			intent, e = applyPendingDarwinCompanyChange(run, company)
+			if e != nil {
+				return e
+			}
+			boundChecks.reset()
+			systemChecks.reset()
+			retry.FreshAuthentication(time.Now())
+			disconnected = true
+			delete(exits.exits, "vpn")
+			current, e = load(run)
+			if e != nil {
+				return e
+			}
+		}
 		epoch, e := platform.WakeEpoch()
 		if e != nil {
 			return e
 		}
-		wokeWithoutVPN := !intent.Company && lastResumeRequest != epoch
-		wokeWithVPN := intent.Company && current.VPN.WakeEpoch != "" && current.VPN.WakeEpoch != epoch && lastResumeRequest != epoch
-		if wokeWithoutVPN || wokeWithVPN {
+		if lastResumeRequest != epoch {
 			if err := closeDarwinVerification(run, verification); err != nil {
 				return err
 			}
@@ -525,25 +546,30 @@ func serve(run string) (returned error) {
 		}
 		vpnAlive := false
 		if intent.Company {
-			if _, e := os.Stat(filepath.Join(run, "auth-refresh.json")); e == nil {
-				var fresh auth.Session
-				if e = readJSON(filepath.Join(run, "auth-refresh.json"), &fresh); e != nil || requireVPNAuthentication(fresh, current.Manifest.Config.VPN, time.Now()) != nil {
-					return errors.New("invalid refreshed authentication")
-				}
+			fresh, refreshed, err := readDarwinCompanyRefresh(run, current)
+			if err != nil {
+				return err
+			}
+			if refreshed {
 				if e = stopVPN(run, company); e != nil {
 					return e
 				}
 				disconnected = true
-				if e = securefile.Write(filepath.Join(private(run), "auth.json"), fresh); e != nil {
-					return e
+				adopted, err := saveDarwinCompanyRefresh(run, current, fresh)
+				if err != nil {
+					return err
 				}
-				if e = os.Remove(filepath.Join(run, "auth-refresh.json")); e != nil {
+				if !adopted {
+					continue
+				}
+				if e = os.Remove(filepath.Join(run, "auth-refresh.json")); e != nil && !errors.Is(e, os.ErrNotExist) {
 					return e
 				}
 				retry.FreshAuthentication(time.Now())
 				delete(exits.exits, "vpn")
 			}
 			currentVPN, hasVPN := latestVPN(current)
+			hasVPN = hasVPN && !currentVPN.DarwinVPNRetired
 			if hasVPN {
 				vpnAlive, e = alive(currentVPN)
 				if e != nil {
@@ -646,6 +672,9 @@ func startVPN(run string, exits *childExitTracker) (Child, error) {
 	}
 	var a auth.Session
 	if e = readJSON(filepath.Join(private(run), "auth.json"), &a); e != nil {
+		if errors.Is(e, os.ErrNotExist) {
+			return Child{}, errVPNAuthenticationRequired
+		}
 		return Child{}, e
 	}
 	if e = requireVPNAuthentication(a, s.Manifest.Config.VPN, time.Now()); e != nil {
@@ -668,14 +697,18 @@ func startVPN(run string, exits *childExitTracker) (Child, error) {
 }
 
 func stopVPN(run string, company *companyRuntime) error {
-	company.revoke()
+	return stopDarwinVPN(run, company, nil)
+}
+
+func stopDarwinVPN(run string, company *companyRuntime, check func(*State) error) error {
+	if check == nil {
+		check = func(s *State) error { return checkDarwinCompanyOwner(run, *s) }
+	}
 	if e := update(run, func(s *State) error {
-		if err := guard(run, s); err != nil {
+		if err := check(s); err != nil {
 			return err
 		}
-		if err := requireActiveDarwinOwner(run, *s); err != nil {
-			return err
-		}
+		company.revoke()
 		retireDarwinVPNAttempt(s)
 		return fenceDarwinCompanyTraffic(s, func() error { return save(run, s) }, func() error { return closeDarwinCompanyGate(run, *s) })
 	}); e != nil {
@@ -694,7 +727,7 @@ func stopVPN(run string, company *companyRuntime) error {
 		}
 	}
 	return update(run, func(s *State) error {
-		if e := guard(run, s); e != nil {
+		if e := check(s); e != nil {
 			return e
 		}
 		return retireDarwinCompanyRoutes(s, func(i int) error { return removeRoute(run, s, i) })
@@ -923,7 +956,7 @@ func recoverRun(run, reason string) error {
 	if e != nil {
 		return fail(e)
 	}
-	for _, name := range []string{"auth.json", "nodes.json", "core.json"} {
+	for _, name := range []string{"auth.json", "auth-refresh.json", "nodes.json", "core.json"} {
 		_ = os.Remove(filepath.Join(private(run), name))
 		_ = os.Remove(filepath.Join(run, name))
 	}
