@@ -45,7 +45,7 @@ foreach ($object in (ConvertFrom-Json $env:LUMINA_E2E_PRIVATE_OBJECTS)) {
 
 async function checkRecoveryCapability(page: Page, userData: string): Promise<void> {
   const hello = await page.evaluate(() => window.lumina.hello())
-  const button = page.getByRole('button', { name: '找到独立恢复入口', exact: true })
+  const button = page.getByRole('button', { name: hello.capabilities.config_write ? '显示独立恢复入口' : '找到独立恢复入口', exact: true })
   if (hello.capabilities.native_lifecycle) {
     await expect(button).toBeVisible()
     return
@@ -124,6 +124,16 @@ test('desktop reads real fixtures, protects IPC and ages evidence', async () => 
     page.on('pageerror', error => errors.push(error.message))
     await expect(page.getByText('控制接口可用', { exact: true }).first()).toBeVisible()
     expect(await page.evaluate(() => typeof (window as any).require)).toBe('undefined')
+    const { capabilities } = await page.evaluate(() => window.lumina.hello())
+    const macWorkspace = process.platform === 'darwin'
+    if (macWorkspace) {
+      expect(capabilities).toMatchObject({ read_only: false, config_write: true, connection_start: false, connection_stop: false, windows_client: false })
+      const result = await page.evaluate(async () => {
+        try { await window.lumina.client!.snapshot(); return 'unexpected' }
+        catch (error) { return error instanceof Error ? error.message : String(error) }
+      })
+      expect(result).toBe('CLIENT_UNAVAILABLE')
+    }
     await expect(page.getByRole('button', { name: '连接网络', exact: true })).toBeDisabled()
     await page.getByRole('button', { name: /代理节点/ }).click()
     await expect(page.getByText('P001', { exact: true }).first()).toBeVisible()
@@ -132,9 +142,21 @@ test('desktop reads real fixtures, protects IPC and ages evidence', async () => 
     const config = await page.evaluate(() => window.lumina.getConfig({ offset: 100, limit: 100 }))
     expect(config.offset).toBe(100); expect(config.total).toBeGreaterThan(151); expect(config.rules.length).toBeLessThanOrEqual(100)
     await page.getByRole('button', { name: /分流规则/ }).click()
-    await expect(page.getByRole('heading', { level: 1, name: '每个目的地，都有自己的路。' })).toBeVisible()
+    await expect(page.getByRole('heading', { level: 1, name: macWorkspace ? '白名单与覆盖规则' : '每个目的地，都有自己的路。' })).toBeVisible()
+    if (macWorkspace) {
+      const draft = page.getByLabel('高级策略 JSON')
+      await expect(draft).toHaveValue(/fixture-0\.example\.org/)
+      const edited = { ...policy, ports: { ...policy.ports, proxy: 19090 } }
+      await draft.fill(JSON.stringify(edited))
+      await page.getByRole('button', { name: '应用配置', exact: true }).click()
+      await expect(page.getByText(/配置操作已完成/)).toBeVisible()
+      expect(JSON.parse(await readFile(join(profile, 'policy.json'), 'utf8')).ports.proxy).toBe(19090)
+      await page.getByRole('button', { name: '工作空间设置', exact: true }).click()
+      await expect(page.getByRole('button', { name: '选择本机配置目录', exact: true })).toBeVisible()
+      await expect(page.getByRole('button', { name: '恢复默认配置目录', exact: true })).toHaveCount(0)
+    }
     await page.getByRole('button', { name: /诊断与恢复/ }).click()
-    await expect(page.getByRole('heading', { level: 1, name: '看清状态，安心恢复。' })).toBeVisible()
+    await expect(page.getByRole('heading', { level: 1, name: macWorkspace ? '诊断、版本与恢复' : '看清状态，安心恢复。' })).toBeVisible()
     await checkRecoveryCapability(page, userData)
     const environment = await page.evaluate(() => window.lumina.checkEnvironment())
     expect(environment.checks.find(x => x.id === 'runtime_bundle')?.state).toBe('passed')
@@ -156,7 +178,7 @@ test('desktop reads real fixtures, protects IPC and ages evidence', async () => 
     expect(await page.evaluate(() => document.body.scrollWidth > window.innerWidth)).toBe(false)
     await page.screenshot({ path: join(root, 'overview.png'), fullPage: true })
     expect(errors).toEqual([])
-    // Explicit exit in this test concerns only the read-only UI and bridge.
+    // The saved fixture run does not correspond to a live network process.
   } finally { await application.close() }
 })
 
@@ -190,9 +212,10 @@ test('packaged preview uses fixed resources and reloads a crashed renderer', asy
     expect(existsSync(join(layout.resources, 'backend', process.platform === 'win32' ? 'netlaunch.exe' : 'netlaunch'))).toBe(true)
     const manifest = JSON.parse(await readFile(join(layout.resources, 'runtime', 'manifest.json'), 'utf8'))
     expect({ os: manifest.os, arch: manifest.arch }).toEqual(process.platform === 'win32' ? { os: 'windows', arch: 'amd64' } : { os: 'darwin', arch: 'arm64' })
-    expect((await page.evaluate(() => window.lumina.hello())).capabilities.read_only).toBe(true)
+    const { capabilities } = await page.evaluate(() => window.lumina.hello())
+    expect(capabilities.read_only).toBe(process.platform === 'win32')
     await page.getByRole('button', { name: /诊断与恢复/ }).click()
-    await expect(page.getByRole('heading', { name: '看清状态，安心恢复。' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: capabilities.config_write ? '诊断、版本与恢复' : '看清状态，安心恢复。' })).toBeVisible()
     await checkRecoveryCapability(page, userData)
     expect((await page.evaluate(() => window.lumina.checkEnvironment())).checks.find(x => x.id === 'runtime_bundle')?.state).toBe('passed')
     await page.getByRole('button', { name: /^总览/ }).click()

@@ -102,6 +102,13 @@ class SourceBoundaryTests(unittest.TestCase):
         for name in ['scripts/home.private.ps1', 'scripts/entries-windows/private.cmd', 'scripts/entries-windows/nested/启动.cmd', 'scripts/unknown.ps1']:
             self.assertTrue(check.scan([(name, '100644', b'local setup')], set()))
 
+    def test_mobile_api_allows_only_reviewed_go_sources(self):
+        for name in ['sdk/mobile/mobile.go', 'sdk/mobile/mobile_test.go']:
+            self.assertFalse(check.scan([(name, '100644', b'public source')], set()))
+            self.assertTrue(check.scan([(name, '100644', b'private-fixture')], {'private-fixture'}))
+        for name in ['sdk/mobile/validation.aar', 'sdk/mobile/acceptance-report.md', 'sdk/mobile/profile.json', 'sdk/mobile/local.go']:
+            self.assertTrue(check.scan([(name, '100644', b'local artifact')], set()))
+
     def test_private_file_cannot_be_forced_into_index(self):
         for name in ['profiles/policy.json', '.local/result.json', 'scripts/network.private.json', 'dist/preview.zip', 'acceptance-report.md']:
             self.assertTrue(check.scan([(name, '100644', b'{}')], set()))

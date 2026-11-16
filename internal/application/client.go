@@ -18,27 +18,28 @@ import (
 )
 
 var ClientMethods = []string{"service.snapshot", "service.submit", "service.operation", "workspace.read", "workspace.submit"}
+var LocalWorkspaceMethods = []string{"service.operation", "workspace.read", "workspace.submit"}
 
 func (d *Desktop) desktopPolicy() (policy.Config, error) {
-	if d.ClientEnabled() {
+	if d.WorkspaceEnabled() {
 		return app.DesktopWorkspacePolicy(d.Profile)
 	}
 	return app.DesktopPolicy(d.Profile)
 }
 func (d *Desktop) desktopNodes(cfg policy.Config) ([]policy.Node, error) {
-	if d.ClientEnabled() {
+	if d.WorkspaceEnabled() {
 		return app.DesktopWorkspaceNodes(d.Profile, cfg)
 	}
 	return app.DesktopNodes(d.Profile, cfg)
 }
 func (d *Desktop) desktopRules(cfg policy.Config) ([]policy.PlannedRule, error) {
-	if d.ClientEnabled() {
+	if d.WorkspaceEnabled() {
 		return app.DesktopWorkspaceRules(d.Profile, cfg)
 	}
 	return app.DesktopRules(d.Profile, cfg)
 }
 func (d *Desktop) desktopSubscriptions(cfg policy.Config) (app.DesktopSubscription, error) {
-	if d.ClientEnabled() {
+	if d.WorkspaceEnabled() {
 		return app.DesktopWorkspaceSubscriptions(d.Profile, cfg)
 	}
 	return app.DesktopSubscriptions(d.Profile, cfg)
@@ -52,9 +53,14 @@ func IsClientMethod(method string) bool {
 	}
 	return false
 }
-func (d *Desktop) ClientEnabled() bool { return runtime.GOOS == "windows" && d.Control != nil }
+func (d *Desktop) ClientEnabled() bool    { return runtime.GOOS == "windows" && d.Control != nil }
+func (d *Desktop) WorkspaceEnabled() bool { return d.ClientEnabled() || d.localWorkspace != nil }
 func (d *Desktop) ClientProfileID() string {
-	sum := sha256.Sum256([]byte(strings.ToLower(d.Profile)))
+	profile := d.Profile
+	if runtime.GOOS == "windows" {
+		profile = strings.ToLower(profile)
+	}
+	sum := sha256.Sum256([]byte(profile))
 	return hex.EncodeToString(sum[:16])
 }
 func clientDecode(raw json.RawMessage, target any) error {
@@ -123,8 +129,8 @@ func onlyClientKeys(raw json.RawMessage, allowed ...string) bool {
 	return true
 }
 func (d *Desktop) ClientRequest(ctx context.Context, method string, raw json.RawMessage) (any, error) {
-	if !d.ClientEnabled() {
-		return nil, unavailable("CLIENT_UNAVAILABLE", "Windows client controls are unavailable in this build.")
+	if !d.ClientEnabled() && (d.localWorkspace == nil || method == "service.snapshot" || method == "service.submit") {
+		return nil, unavailable("CLIENT_UNAVAILABLE", "This desktop operation is unavailable in the current build.")
 	}
 	switch method {
 	case "service.snapshot":
@@ -145,6 +151,9 @@ func (d *Desktop) ClientRequest(ctx context.Context, method string, raw json.Raw
 		}
 		if clientDecode(raw, &p) != nil || !serviceprotocol.ValidID(p.ID) {
 			return nil, unavailable("INVALID_PARAMS", "One operation identifier is required.")
+		}
+		if d.localWorkspace != nil {
+			return d.localWorkspace.operation(p.ID)
 		}
 		op, err := d.Control.Operation(ctx, p.ID)
 		if err != nil {
@@ -190,6 +199,11 @@ func (d *Desktop) readWorkspace(ctx context.Context, raw json.RawMessage) (any, 
 	var result any
 	var err error
 	switch p.Action {
+	case "activity":
+		if d.localWorkspace == nil || !onlyClientKeys(raw, "profile_id", "action") {
+			break
+		}
+		result = map[string]any{"active": d.localWorkspace.busy()}
 	case "document":
 		if !onlyClientKeys(raw, "profile_id", "action") {
 			break
@@ -281,6 +295,9 @@ func (d *Desktop) submitWorkspace(ctx context.Context, raw json.RawMessage) (any
 		allowed = append(allowed, "content")
 	case "sync":
 	case "cleanup":
+		if d.localWorkspace != nil {
+			return nil, unavailable("CLIENT_UNAVAILABLE", "Privileged run cleanup is unavailable in the local workspace.")
+		}
 		allowed = append(allowed, "opaque_run_id")
 		if !serviceprotocol.ValidID(p.OpaqueRunID) {
 			return nil, unavailable("INVALID_PARAMS", "Invalid run identifier.")
@@ -296,6 +313,13 @@ func (d *Desktop) submitWorkspace(ctx context.Context, raw json.RawMessage) (any
 	if (p.Action == "apply" || p.Action == "rollback" || p.Action == "sources_save") && (len(p.ExpectedRevision) == 0 || len(p.ExpectedRevision) > 128) || len(p.Revision) > 128 {
 		return nil, unavailable("INVALID_PARAMS", "A bounded revision precondition is required.")
 	}
+	workspace := &serviceprotocol.WorkspacePayload{Action: p.Action, PolicyJSON: json.RawMessage(p.PolicyJSON), BootstrapJSON: json.RawMessage(p.BootstrapJSON), ExpectedPolicyRevision: p.ExpectedRevision, Revision: p.Revision, Content: p.Content, OpaqueRunID: p.OpaqueRunID, SourcesJSON: json.RawMessage(p.SourcesJSON)}
+	if workspace.Validate() != nil {
+		return nil, unavailable("INVALID_PARAMS", "Workspace command is not supported by the desktop contract.")
+	}
+	if d.localWorkspace != nil {
+		return d.localWorkspace.submit(p.RequestID, *workspace)
+	}
 	snapshot, err := d.Control.Snapshot(ctx, d.ClientProfileID())
 	if err != nil {
 		return nil, clientFailure(err)
@@ -307,7 +331,6 @@ func (d *Desktop) submitWorkspace(ctx context.Context, raw json.RawMessage) (any
 		return nil, unavailable("SERVICE_UNAVAILABLE", "The service is not available for workspace changes.")
 	}
 	// The service owns the asynchronous operation. The UI bridge never creates a worker.
-	workspace := &serviceprotocol.WorkspacePayload{Action: p.Action, PolicyJSON: json.RawMessage(p.PolicyJSON), BootstrapJSON: json.RawMessage(p.BootstrapJSON), ExpectedPolicyRevision: p.ExpectedRevision, Revision: p.Revision, Content: p.Content, OpaqueRunID: p.OpaqueRunID, SourcesJSON: json.RawMessage(p.SourcesJSON)}
 	mutation := serviceprotocol.Mutation{RequestID: p.RequestID, ProfileID: d.ClientProfileID(), ExpectedRevision: snapshot.Revision, RunRef: snapshot.RunRef, Kind: serviceprotocol.Workspace, Workspace: workspace}
 	if mutation.Validate() != nil {
 		return nil, unavailable("INVALID_PARAMS", "Workspace command is not supported by the service contract.")

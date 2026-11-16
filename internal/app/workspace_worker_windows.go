@@ -58,27 +58,8 @@ func WorkspaceWorker(in io.Reader, out io.Writer) error {
 		return errors.New("profile is not enrolled in the user workspace")
 	}
 	d := DesktopCommands{Profile: profile}
-	w := request.Workspace
 	ctx := context.Background() // The service owns the process/operation lifetime.
-	var result any
-	switch w.Action {
-	case "initialize":
-		result, err = d.Initialize(ctx, w.PolicyJSON, w.BootstrapJSON)
-	case "apply":
-		result, err = d.ApplyDraft(ctx, w.PolicyJSON, w.ExpectedPolicyRevision)
-	case "rollback":
-		result, err = d.Rollback(ctx, w.Revision, w.ExpectedPolicyRevision)
-	case "import_nodes":
-		result, err = d.ImportNodes(ctx, []byte(w.Content))
-	case "sync":
-		result, err = d.SyncSubscriptions(ctx)
-	case "sources_save":
-		result, err = d.SaveSources(ctx, w.SourcesJSON, w.ExpectedPolicyRevision)
-	case "cleanup":
-		result, err = d.ApplyCleanup(ctx, w.OpaqueRunID)
-	default:
-		return errors.New("workspace action unavailable")
-	}
+	result, err := d.Execute(ctx, request.Workspace)
 	if err != nil {
 		return errors.New("workspace action failed; private details omitted")
 	}

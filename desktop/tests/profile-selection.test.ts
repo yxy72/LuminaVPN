@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { commitProfileSelection, type ProfileBridge, type ProfileSelection } from '../src/main/profile-selection'
+import { assertLocalWorkspaceIdle, commitProfileSelection, type ProfileBridge, type ProfileSelection } from '../src/main/profile-selection'
 import type { BridgeMethod } from '../protocol/validation'
 import type { ServiceSnapshot } from '../protocol/client'
 
@@ -123,6 +123,49 @@ describe('profile selection owns one validated bridge context', () => {
     const old = context('old'), next = context('arbitrary-cli'), tx = transaction(old.target, next.target, { clientMode: false })
     expect(await commitProfileSelection(tx.options)).toMatchObject({ profile_id: 'arbitrary-cli' })
     expect([...old.requests, ...next.requests]).not.toContain('service.snapshot')
+  })
+  it.each([
+    { active: true, profile_id: 'mac', error: 'WORKSPACE_BUSY' },
+    { active: false, profile_id: 'another', error: 'PROFILE_MISMATCH' },
+    { active: 'false', profile_id: 'mac', error: 'PROFILE_MISMATCH' },
+  ])('blocks a macOS profile switch when activity cannot prove idle', async ({ error, ...activity }) => {
+    const old = context('mac'), next = context('next')
+    const baseRequest = old.target.request
+    old.target.request = (method, params) => method === 'workspace.read' ? Promise.resolve(activity) : baseRequest(method, params)
+    const tx = transaction(old.target, next.target, { clientMode: false, localWorkspace: true })
+    await expect(commitProfileSelection(tx.options)).rejects.toMatchObject({ code: error })
+    expect(tx.persist).not.toHaveBeenCalled()
+    expect(old.target.close).not.toHaveBeenCalled()
+  })
+  it('checks macOS configuration activity again before publishing a different profile', async () => {
+    const old = context('mac'), next = context('next')
+    const baseRequest = old.target.request
+    const nextRequest = next.target.request
+    let checks = 0
+    old.target.request = (method, params) => {
+      if (method !== 'workspace.read') return baseRequest(method, params)
+      expect(params).toEqual({ action: 'activity', profile_id: 'mac' })
+      return Promise.resolve({ profile_id: 'mac', active: ++checks > 1 })
+    }
+    next.target.request = (method, params) => method === 'session.hello'
+      ? Promise.resolve({ capabilities: { windows_client: false, config_write: true } })
+      : nextRequest(method, params)
+    const tx = transaction(old.target, next.target, { clientMode: false, localWorkspace: true })
+    await expect(commitProfileSelection(tx.options)).rejects.toMatchObject({ code: 'WORKSPACE_BUSY' })
+    expect(checks).toBe(2)
+    expect(tx.publish).not.toHaveBeenCalled()
+    expect(next.target.close).toHaveBeenCalledOnce()
+  })
+  it('uses only the scoped macOS activity check before allowing UI exit with an existing network run', async () => {
+    const mac = context('mac')
+    const baseRequest = mac.target.request
+    mac.target.request = (method, params) => {
+      if (method !== 'workspace.read') return baseRequest(method, params)
+      expect(params).toEqual({ action: 'activity', profile_id: 'mac' })
+      return Promise.resolve({ profile_id: 'mac', active: false })
+    }
+    await expect(assertLocalWorkspaceIdle(mac.target)).resolves.toBeUndefined()
+    expect(mac.requests).toEqual(['profile.inspect'])
   })
   it('keeps the old bridge if atomic preferences persistence fails', async () => {
     const old = context('old'), next = context('next'), tx = transaction(old.target, next.target, { persist: async () => { throw unavailable('WRITE_FAILED') } })

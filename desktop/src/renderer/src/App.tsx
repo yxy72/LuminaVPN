@@ -157,6 +157,7 @@ function errorMessage(error: unknown): string {
         POLICY_INVALID: "策略配置未通过校验，请使用本地配置入口检查。",
         RULE_SOURCE_UNAVAILABLE: "规则来源缓存暂不可用，请使用已有 CLI 同步后刷新。",
         NODE_CACHE_UNAVAILABLE: "节点缓存暂不可用，请使用已有 CLI 导入或同步后刷新。",
+        WORKSPACE_BUSY: "有配置操作正在进行，请等待完成后切换配置。",
         PROFILE_BUSY: "当前配置仍有活动或未确认的运行，请先通过独立恢复入口停止并确认，再切换配置。",
         PROFILE_NOT_ENROLLED: "此目录未登记到后台服务，已保留原配置目录。可在设置中恢复默认配置目录。",
         PROFILE_MISMATCH: "后台登记与目录标识不一致，已保留原配置目录。",
@@ -1455,7 +1456,8 @@ function Preferences({
 
 export default function App() {
   const app = useData();
-  const clientMode = app.data.hello?.capabilities.windows_client === true && !!window.lumina?.client;
+  const workspaceMode = app.data.hello?.capabilities.config_write === true && !!window.lumina?.client;
+  const windowsClient = workspaceMode && app.data.hello?.capabilities.windows_client === true;
   const [page, setPage] = useState<Page>("overview");
   const [now, setNow] = useState(Date.now());
   const [environment, setEnvironment] = useState<Environment | null>(null);
@@ -1577,7 +1579,7 @@ export default function App() {
             <Settings2 size={15} strokeWidth={1.4} />
             工作空间设置
           </button>
-          <Badge>{clientMode ? "Windows 客户端" : "只读工程预览"}</Badge>
+          <Badge>{windowsClient ? "Windows 客户端" : workspaceMode ? "本机配置工作空间" : "只读工程预览"}</Badge>
           <div className="build">
             <i className={`dot ${app.control === "available" ? "" : "dim"}`} />
             {app.data.hello?.build.version ?? "LuminaVPN Desktop"}
@@ -1606,7 +1608,7 @@ export default function App() {
             </Badge>
           </div>
         </div>
-        <div className="page" key={clientMode ? "client-workspace" : page}>
+        <div className="page" key={workspaceMode ? "client-workspace" : page}>
           {(app.error || notice) && (
             <div className="control-banner" role="status">
               <Unplug size={15} />
@@ -1631,8 +1633,8 @@ export default function App() {
               )}
             </div>
           )}
-          {clientMode && window.lumina.client && app.data.profile?.profile_id && <ClientWorkspace key={app.data.profile.profile_id} profileID={app.data.profile.profile_id} page={page} validationOnly={app.data.hello?.capabilities.validation_only===true} api={window.lumina.client} refreshInventory={refresh} nodes={app.data.nodes} subscriptions={app.data.subscriptions} config={app.data.config} loadNodes={app.loadNodes} loadRules={app.loadRules} chooseProfile={()=>chooseProfile()} restoreDefaultProfile={()=>chooseProfile(true)} checking={checking} environmentCheck={environment} checkEnvironment={() => { void checkEnvironment() }} showRecovery={() => { void showRecovery() }} />}
-          {!clientMode && page === "overview" && (
+          {workspaceMode && window.lumina.client && app.data.profile?.profile_id && <ClientWorkspace key={app.data.profile.profile_id} profileID={app.data.profile.profile_id} page={page} windowsClient={windowsClient} validationOnly={app.data.hello?.capabilities.validation_only===true} api={window.lumina.client} refreshInventory={refresh} nodes={app.data.nodes} subscriptions={app.data.subscriptions} config={app.data.config} loadNodes={app.loadNodes} loadRules={app.loadRules} chooseProfile={()=>chooseProfile()} restoreDefaultProfile={()=>chooseProfile(true)} checking={checking} environmentCheck={environment} checkEnvironment={() => { void checkEnvironment() }} showRecovery={() => { void showRecovery() }} />}
+          {!windowsClient && page === "overview" && (
             <Overview
               data={app.data}
               now={now}
@@ -1642,21 +1644,21 @@ export default function App() {
               refresh={refresh}
             />
           )}
-          {!clientMode && page === "nodes" && (
+          {!workspaceMode && page === "nodes" && (
             <NodePage
               data={app.data}
               loading={app.loading}
               loadNodes={app.loadNodes}
             />
           )}
-          {!clientMode && page === "rules" && (
+          {!workspaceMode && page === "rules" && (
             <RulesPage
               data={app.data}
               loading={app.loading}
               loadRules={app.loadRules}
             />
           )}
-          {!clientMode && page === "diagnostics" && (
+          {!workspaceMode && page === "diagnostics" && (
             <Diagnostics
               data={app.data}
               now={now}
@@ -1672,7 +1674,7 @@ export default function App() {
               }}
             />
           )}
-          {!clientMode && page === "settings" && (
+          {!workspaceMode && page === "settings" && (
             <Preferences
               data={app.data}
               loading={app.loading}

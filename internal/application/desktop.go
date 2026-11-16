@@ -36,6 +36,7 @@ type Desktop struct {
 	Profile, Runtime string
 	Now              func() time.Time
 	Control          serviceprotocol.Client
+	localWorkspace   *localWorkspace
 }
 
 func NewDesktop(profile, bundle string) (*Desktop, error) {
@@ -85,8 +86,8 @@ type Profile struct {
 }
 
 func (d *Desktop) InspectProfile() Profile {
-	p := Profile{Configured: d.configured(), ProfileName: "本机配置", Issues: []string{}, ReadOnly: true}
-	if d.ClientEnabled() {
+	p := Profile{Configured: d.configured(), ProfileName: "本机配置", Issues: []string{}, ReadOnly: !d.WorkspaceEnabled()}
+	if d.WorkspaceEnabled() {
 		p.ProfileID = d.ClientProfileID()
 	}
 	if !p.Configured {

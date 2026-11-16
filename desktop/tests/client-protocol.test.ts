@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
-import { CLIENT_METHODS, validateClientRequest, validateClientResult } from '../protocol/client'
+import { CLIENT_METHODS, LOCAL_WORKSPACE_METHODS, validateWorkspaceActivity, validateClientRequest, validateClientResult } from '../protocol/client'
 import { validateRequest, validateResult } from '../protocol/validation'
 import { READ_METHODS } from '../protocol/types'
 
@@ -53,11 +53,27 @@ describe('Windows client closed boundary', () => {
     expect(validateClientResult('service.operation',{...operation,error:{code:'bad command private-canary',message:'',retryable:false}})).toBe(false)
     expect(validateClientResult('service.operation',{operation_id:'operation',phase:'completed',completed:true,restored:true})).toBe(false)
   })
-  it('advertises exactly eight read methods or thirteen explicit Windows client methods',()=>{
+  it('accepts only scoped activity requests and boolean activity responses', () => {
+    const request = { action: 'activity', profile_id: 'profile' }
+    expect(validateClientRequest('workspace.read', request)).toBe(true)
+    expect(validateClientRequest('workspace.read', { ...request, include_secrets: true })).toBe(false)
+    expect(validateClientRequest('workspace.read', { ...request, profile_id: '/private/path' })).toBe(false)
+    expect(validateWorkspaceActivity({ profile_id: 'profile', active: false })).toBe(true)
+    expect(validateWorkspaceActivity({ profile_id: 'profile', active: 'false' })).toBe(false)
+    expect(validateWorkspaceActivity({ profile_id: 'profile', active: false, command: 'unexpected' })).toBe(false)
+  })
+  it('advertises exactly eight read methods, eleven macOS workspace methods or thirteen Windows methods',()=>{
     const hello={protocol_major:1,session_id:'session',build:{version:'fixture',os:'windows',arch:'amd64',go_version:'fixture'},mode:'windows_offline',capabilities:{read_only:false,connection_start:true,connection_stop:true,config_write:true,native_lifecycle:false,windows_client:true,methods:[...READ_METHODS,...CLIENT_METHODS]}}
     expect(validateResult('session.hello',hello)).toBe(true)
     expect(validateResult('session.hello',{...hello,build:{...hello.build,os:'darwin'}})).toBe(false)
     expect(validateResult('session.hello',{...hello,capabilities:{...hello.capabilities,methods:[...READ_METHODS]}})).toBe(false)
     expect(validateResult('session.hello',{...hello,capabilities:{...hello.capabilities,read_only:true,connection_start:false,connection_stop:false,config_write:false,windows_client:false}})).toBe(false)
+    const mac = { ...hello, build: { ...hello.build, os: 'darwin', arch: 'arm64' }, mode: 'native',
+      capabilities: { ...hello.capabilities, connection_start: false, connection_stop: false, windows_client: false,
+        native_lifecycle: true, methods: [...READ_METHODS, ...LOCAL_WORKSPACE_METHODS] } }
+    expect(validateResult('session.hello', mac)).toBe(true)
+    expect(validateResult('session.hello', { ...mac, capabilities: { ...mac.capabilities, connection_start: true } })).toBe(false)
+    expect(validateResult('session.hello', { ...mac, capabilities: { ...mac.capabilities, methods: [...READ_METHODS, ...CLIENT_METHODS] } })).toBe(false)
+    expect(validateResult('session.hello', { ...mac, build: hello.build })).toBe(false)
   })
 })

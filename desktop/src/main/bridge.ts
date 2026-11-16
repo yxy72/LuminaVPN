@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { TextDecoder } from 'node:util'
 import { isRecord, validateRequest, validateResult } from '../../protocol/validation'
+import type { Hello } from '../../protocol/types'
 import type { BridgeMethod } from '../../protocol/validation'
 
 const FRAME_LIMIT = 1 << 20
@@ -16,6 +17,8 @@ export class Bridge {
   private nextID = 0
   private starting: Promise<void> | null = null
   private disposed = false
+  private localWorkspace = false
+  private retiring: Promise<void> | null = null
   constructor(private binary: string, private runtime: string, private profile: string | undefined, private version: string) {}
 
   async start(): Promise<void> {
@@ -26,6 +29,18 @@ export class Bridge {
     try { await this.starting } finally { this.starting = null }
   }
   private async launch(): Promise<void> {
+    if (this.retiring) {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      try {
+        await Promise.race([
+          this.retiring,
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new DesktopError('CONTROL_UNAVAILABLE')), 5500)
+          }),
+        ])
+      } finally { clearTimeout(timer) }
+    }
+    if (this.disposed) throw new DesktopError('CONTROL_DISCONNECTED')
     const args = ['desktop', 'serve', '--runtime', this.runtime]
     if (this.profile) args.push('--profile', this.profile)
     const env = { ...process.env }
@@ -61,8 +76,14 @@ export class Bridge {
     child.on('error', () => { if (this.child === child) this.fail('CONTROL_UNAVAILABLE') })
     child.on('exit', () => { if (this.child === child) this.fail('CONTROL_DISCONNECTED') })
     child.stdin.on('error', () => { if (this.child === child) this.fail('CONTROL_DISCONNECTED') })
-    try { await this.send('session.hello', { protocol_major: 1, app_version: this.version }) }
-    catch (e) { this.fail('CONTROL_UNAVAILABLE'); throw e }
+    try {
+      const hello = await this.send('session.hello', { protocol_major: 1, app_version: this.version }) as Hello
+      if (this.child !== child) throw new DesktopError('CONTROL_DISCONNECTED')
+      this.localWorkspace = hello.capabilities.config_write && hello.capabilities.windows_client !== true
+    } catch (error) {
+      if (this.child === child) this.fail('CONTROL_UNAVAILABLE')
+      throw error
+    }
   }
   async request(method: BridgeMethod, params: Record<string, unknown> = {}): Promise<unknown> {
     validateRequest(method, params)
@@ -81,12 +102,23 @@ export class Bridge {
     })
   }
   private fail(code: string): void {
-    const child = this.child; this.child = null
+    const child = this.child
+    const workspaceOwner = this.localWorkspace
+    this.child = null
+    this.localWorkspace = false
     for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(new DesktopError(code)) }
-    this.pending.clear(); this.bytes = Buffer.alloc(0)
-    // This child is the ordinary IPC proxy. Network operations belong to the
-    // service and survive this proxy's EOF, timeout or termination.
-    child?.stdin.end(); child?.kill()
+    this.pending.clear()
+    this.bytes = Buffer.alloc(0)
+    if (!child) return
+    if (workspaceOwner && child.exitCode == null && child.signalCode == null) {
+      // EOF lets the local owner cancel and drain configuration work. A fresh
+      // process must not report idle while the previous owner is still draining.
+      const retired = new Promise<void>(resolve => child.once('close', resolve))
+      this.retiring = retired
+      void retired.then(() => { if (this.retiring === retired) this.retiring = null })
+    }
+    child.stdin.end()
+    if (!workspaceOwner) child.kill()
   }
   close(): void { this.disposed = true; this.fail('CONTROL_DISCONNECTED') }
 }

@@ -14,7 +14,9 @@ Windows 客户端默认配置位于系统原生 ProgramData 下的 `LuminaVPN-Us
 
 升级会先确认旧服务停止并完成恢复，再处理程序文件。兼容旧版卸载器时，文件占用可能导致部分文件已删除；安装器会拒绝覆盖仍有额外残留的目录，此路径不保证文件回滚或直接重试即可恢复。受保护的恢复状态与用户配置会保留，不应手动删除它们来绕过安装检查。
 
-Windows 后台只管理已登记的配置目录，首版安装登记当前用户的默认目录。选择未登记目录会保留原偏好和连接；旧偏好指向未登记目录时，可显式恢复默认目录，接回服务确认的运行。切换其它已登记目录前须停止并确认恢复。诊断页可显示应用之外的独立恢复入口，显示入口不会执行恢复。Mac 和 Windows 离线构建保留只读桌面能力，配置、连接和认证继续使用原 CLI；配置目录不存在时不会自动创建。
+Windows 后台只管理已登记的配置目录，首版安装登记当前用户的默认目录。选择未登记目录会保留原偏好和连接；旧偏好指向未登记目录时，可显式恢复默认目录，接回服务确认的运行。切换其它已登记目录前须停止并确认恢复。诊断页可显示应用之外的独立恢复入口。
+
+Mac 桌面支持初始化配置、导入节点、同步订阅、编辑和回退策略，连接和认证仍使用 CLI。保存的策略在下次启动时生效。首次启动界面时保留现有配置，只有明确初始化才创建配置。Windows 离线构建提供只读桌面能力。
 
 开发需要 Node.js 22.12+ 与 Go 1.26+；运行打包应用不需要安装开发工具。在 `desktop/` 执行：
 
@@ -26,7 +28,7 @@ npm run package:mac
 
 Go 不在 PATH 时，通过 `NETLAUNCH_GO` 指定构建工具。构建只读取固定 runtime；Windows 客户端须在 Windows x64 原生构建，以 `LUMINA_BUILD_RUNTIME` 指向符合 Windows 清单的 runtime，在 `desktop/` 执行 `npm run package:win` 或 `npm run package:win:validation`。输出位于已忽略的 `.local/windows-client-packages/`。两个模式都固定为全机安装，打包时校验三个 Go 程序、运行组件、后台安装接口与包内字节；当前为未签名开发包。本机安装预检未通过时，完整有效的接口观测仍可用于构建，但会明确告警，并在包外保存 `build-host-readiness.json`；构建成功不表示本机可安装。实际安装器会重新执行原生预检，失败时仍在续办和旧卸载之前退出。这些变量仅用于构建，发货应用不接受执行路径或页面 URL 覆盖。Windows 使用的规则核心补丁和重建输入见 `scripts/patches/`。
 
-`npm run test:electron` 使用虚构配置检查只读桌面行为，并在本机实包存在时验证打包资源和窗口崩溃恢复。Windows 默认检查 `win-unpacked/LuminaVPN.exe`；验证已安装程序时，可将 `LUMINA_TEST_WINDOWS_EXE` 设为该程序的绝对路径。测试仅为新建的配置对象设置私有权限，不修改已有配置或系统网络。
+`npm run test:electron` 使用虚构配置检查桌面行为，并在本机实包存在时验证打包资源和窗口崩溃恢复。Windows 默认检查 `win-unpacked/LuminaVPN.exe`；验证已安装程序时，可将 `LUMINA_TEST_WINDOWS_EXE` 设为该程序的绝对路径。测试仅为新建的配置对象设置私有权限。
 
 Mac `.app` 输出到已忽略的 `.local/desktop-packages/mac-arm64/`。使用 `scripts/check-desktop-package.py APP_PATH` 检查 ASAR 内容、运行组件摘要和恢复资源。`npm run sign:preview:mac` 验证运行组件签名并对 Electron 包做本地 ad hoc 签名；不会改变已校验的 runtime 字节，也不提供正式发布签名、公证或系统信任保证。当前关闭窗口隐藏到菜单栏；退出界面保留由 CLI 建立的网络运行。
 
@@ -132,6 +134,8 @@ macOS 的 `doctor` 会在 `port_checks` 中区分当前用户可绑定的端口�
 
 也可使用包内的双击入口。`up` 会先完成检查；需要时打开本机公司认证终端，随后请求一次 macOS 管理员授权。只有三个通道的系统路径检查都通过才显示 `ready`。
 
+Mac 上可用 `up --validation-timeout=5m` 启动限时验证。期限从准备运行清单时起算，可设置 1 秒至 45 分钟。到期后协调器停止，独立看门狗也会执行恢复；已过期的准备目录需要重新生成。
+
 `status` 的 `channels.company`、`channels.personal`、`channels.direct` 分别包含 `state`、`reason`、`checked_at` 和需要时的 `next_action`；个人通道失败不再直接表示公司不可用。新探测证据还分别给出 `path_state`（verified/failed/unknown）和 `service_state`（healthy/failed/not_checked/unknown）。服务返回不符时可以同时显示路径 verified、服务 failed；healthy 只代表配置的 HTTP 状态符合预期。`lifecycle` 表示启动、运行或停止阶段，`phase` 保留总体状态。网络/VPN 代次/节点变化会使旧健康证据失效，超过 90 秒未复核的 ready 和细分证据显示为 unknown；旧格式状态文件继续兼容读取。
 
 输入的密码与动态码不保存；私有配置目录中仅缓存已认证 VPN 会话，最长复用两小时。服务器可提前使其失效。需要重新认证时执行：
@@ -169,6 +173,8 @@ macOS 的 `doctor` 会在 `port_checks` 中区分当前用户可绑定的端口�
 只有管理员状态已记录恢复完成、所有记录的进程 ID 均不在使用、Windows 资源日志全部恢复时才允许清理。当前配置引用和 Windows 全局引用的运行、缺失恢复记录、未启动的 prepared 运行都会保留。清理删除两侧的 runtime 副本、日志和残留节点/会话/core 配置；冻结启动器、状态/配置快照、STOP、恢复入口和锁文件继续保留，目录本身不会删除。默认预览只建立互斥锁，不删除内容。中途失败可重试；不要手动删除剩余恢复记录。
 
 ## 工程开发
+
+`sdk/mobile` 提供可供移动端绑定的 Go 接口，包括保存态策略校验、按通道与环境生成静态规则计划、解释单个目标的分流和解析规则订阅。接口使用本地输入数据，实际接管网络由各平台负责。
 
 新运行使用 v2 恢复存储：管理员目录中的 `run-spec.json` 保存一次不可变配置与启动身份，`state.json` 保存当前网络绑定、进程和资源恢复记录，并用摘要绑定该配置。每秒心跳改写独立的 `heartbeat.json`，不再重写完整配置或占用原生状态锁；`status.updated` 表示最近一次状态快照更新，不是实时心跳。旧 v1 运行继续按原格式恢复，不原地迁移；请保留每个运行自己的冻结程序、配置记录和日志，不要用旧程序直接处理 v2 状态。
 

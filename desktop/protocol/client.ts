@@ -18,7 +18,7 @@ export type ServiceMutation = { request_id: string; profile_id: string; expected
   { kind: 'node_select'; selection: { node_id: string } } |
   { kind: 'settings_apply'; settings: ServiceSettings } |
   { kind: 'profile_apply'; profile: { policy: Record<string, unknown>; nodes: Record<string, unknown>[]; name: string } })
-export type WorkspaceReadBody = { action: 'document' | 'history' | 'diagnostics' | 'cleanup_preview' | 'runtime' | 'version' | 'recovery_entry' } | { action: 'validate' | 'diff'; policy_json: string } | { action: 'explain'; target: string }
+export type WorkspaceReadBody = { action: 'activity' | 'document' | 'history' | 'diagnostics' | 'cleanup_preview' | 'runtime' | 'version' | 'recovery_entry' } | { action: 'validate' | 'diff'; policy_json: string } | { action: 'explain'; target: string }
 export type WorkspaceRead = {profile_id:string} & WorkspaceReadBody
 export type WorkspaceWrite = { request_id: string;profile_id:string } & (
   { action: 'initialize'; policy_json: string; bootstrap_json?: never } | { action: 'initialize'; bootstrap_json: string; policy_json?: never } |
@@ -35,6 +35,11 @@ export interface ClientAPI {
 }
 export const CLIENT_METHODS = ['service.snapshot', 'service.submit', 'service.operation', 'workspace.read', 'workspace.submit'] as const
 export type ClientMethod = typeof CLIENT_METHODS[number]
+export const LOCAL_WORKSPACE_METHODS = ['service.operation', 'workspace.read', 'workspace.submit'] as const satisfies readonly ClientMethod[]
+export interface WorkspaceActivity { profile_id: string; active: boolean }
+export function validateWorkspaceActivity(value: unknown): value is WorkspaceActivity {
+  return isRecord(value) && Object.keys(value).length === 2 && opaqueID(value.profile_id) && typeof value.active === 'boolean'
+}
 export const opaqueID = (x: unknown): x is string => typeof x === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(x)
 const text = (x: unknown, max = 65536): x is string => typeof x === 'string' && x.length <= max && new TextEncoder().encode(x).byteLength <= max
 const uint = (x: unknown): x is number => Number.isSafeInteger(x) && (x as number) >= 0
@@ -60,7 +65,7 @@ export function validateMutation(value: unknown): value is ServiceMutation {
 }
 export function validateWorkspaceRead(x: unknown): x is WorkspaceRead {
   if (!isRecord(x)||!opaqueID(x.profile_id)) return false
-  if (['document','history','diagnostics','cleanup_preview','runtime','version','recovery_entry'].includes(String(x.action))) return own(x,['action','profile_id'])
+  if (['activity','document','history','diagnostics','cleanup_preview','runtime','version','recovery_entry'].includes(String(x.action))) return own(x,['action','profile_id'])
   if (x.action === 'validate' || x.action === 'diff') return own(x,['action','policy_json','profile_id']) && text(x.policy_json)
   return x.action === 'explain' && own(x,['action','target','profile_id']) && text(x.target,253) && !!x.target && !/[\s\x00-\x1f]/.test(x.target)
 }

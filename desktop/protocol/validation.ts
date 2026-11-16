@@ -1,4 +1,4 @@
-import { CLIENT_METHODS, validateClientRequest, validateClientResult, type ClientMethod } from './client'
+import { CLIENT_METHODS, LOCAL_WORKSPACE_METHODS, validateClientRequest, validateClientResult, type ClientMethod } from './client'
 import { READ_METHODS, type ReadMethod } from './types'
 export type BridgeMethod = ReadMethod | ClientMethod
 
@@ -23,9 +23,21 @@ const nullableString = (x: unknown): boolean => x === null || string(x)
 const integer = (x: unknown): boolean => Number.isSafeInteger(x) && (x as number) >= 0
 const bool = (x: unknown): boolean => typeof x === 'boolean'
 const array = (x: unknown, fn: (item: unknown) => boolean, max = 100): boolean => Array.isArray(x) && x.length <= max && x.every(fn)
-const methodGroup = (value: unknown, client: boolean): boolean => {
-  const expected = client ? [...READ_METHODS,...CLIENT_METHODS] : [...READ_METHODS]
-  return Array.isArray(value) && value.length===expected.length && value.every((method,index)=>method===expected[index])
+function validateHello(v: Record<string, unknown>): boolean {
+  if (v.protocol_major !== 1 || !string(v.session_id) || !string(v.mode) || !isRecord(v.build) || !isRecord(v.capabilities)) return false
+  const build = v.build, caps = v.capabilities
+  if (!['version', 'os', 'arch', 'go_version'].every(key => string(build[key])) || !bool(caps.native_lifecycle)) return false
+  if (caps.windows_client !== undefined && !bool(caps.windows_client)) return false
+
+  const windowsClient = caps.windows_client === true
+  const localWorkspace = !windowsClient && caps.config_write === true
+  if (windowsClient && build.os !== 'windows' || localWorkspace && build.os !== 'darwin') return false
+  if (caps.connection_start !== windowsClient || caps.connection_stop !== windowsClient ||
+      caps.config_write !== (windowsClient || localWorkspace) || caps.read_only !== (!windowsClient && !localWorkspace)) return false
+  const additionalMethods = windowsClient ? CLIENT_METHODS : localWorkspace ? LOCAL_WORKSPACE_METHODS : []
+  const expected = [...READ_METHODS, ...additionalMethods]
+  const methods = caps.methods
+  return Array.isArray(methods) && methods.length === expected.length && methods.every((method, index) => method === expected[index])
 }
 
 // Both ends validate the contract; the renderer only receives product DTOs.
@@ -33,7 +45,7 @@ export function validateResult(method: BridgeMethod, v: unknown): boolean {
   if (CLIENT_METHODS.includes(method as ClientMethod)) return validateClientResult(method,v)
   if (!isRecord(v)) return false
   switch (method) {
-    case 'session.hello': return v.protocol_major === 1 && string(v.session_id) && string(v.mode) && isRecord(v.build) && ['version', 'os', 'arch', 'go_version'].every(k => string(v.build && (v.build as Record<string, unknown>)[k])) && isRecord(v.capabilities) && ((v.capabilities.read_only === true && v.capabilities.connection_start === false && v.capabilities.connection_stop === false && v.capabilities.config_write === false && v.capabilities.windows_client !== true) || (v.build.os === 'windows' && v.capabilities.windows_client === true && v.capabilities.read_only === false && v.capabilities.connection_start === true && v.capabilities.connection_stop === true && v.capabilities.config_write === true)) && bool(v.capabilities.native_lifecycle) && methodGroup(v.capabilities.methods,v.capabilities.windows_client===true)
+    case 'session.hello': return validateHello(v)
     case 'state.get': return bool(v.profile_configured) && nullableString(v.run_ref) && bool(v.snapshot_stale) && (v.snapshot_age_seconds === null || integer(v.snapshot_age_seconds)) && v.runtime_liveness === 'not_checked' && bool(v.recovery_required) && bool(v.stop_requested) && string(v.observed_at) && isRecord(v.status) && string(v.status.phase) && string(v.status.lifecycle) && nullableString(v.status.updated) && nullableString(v.status.last_ready) && nullableString(v.status.personal) && isRecord(v.status.channels) && ['company', 'personal', 'direct'].every(k => { const c = (v.status as Record<string, unknown>).channels as Record<string, unknown>; const h = c[k]; return isRecord(h) && string(h.state) && string(h.reason) && nullableString(h.checked_at) && string(h.path_state) && string(h.service_state) })
     case 'profile.inspect': return (v.profile_id===undefined||typeof v.profile_id==='string'&&/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(v.profile_id)) && ['configured', 'policy_valid', 'nodes_available', 'transaction_pending', 'read_only'].every(k => bool(v[k])) && string(v.profile_name) && integer(v.node_count) && nullableString(v.revision) && array(v.issues, string)
     case 'nodes.list': return ['total', 'offset', 'limit'].every(k => integer(v[k])) && string(v.inventory) && string(v.selection_scope) && v.latency === 'not_provided' && array(v.items, n => isRecord(n) && string(n.id) && string(n.name) && string(n.type) && bool(n.selected))

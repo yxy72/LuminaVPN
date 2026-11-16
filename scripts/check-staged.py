@@ -66,6 +66,8 @@ def allowed_path(name):
         return True
     if p.parts[0] in {'internal', 'cmd'} and p.suffix == '.go':
         return True
+    if name in {'sdk/mobile/mobile.go', 'sdk/mobile/mobile_test.go'}:
+        return True
     if p.parts[0] == 'licenses' and p.suffix == '.txt':
         return True
     if name in {'examples/policy.json', 'examples/bootstrap.json'}:

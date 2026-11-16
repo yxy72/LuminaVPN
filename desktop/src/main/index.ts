@@ -10,7 +10,7 @@ import { READ_METHODS, type Hello, type ReadMethod, type Profile } from '../../p
 import { CLIENT_METHODS, opaqueID, validateClientRequest, type ServiceSnapshot, type ServiceOperation, type ClientMethod } from '../../protocol/client'
 import { QuitController, confirmedUninstalledWithoutOwnedState } from './quit-controller'
 import {installedRecoveryScript} from './recovery-entry'
-import { assertProfileMayLeave, commitProfileSelection, windowsClientProfile } from './profile-selection'
+import { assertLocalWorkspaceIdle, assertProfileMayLeave, commitProfileSelection, desktopHello, windowsClientProfile } from './profile-selection'
 
 let window: BrowserWindow | null = null
 let tray: Tray | null = null
@@ -39,12 +39,36 @@ let exitController: QuitController | null = null
 let exitIdentity: { request: string; profile: string; run?: string } | null = null
 function finishQuit(): void { quitting = true; app.quit() }
 async function normalExit(): Promise<boolean> {
-  if (choosing || exitInProgress) return false
+  if (choosing || exitInProgress || quitting) return false
+  if (pendingMutations) {
+    if (process.platform === 'darwin') showWorkspaceExitError('WORKSPACE_BUSY')
+    return false
+  }
   exitInProgress = true
   try { return await attemptNormalExit() } finally { exitInProgress = false }
 }
+function showWorkspaceExitError(code: 'WORKSPACE_BUSY' | 'WORKSPACE_STATUS_UNAVAILABLE'): void {
+  const message = code === 'WORKSPACE_BUSY' ? '当前配置操作还在进行，请等待完成后退出。' : '无法确认配置操作已完成。请刷新工作空间后重试。'
+  showWindow()
+  window?.webContents.send('lumina:exit-error', 'EXIT_' + code)
+  void dialog.showMessageBox({ type: 'warning', title: '工作空间尚未就绪', message, buttons: ['知道了'] })
+}
+
 async function attemptNormalExit(): Promise<boolean> {
-  if (process.platform !== 'win32') { finishQuit(); return true }
+  if (process.platform !== 'win32') {
+    try {
+      if (process.platform === 'darwin' && bridge) {
+        const current = bridge
+        const hello = await desktopHello(current, app.getVersion())
+        if (hello.capabilities.config_write) await assertLocalWorkspaceIdle(current)
+      }
+      finishQuit()
+      return true
+    } catch (error) {
+      showWorkspaceExitError(error instanceof Error && error.message === 'WORKSPACE_BUSY' ? 'WORKSPACE_BUSY' : 'WORKSPACE_STATUS_UNAVAILABLE')
+      return false
+    }
+  }
   try {
     const hello = await client().request('session.hello', { protocol_major: 1, app_version: app.getVersion() }) as Hello
     if (process.platform !== 'win32' || hello.capabilities.windows_client !== true) { finishQuit(); return true }
@@ -137,22 +161,46 @@ function safeIPC(action: (event: IpcMainInvokeEvent, ...args: any[]) => Promise<
     }
   }
 }
+function assertCanMutate(): void {
+  if (choosing || exitInProgress || quitting) throw new Error('PROFILE_BUSY')
+}
+
+async function assertClientMethod(target: Bridge, method: ClientMethod, params: Record<string, unknown>): Promise<void> {
+  const hello = await desktopHello(target, app.getVersion())
+  const capabilities = hello.capabilities
+  if (bridge !== target) throw new Error('PROFILE_CHANGED')
+  if (capabilities.config_write !== true || !capabilities.methods.includes(method)) throw new Error('CLIENT_UNAVAILABLE')
+  if (method === 'workspace.read' && (
+    params.action === 'activity' && capabilities.windows_client === true ||
+    params.action === 'recovery_entry' && capabilities.windows_client !== true
+  )) throw new Error('CLIENT_UNAVAILABLE')
+  if (method === 'workspace.submit' && params.action === 'cleanup' && capabilities.windows_client !== true) throw new Error('CLIENT_UNAVAILABLE')
+}
+
 function registerIPC(): void {
   ipcMain.handle('lumina:client', safeIPC(async (event, method: unknown, params: unknown) => {
     authorize(event)
-    if (process.platform !== 'win32' || typeof method !== 'string' || !CLIENT_METHODS.includes(method as ClientMethod) || !validateClientRequest(method, params)) throw new Error('INVALID_PARAMS')
-    const mutating=method==='service.submit'||method==='workspace.submit'
-    if(mutating&&choosing)throw new Error('PROFILE_BUSY')
-    if(mutating)pendingMutations++
-    try{return await client().request(method as ClientMethod, params as Record<string, unknown>)}finally{if(mutating)pendingMutations--}
+    if (typeof method !== 'string' || !CLIENT_METHODS.includes(method as ClientMethod) || !isRecord(params) || !validateClientRequest(method, params)) throw new Error('INVALID_PARAMS')
+    const clientMethod = method as ClientMethod
+    const mutating = clientMethod === 'service.submit' || clientMethod === 'workspace.submit'
+    if (mutating) {
+      assertCanMutate()
+      pendingMutations++
+    }
+    try {
+      const target = client()
+      await assertClientMethod(target, clientMethod, params)
+      return await target.request(clientMethod, params)
+    } finally { if (mutating) pendingMutations-- }
   }))
   ipcMain.handle('lumina:normal-exit', safeIPC(async event => { authorize(event); return normalExit() }))
   ipcMain.handle('lumina:pick-import', safeIPC(async (event,params:unknown) => {
     authorize(event)
-    if (process.platform !== 'win32') throw new Error('CLIENT_UNAVAILABLE')
-    if(choosing)throw new Error('PROFILE_BUSY')
+    assertCanMutate()
     if(!isRecord(params)||Object.keys(params).length!==1||!opaqueID(params.profile_id))throw new Error('INVALID_PARAMS')
-    const target=client(),identity=await target.request('profile.inspect') as Profile
+    const target = client()
+    await assertClientMethod(target, 'workspace.submit', {})
+    const identity = await target.request('profile.inspect') as Profile
     if(identity.profile_id!==params.profile_id||bridge!==target)throw new Error('PROFILE_CHANGED')
     for (const [id, grant] of importGrants) if (grant.expires <= Date.now()) importGrants.delete(id)
     if (importGrants.size >= 8) throw new Error('BUSY')
@@ -166,16 +214,20 @@ function registerIPC(): void {
   }))
   ipcMain.handle('lumina:import-nodes', safeIPC(async (event, params: unknown) => {
     authorize(event)
-    if(choosing)throw new Error('PROFILE_BUSY')
+    assertCanMutate()
     if (!isRecord(params) || Object.keys(params).some(k => !['request_id','import_id','profile_id'].includes(k)) || !opaqueID(params.request_id) || !opaqueID(params.import_id)||!opaqueID(params.profile_id)) throw new Error('INVALID_PARAMS')
     const grant = importGrants.get(params.import_id); importGrants.delete(params.import_id)
     if (!grant || grant.expires <= Date.now()) throw new Error('IMPORT_EXPIRED')
     if(grant.profileID!==params.profile_id)throw new Error('PROFILE_CHANGED')
-    const target=client(),identity=await target.request('profile.inspect') as Profile
-    if(identity.profile_id!==params.profile_id||bridge!==target)throw new Error('PROFILE_CHANGED')
-    if(choosing)throw new Error('PROFILE_BUSY')
     pendingMutations++
-    try{return await target.request('workspace.submit', { action: 'import_nodes', profile_id:params.profile_id,request_id: params.request_id, content: grant.content })}finally{pendingMutations--}
+    try {
+      const target = client()
+      const request = { action: 'import_nodes', profile_id: params.profile_id, request_id: params.request_id, content: grant.content }
+      await assertClientMethod(target, 'workspace.submit', request)
+      const identity = await target.request('profile.inspect') as Profile
+      if (identity.profile_id !== params.profile_id || bridge !== target) throw new Error('PROFILE_CHANGED')
+      return await target.request('workspace.submit', request)
+    } finally { pendingMutations-- }
   }))
   ipcMain.handle('lumina:read', safeIPC(async (event, method: unknown, input: unknown) => {
     authorize(event)
@@ -191,13 +243,15 @@ function registerIPC(): void {
     choosing = true
     try {
       const current = client()
-      const clientMode = process.platform === 'win32' && await windowsClientProfile(current, app.getVersion())
-      await assertProfileMayLeave(current, clientMode)
+      const hello = await desktopHello(current, app.getVersion())
+      const clientMode = hello.capabilities.windows_client === true
+      const localWorkspace = hello.capabilities.config_write && !clientMode
+      await assertProfileMayLeave(current, clientMode, localWorkspace)
       if (bridge !== current || quitting) throw new Error('PROFILE_CHANGED')
       const result = await dialog.showOpenDialog(window!, { title: '选择已有的 LuminaVPN 配置目录', properties: ['openDirectory', 'dontAddToRecent'] })
       if (result.canceled || result.filePaths.length !== 1) return null
       const next = new Bridge(binaryPath(), runtimePath(), result.filePaths[0], app.getVersion())
-      return commitProfileSelection({ current, next, nextPath: result.filePaths[0], clientMode, mode: 'select', version: app.getVersion(),
+      return commitProfileSelection({ current, next, nextPath: result.filePaths[0], clientMode, localWorkspace, mode: 'select', version: app.getVersion(),
         currentUnchanged: () => bridge === current && !quitting,
         persist: selected => savePreferences({ profile: selected }),
         publish: (_next, selected) => { bridge = next; profile = selected; current.close(); exitController = null; exitIdentity = null; importGrants.clear() }
@@ -307,5 +361,5 @@ else {
     app.on('activate', showWindow)
   })
   app.on('window-all-closed', () => { if (!tray && !quitting) void normalExit() })
-  app.on('before-quit', event => { if (!quitting && process.platform === 'win32') { event.preventDefault(); void normalExit(); return }; quitting = true; bridge?.close(); tray?.destroy(); tray = null; importGrants.clear() })
+  app.on('before-quit', event => { if (!quitting && (process.platform === 'win32' || process.platform === 'darwin')) { event.preventDefault(); void normalExit(); return }; quitting = true; bridge?.close(); tray?.destroy(); tray = null; importGrants.clear() })
 }

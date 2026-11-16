@@ -101,10 +101,13 @@ func (s *Server) respond(ctx context.Context, r Request) Response {
 		build := app.DesktopBuild()
 		methods := append([]string{}, Methods...)
 		client := s.Service.ClientEnabled()
+		workspace := s.Service.WorkspaceEnabled()
 		if client {
 			methods = append(methods, application.ClientMethods...)
+		} else if workspace {
+			methods = append(methods, application.LocalWorkspaceMethods...)
 		}
-		response.Result = map[string]any{"protocol_major": ProtocolMajor, "session_id": s.session, "build": build.Info, "mode": build.Mode, "capabilities": map[string]any{"read_only": !client, "connection_start": client, "connection_stop": client, "config_write": client, "windows_client": client, "validation_only": client && build.Capabilities.ValidationOnly, "validation_maximum_seconds": build.Capabilities.ValidationMaximumSeconds, "requires_installed_service": client, "native_lifecycle": build.Capabilities.NativeLifecycle, "methods": methods}}
+		response.Result = map[string]any{"protocol_major": ProtocolMajor, "session_id": s.session, "build": build.Info, "mode": build.Mode, "capabilities": map[string]any{"read_only": !workspace, "connection_start": client, "connection_stop": client, "config_write": workspace, "windows_client": client, "validation_only": client && build.Capabilities.ValidationOnly, "validation_maximum_seconds": build.Capabilities.ValidationMaximumSeconds, "requires_installed_service": client, "native_lifecycle": build.Capabilities.NativeLifecycle, "methods": methods}}
 		return response
 	}
 	if !s.hello {
@@ -249,5 +252,8 @@ func Run(args []string, in io.Reader, out io.Writer) error {
 		return err
 	}
 	ignoreBrokenPipe()
-	return (&Server{Service: service, AppVersion: *version}).Serve(context.Background(), in, out)
+	ctx := context.Background()
+	service.EnableLocalWorkspace(ctx)
+	defer service.CloseLocalWorkspace()
+	return (&Server{Service: service, AppVersion: *version}).Serve(ctx, in, out)
 }

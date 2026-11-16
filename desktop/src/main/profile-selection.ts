@@ -1,5 +1,5 @@
 import type { BridgeMethod } from '../../protocol/validation'
-import { opaqueID, type ServiceOperation, type ServiceSnapshot } from '../../protocol/client'
+import { opaqueID, validateWorkspaceActivity, type ServiceOperation, type ServiceSnapshot } from '../../protocol/client'
 import type { Hello, Profile, State } from '../../protocol/types'
 import { confirmedUninstalledWithoutOwnedState } from './quit-controller'
 
@@ -11,9 +11,21 @@ type SelectionMode = 'select' | 'recover-default'
 const fail = (code: string): never => { throw Object.assign(new Error(code), { code }) }
 const errorCode = (error: unknown): unknown => typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined
 
+export async function desktopHello(bridge: ProfileBridge, version: string): Promise<Hello> {
+  return await bridge.request('session.hello', { protocol_major: 1, app_version: version }) as Hello
+}
+
 export async function windowsClientProfile(bridge: ProfileBridge, version: string): Promise<boolean> {
-  const hello = await bridge.request('session.hello', { protocol_major: 1, app_version: version }) as Hello
-  return hello.capabilities.windows_client === true
+  return (await desktopHello(bridge, version)).capabilities.windows_client === true
+}
+
+export async function assertLocalWorkspaceIdle(bridge: ProfileBridge): Promise<void> {
+  const info = await bridge.request('profile.inspect') as Profile
+  const id = info.profile_id
+  if (!opaqueID(id)) return fail('PROFILE_MISMATCH')
+  const activity = await bridge.request('workspace.read', { action: 'activity', profile_id: id })
+  if (!validateWorkspaceActivity(activity) || activity.profile_id !== id) return fail('PROFILE_MISMATCH')
+  if (activity.active) fail('WORKSPACE_BUSY')
 }
 
 async function completedOperation(bridge: ProfileBridge, snapshot: ServiceSnapshot): Promise<void> {
@@ -49,7 +61,8 @@ async function assertLocalStopped(bridge: ProfileBridge): Promise<void> {
   if (state.recovery_required || !(state.status.phase === 'stopped' || !state.run_ref && state.status.phase === 'not_started')) fail('PROFILE_BUSY')
 }
 
-export async function assertProfileMayLeave(bridge: ProfileBridge, clientMode: boolean): Promise<void> {
+export async function assertProfileMayLeave(bridge: ProfileBridge, clientMode: boolean, localWorkspace = false): Promise<void> {
+  if (localWorkspace) await assertLocalWorkspaceIdle(bridge)
   if (clientMode) {
     const info = await bridge.request('profile.inspect') as Profile
     await enrolledSnapshot(bridge, info, 'select')
@@ -68,6 +81,7 @@ export interface ProfileSelection {
   next: ProfileBridge
   nextPath?: string
   clientMode: boolean
+  localWorkspace?: boolean
   mode: SelectionMode
   version: string
   currentUnchanged(): boolean
@@ -76,7 +90,7 @@ export interface ProfileSelection {
 }
 
 export async function commitProfileSelection(selection: ProfileSelection): Promise<Profile> {
-  const { current, next, clientMode, mode } = selection
+  const { current, next, clientMode, localWorkspace, mode } = selection
   const unchanged = (): void => { if (!selection.currentUnchanged()) fail('PROFILE_CHANGED') }
   let published = false
   try {
@@ -84,10 +98,15 @@ export async function commitProfileSelection(selection: ProfileSelection): Promi
     if (mode === 'recover-default') {
       if (!clientMode || selection.nextPath !== undefined) fail('INVALID_PARAMS')
       await assertExplicitlyUnenrolled(current)
-    } else await assertProfileMayLeave(current, clientMode)
+    } else await assertProfileMayLeave(current, clientMode, localWorkspace)
     unchanged()
     const info = await next.request('profile.inspect') as Profile
     unchanged()
+    if (localWorkspace) {
+      const hello = await desktopHello(next, selection.version)
+      if (hello.capabilities.config_write !== true || hello.capabilities.windows_client === true || !opaqueID(info.profile_id)) fail('CLIENT_UNAVAILABLE')
+      unchanged()
+    }
     if (clientMode) {
       if (!await windowsClientProfile(next, selection.version)) fail('CLIENT_UNAVAILABLE')
       unchanged()
@@ -97,7 +116,7 @@ export async function commitProfileSelection(selection: ProfileSelection): Promi
       unchanged()
     }
     if (mode === 'recover-default') await assertExplicitlyUnenrolled(current)
-    else await assertProfileMayLeave(current, clientMode)
+    else await assertProfileMayLeave(current, clientMode, localWorkspace)
     unchanged()
     await selection.persist(selection.nextPath)
     unchanged()

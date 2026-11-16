@@ -16,6 +16,7 @@ import (
 	"netlaunch/internal/policy"
 	"netlaunch/internal/runtimebundle"
 	"netlaunch/internal/securefile"
+	"netlaunch/internal/serviceprotocol"
 	"netlaunch/internal/subscription"
 )
 
@@ -24,6 +25,31 @@ import (
 // Service hosts must use a real user process/token context for this facade;
 // thread impersonation does not change legacy process-token ownership checks.
 type DesktopCommands struct{ Profile, Runtime string }
+
+// Execute applies a typed workspace command in the selected user's profile.
+func (d DesktopCommands) Execute(ctx context.Context, w serviceprotocol.WorkspacePayload) (any, error) {
+	if err := w.Validate(); err != nil {
+		return nil, err
+	}
+	switch w.Action {
+	case "initialize":
+		return d.Initialize(ctx, w.PolicyJSON, w.BootstrapJSON)
+	case "apply":
+		return d.ApplyDraft(ctx, w.PolicyJSON, w.ExpectedPolicyRevision)
+	case "rollback":
+		return d.Rollback(ctx, w.Revision, w.ExpectedPolicyRevision)
+	case "import_nodes":
+		return d.ImportNodes(ctx, []byte(w.Content))
+	case "sync":
+		return d.SyncSubscriptions(ctx)
+	case "sources_save":
+		return d.SaveSources(ctx, w.SourcesJSON, w.ExpectedPolicyRevision)
+	case "cleanup":
+		return d.ApplyCleanup(ctx, w.OpaqueRunID)
+	default:
+		return nil, errors.New("workspace action unavailable")
+	}
+}
 
 func (d DesktopCommands) check(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
