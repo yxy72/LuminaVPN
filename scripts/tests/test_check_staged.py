@@ -25,6 +25,7 @@ class SourceBoundaryTests(unittest.TestCase):
             'scripts/patches/mihomo-v1.19.32-personal-fallback-lease.patch',
             'scripts/patches/mihomo-v1.19.32-personal-fallback-suspend.patch',
             'scripts/patches/mihomo-v1.19.32-personal-fallback-lease.provenance.json',
+            'scripts/patches/mihomo-v1.19.32-personal-fallback-suspend.provenance.json',
             'scripts/patches/test-mihomo-personal-fallback-loopback.py',
             'scripts/patches/mihomo-v1.19.32.LICENSE',
         ]

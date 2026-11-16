@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rebuild v1.19.32-lumina.2 using the pinned Git source and offline Go cache."""
+"""Rebuild the pinned desktop Mihomo from Git source and an offline Go cache."""
 
 import argparse
 import datetime
@@ -13,6 +13,8 @@ import shutil
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROVENANCE = SCRIPT_DIR / "mihomo-v1.19.32-personal-fallback-lease.provenance.json"
+SUSPEND_PROVENANCE = SCRIPT_DIR / "mihomo-v1.19.32-personal-fallback-suspend.provenance.json"
+SUSPEND_TARGET = "darwin/arm64"
 TESTS = (
     ("fakeip", "./component/fakeip", "^TestLumina"),
     ("dns", "./dns", "^TestLumina"),
@@ -22,12 +24,17 @@ TESTS = (
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--target", required=True, choices=("darwin/arm64", "windows/amd64"))
+    parser.add_argument("--target", required=True, choices=(SUSPEND_TARGET, "windows/amd64"))
+    parser.add_argument("--lease-version", type=int, choices=(2, 3),
+                        help="Mihomo derivative version (defaults to 3 on Mac and 2 on Windows)")
     parser.add_argument("--source-dir", required=True, type=Path, help="Upstream Git checkout with the fixed commit")
     parser.add_argument("--go", required=True, type=Path, help="Pinned Go 1.27.3 executable for the build host")
     parser.add_argument("--module-cache", required=True, type=Path, help="Prepopulated module cache matching go.sum")
     parser.add_argument("--output-dir", required=True, type=Path, help="New directory for source, binary and local verification files")
     args = parser.parse_args()
+    lease_version = args.lease_version or (3 if args.target == SUSPEND_TARGET else 2)
+    if lease_version == 3 and args.target != SUSPEND_TARGET:
+        parser.error("Mihomo .lumina.3 is pinned only for darwin/arm64")
     if args.output_dir.is_symlink():
         raise ValueError("Output may not be a symbolic link")
     source, compiler, modules, output = (value.resolve() for value in (
@@ -48,11 +55,25 @@ def main():
     commit, build_time = reviewed["COMMIT"], reviewed["BUILD_TIME"]
     if commit != provenance["upstream_commit"] or build_time != provenance["upstream_commit_build_time"]:
         raise ValueError("Build provenance differs from the reviewed upstream identity")
-    patches = []
-    for name, digest in (
+    patch_digests = [
         (reviewed["PATCH"], reviewed["PATCH_SHA256"]),
         ("mihomo-v1.19.32-personal-fallback-lease.patch", provenance["lease_patch_sha256"]),
-    ):
+    ]
+    binary_version = provenance["binary_version"]
+    expected_binary_sha = provenance["binary_sha256"][args.target]
+    source_provenance = provenance_bytes
+    if lease_version == 3:
+        source_provenance = SUSPEND_PROVENANCE.read_bytes()
+        suspend = json.loads(source_provenance)
+        if (suspend["version"] != 1 or suspend["target"] != args.target
+                or suspend["binary_version"] != "v1.19.32-lumina.3"
+                or suspend["base_provenance_sha256"] != sha(provenance_bytes)):
+            raise ValueError("Reviewed suspend build provenance differs")
+        patch_digests.append(("mihomo-v1.19.32-personal-fallback-suspend.patch", suspend["suspend_patch_sha256"]))
+        binary_version = suspend["binary_version"]
+        expected_binary_sha = suspend["binary_sha256"]
+    patches = []
+    for name, digest in patch_digests:
         data = (SCRIPT_DIR / name).read_bytes()
         if sha(data) != digest:
             raise ValueError("Reviewed patch SHA256 differs: " + name)
@@ -119,20 +140,19 @@ def main():
                 raise ValueError("Cross-compiled regression tests missing from " + package)
 
     binary = output / ("mihomo" + extension)
-    binary_version = provenance["binary_version"]
     ldflags = ("-w -s -buildid= -X github.com/metacubex/mihomo/constant.Version=" + binary_version
                + " -X github.com/metacubex/mihomo/constant.BuildTime=" + build_time)
     command(go + ["build", "-tags", "with_gvisor", "-trimpath", "-buildvcs=false", "-ldflags", ldflags,
                   "-o", str(binary), "."], cwd=work, env=env, timeout=900)
     binary_sha = sha(binary.read_bytes())
-    if binary_sha != provenance["binary_sha256"][args.target]:
+    if binary_sha != expected_binary_sha:
         raise ValueError("Rebuilt target SHA256 differs: " + binary_sha)
     metadata = command(go + ["version", "-m", str(binary)], cwd=work, env=env)
     (output / "binary-buildinfo.txt").write_bytes(metadata)
     report = {
         "version": 1,
         "recipe_sha256": sha(Path(__file__).read_bytes()),
-        "source_provenance_sha256": sha(provenance_bytes),
+        "source_provenance_sha256": sha(source_provenance),
         "source_archive_sha256": sha(archive),
         "upstream_commit": commit,
         "patch_sha256": {name: sha(data) for name, data in patches},
@@ -148,6 +168,8 @@ def main():
         "binary_sha256": binary_sha,
         "binary_bytes": binary.stat().st_size,
     }
+    if lease_version == 3:
+        report["base_source_provenance_sha256"] = sha(provenance_bytes)
     (output / "build-provenance.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(binary)
 

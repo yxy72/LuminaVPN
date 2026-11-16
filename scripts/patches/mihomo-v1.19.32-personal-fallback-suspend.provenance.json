@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "base_provenance_sha256": "9618f5f2f09e6ce48047b6c6c398065e5e4351ca83f0cafb09667cfcea1ac388",
+  "suspend_patch_sha256": "4b08882d10ae812cd9544e3b1ce82533b4cb5d881a84c7895f5459111e03f200",
+  "target": "darwin/arm64",
+  "binary_version": "v1.19.32-lumina.3",
+  "binary_sha256": "021ed3a3d46eee0433a42187d6c09fa5b51b1c20850e123fc5404310656d01df"
+}
