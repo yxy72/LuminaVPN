@@ -400,7 +400,14 @@ func (d *Desktop) Environment(ctx context.Context) (any, error) {
 			Check{"privileged_listeners", "not_checked", "CLI 与桌面会在管理员启动阶段核验特权监听端口。"},
 			Check{"desktop_lifecycle", "passed", "当前 Mac 桌面支持连接和停止。启动需要管理员授权。"})
 	} else {
-		checks = append(checks, Check{"network_conflicts", "not_checked", "连接前仍需通过现有 CLI doctor 检查代理、VPN 与路由冲突。"}, Check{"privileged_listeners", "not_checked", "尚未检查特权监听入口与网络进程的实际存活。"}, Check{"desktop_lifecycle", "not_checked", "本轮桌面预览仅提供读取，连接操作尚未开放。"})
+		capability := "当前桌面提供离线配置和诊断。"
+		if d.ClientEnabled() {
+			capability = "Windows 的连接和停止由后台服务执行，服务状态以总览为准。"
+		}
+		checks = append(checks,
+			Check{"network_conflicts", "not_checked", "连接前仍需通过现有 CLI doctor 检查代理、VPN 与路由冲突。"},
+			Check{"privileged_listeners", "not_checked", "尚未检查特权监听入口与网络进程的实际存活。"},
+			Check{"desktop_lifecycle", "not_checked", capability})
 	}
 	labels := map[string]string{"runtime_bundle": "运行组件", "native_lifecycle": "平台能力", "local_policy": "本机策略", "node_cache": "节点库存", "network_interface": "网络接口", "network_conflicts": "代理与路由冲突", "privileged_listeners": "特权入口检查", "desktop_lifecycle": "桌面连接能力"}
 	projected := []any{}
