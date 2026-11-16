@@ -596,7 +596,7 @@ func (c CLI) upLockedContext(ctx context.Context, o options, cfg policy.Config, 
 	if e = runtimebundle.Copy(o.runtime, filepath.Join(run, "runtime")); e != nil {
 		return e
 	}
-	if intent.Personal {
+	if intent.Personal || macDesktop && len(nodes) != 0 {
 		if e = securefile.Write(filepath.Join(run, "nodes.json"), nodes); e != nil {
 			return e
 		}

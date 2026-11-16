@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"time"
 
 	"netlaunch/internal/platform"
@@ -32,7 +33,22 @@ func effectiveLaunchProfile(o options, cfg policy.Config) (policy.Config, []poli
 	if o.mode == "" {
 		return effectiveProfile(o.profile, cfg)
 	}
-	return effectiveProfileForIntent(o.profile, cfg, launchIntent(o))
+	intent := launchIntent(o)
+	effective, nodes, err := effectiveProfileForIntent(o.profile, cfg, intent)
+	if err != nil || runtime.GOOS != "darwin" || intent.Personal {
+		return effective, nodes, err
+	}
+
+	// Freeze an existing usable pool for a later switch. A disabled channel
+	// can start without a saved pool and must never request a refresh.
+	personal := intent
+	personal.Personal = true
+	candidate, cached, err := effectiveProfileForIntent(o.profile, cfg, personal)
+	if err != nil || len(cached) == 0 || candidate.ValidateForIntent(personal) != nil ||
+		policy.ValidateEndpointsForIntent(candidate, cached, personal) != nil {
+		return effective, nil, nil
+	}
+	return candidate, cached, nil
 }
 
 // No implicit refresh is performed for a disabled personal channel. The caller's
