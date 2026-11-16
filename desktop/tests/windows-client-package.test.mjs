@@ -99,12 +99,39 @@ test('generated installer retains files unless the fixed recovery verb succeeds'
   ])
   assert.match(include, /!macro customInit[\s\S]*Call LuminaPrepareBootstrap[\s\S]*--print-install-plan[\s\S]*PREFLIGHT_REJECTED[\s\S]*!macroend/)
   assert.ok(!include.includes('RMDir') && !include.includes('Delete '))
-  assert.match(include, /!macro LuminaRequireUninstallSuccess[\s\S]*\$\{Errors\}[\s\S]*SetErrorLevel 2[\s\S]*Quit[\s\S]*\$R0 != 0/)
+  assert.match(include, /!macro LuminaRequireUninstallSuccess[\s\S]*\$\{Errors\}[\s\S]*SetErrorLevel 24[\s\S]*Quit[\s\S]*\$R0 != 0[\s\S]*SetErrorLevel 25/)
   for (const invalid of ['../escape', 'x'.repeat(64), 'a'.repeat(63)]) {
     assert.throws(() => installerInclude(invalid)); assert.throws(() => recoveryEntry(invalid))
   }
   assert.throws(() => installerInclude(release), /bootstrap pin/)
   assert.throws(() => installerInclude(release, { bootstrapSource: 'bad\npath', bootstrapSHA256: 'b'.repeat(64) }), /source path/)
+})
+
+test('silent installer failures have distinct bounded native and NSIS stage codes', async () => {
+  const source = await readFile(new URL('../scripts/windows-client-bootstrap.nsh', import.meta.url), 'utf8')
+  const native = await readFile(new URL('../../internal/winservice/install_exit.go', import.meta.url), 'utf8')
+  const include = installerInclude('a'.repeat(64), { bootstrapSource: 'D:\\stage\\lumina-service.exe', bootstrapSHA256: 'b'.repeat(64),
+    nsisTemplateRoot: 'D:\\tools\\nsis-template', nsisOverrideRoot: 'D:\\prepared\\nsis-overrides' })
+  const errors = new Map(), owners = new Map()
+  for (const [, reason, code] of (source + include).matchAll(/!insertmacro LuminaRecord(?:Native)?Failure ([A-Z_]+) (\d+)/g)) {
+    assert.equal(errors.get(reason) ?? code, code, reason)
+    assert.equal(owners.get(code) ?? reason, reason, code)
+    errors.set(reason, code)
+    owners.set(code, reason)
+  }
+  const staticCodes = [...owners.keys()].map(Number)
+  const directCodes = [...include.matchAll(/SetErrorLevel (\d+)/g)].map(m => Number(m[1]))
+  assert.deepEqual(directCodes, [20, 21, 22, 23, 24, 25])
+  const directoryCodes = [...source.matchAll(/StrCpy \$LuminaDirectoryFailureBase (\d+)/g)].flatMap(m => [Number(m[1]), Number(m[1]) + 1])
+  assert.deepEqual(directoryCodes, [55, 56, 61, 62, 57, 58, 59, 60])
+  const allCodes = [...staticCodes, ...directCodes, ...directoryCodes, 26]
+  assert.equal(new Set(allCodes).size, allCodes.length)
+  assert.ok(allCodes.every(code => code >= 20 && code <= 99))
+  assert.match(source, /Call \$\{P\}LuminaCloseBootstrap[\s\S]*SetErrorLevel \$LuminaFailureCode\s+Quit/)
+  const helper = [...native.matchAll(/^\s*installExit\w+\s*= (\d+)$/gm)].map(m => Number(m[1]))
+  assert.deepEqual(helper, Array.from({length: 19}, (_, i) => i + 120))
+  assert.match(source, /\$R0 >= 120\s+\$\{AndIf\} \$R0 <= 138\s+StrCpy \$LuminaFailureCode \$R0/)
+  assert.ok(!include.includes('LuminaRecordNativeFailure PREFLIGHT_REJECTED'), 'the public Go preflight retains its existing exit contract')
 })
 
 test('the compiled install section cannot migrate an elevated per-user uninstaller', async t => {

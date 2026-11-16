@@ -66,30 +66,30 @@ func requireInstallerAdministrator() error {
 
 func newWindowsInstallSystem(command Command) (*windowsInstallSystem, error) {
 	if err := ValidateInstallerImage(); err != nil {
-		return nil, err
+		return nil, installerFailed(installExitImageTrust, err)
 	}
 	if err := requireInstallerAdministrator(); err != nil {
-		return nil, err
+		return nil, installerFailed(installExitAdministrator, err)
 	}
 	installation, err := LoadInstallation()
 	if err != nil {
-		return nil, err
+		return nil, installerFailed(installExitRelease, err)
 	}
 	base, err := windows.KnownFolderPath(windows.FOLDERID_ProgramData, windows.KF_FLAG_DEFAULT)
 	if err != nil {
-		return nil, err
+		return nil, installerFailed(installExitPath, err)
 	}
 	system := &windowsInstallSystem{installation: installation, root: filepath.Join(base, "LuminaVPN", "ServiceState"), command: command}
 	if command == CommandBootstrap {
 		binding, err := captureInstallerEnrollment()
 		if err != nil {
-			return nil, err
+			return nil, installerFailed(installExitEnrollment, err)
 		}
 		system.enrollment = &binding
 	}
 	system.installerLock, err = acquireInstallerLock()
 	if err != nil {
-		return nil, err
+		return nil, installerFailed(installExitLock, err)
 	}
 	return system, nil
 }

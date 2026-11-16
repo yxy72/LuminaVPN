@@ -12,6 +12,8 @@ type installFixture struct {
 	calls        []string
 	recoverErr   error
 	provisionErr error
+	configureErr error
+	startErr     error
 	stillRunning bool
 }
 
@@ -29,11 +31,11 @@ func (f *installFixture) Provision(Binding) error {
 }
 func (f *installFixture) ConfigureServices() error {
 	f.calls = append(f.calls, "configure")
-	return nil
+	return f.configureErr
 }
 func (f *installFixture) StartMain(context.Context) error {
 	f.calls = append(f.calls, "start")
-	return nil
+	return f.startErr
 }
 func (f *installFixture) StopMain(context.Context) error {
 	f.calls = append(f.calls, "stop")
@@ -108,6 +110,32 @@ func TestBootstrapPendingJournalRequiresDurableCompletionAcknowledgement(t *test
 		if failure && (err == nil || result.Completed) || !failure && (err != nil || !result.Completed) || !reflect.DeepEqual(fixture.calls, []string{"inspect", "enroll", "configure", "provision", "start", "commit"}) {
 			t.Fatal("pending journal skipped provisioning or acknowledged a failed checkpoint", result, err, fixture.calls)
 		}
+	}
+}
+
+func TestSilentBootstrapExitIdentifiesTheFirstFailedStage(t *testing.T) {
+	cause := errors.New("injected failure")
+	for _, tt := range []struct {
+		code int
+		last string
+		set  func(*committingInstallFixture)
+	}{
+		{130, "configure", func(f *committingInstallFixture) { f.configureErr = cause }},
+		{131, "provision", func(f *committingInstallFixture) { f.provisionErr = cause }},
+		{132, "start", func(f *committingInstallFixture) { f.startErr = cause }},
+		{133, "commit", func(f *committingInstallFixture) { f.commitErr = cause }},
+	} {
+		fixture := &committingInstallFixture{}
+		tt.set(fixture)
+		result, err := Bootstrap(t.Context(), fixture)
+		if result.Completed || !errors.Is(err, cause) || InstallerCommandExitCode(CommandBootstrap, err) != tt.code ||
+			fixture.calls[len(fixture.calls)-1] != tt.last {
+			t.Fatalf("incorrect failure stage: %+v %v %v", result, err, fixture.calls)
+		}
+	}
+	if err := InstallerResultError(cause); InstallerCommandExitCode(CommandBootstrap, err) != 138 ||
+		InstallerCommandExitCode(CommandPrintPlan, err) != 1 || InstallerCommandExitCode(CommandRecover, err) != 1 {
+		t.Fatal("installer helper output changed another command's error contract")
 	}
 }
 

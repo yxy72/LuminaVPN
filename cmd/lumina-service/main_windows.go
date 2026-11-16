@@ -39,11 +39,11 @@ func main() {
 		var result winservice.InstallResult
 		result, err = winservice.RunInstallerCommand(ctx, command)
 		if err == nil {
-			err = json.NewEncoder(os.Stdout).Encode(result)
+			err = winservice.InstallerResultError(json.NewEncoder(os.Stdout).Encode(result))
 		}
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "The protected Windows service is unavailable.")
-		os.Exit(1)
+		os.Exit(winservice.InstallerCommandExitCode(command, err))
 	}
 }

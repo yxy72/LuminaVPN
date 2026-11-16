@@ -103,7 +103,7 @@ export function installerInclude(releaseID, { bootstrapSource, bootstrapSHA256, 
 !macroend
 !macro customInit
   \${IfNot} \${RunningX64}
-    SetErrorLevel 2
+    SetErrorLevel 20
     Quit
   \${EndIf}
   StrCpy $INSTDIR "$PROGRAMFILES64\\LuminaVPN"
@@ -112,18 +112,18 @@ export function installerInclude(releaseID, { bootstrapSource, bootstrapSHA256, 
   ReadRegStr $R0 HKCU "\${UNINSTALL_REGISTRY_KEY}" "UninstallString"
   \${If} $R0 != ""
     DetailPrint "Remove the legacy per-user preview using its original user account before installing the service client."
-    SetErrorLevel 2
+    SetErrorLevel 21
     Quit
   \${EndIf}
   Call LuminaPrepareBootstrap
   ClearErrors
   ExecWait '"$LuminaNoncePath\\lumina-service.exe" --print-install-plan' $R0
   \${If} \${Errors}
-    StrCpy $LuminaFailure "PREFLIGHT_START"
+    !insertmacro LuminaRecordFailure PREFLIGHT_START 90
     Call LuminaBootstrapFatal
   \${EndIf}
   \${If} $R0 != 0
-    StrCpy $LuminaFailure "PREFLIGHT_REJECTED"
+    !insertmacro LuminaRecordFailure PREFLIGHT_REJECTED 91
     Call LuminaBootstrapFatal
   \${EndIf}
   ; Complete only this release's protected pending bootstrap before the
@@ -131,11 +131,11 @@ export function installerInclude(releaseID, { bootstrapSource, bootstrapSHA256, 
   ClearErrors
   ExecWait '"$LuminaNoncePath\\lumina-service.exe" --resume-install-preflight' $R0
   \${If} \${Errors}
-    StrCpy $LuminaFailure "RESUME_PREFLIGHT_START"
+    !insertmacro LuminaRecordFailure RESUME_PREFLIGHT_START 92
     Call LuminaBootstrapFatal
   \${EndIf}
   \${If} $R0 != 0
-    StrCpy $LuminaFailure "RESUME_PREFLIGHT_REJECTED"
+    !insertmacro LuminaRecordNativeFailure RESUME_PREFLIGHT_REJECTED 93
     Call LuminaBootstrapFatal
   \${EndIf}
   Call LuminaCloseBootstrap
@@ -143,12 +143,12 @@ export function installerInclude(releaseID, { bootstrapSource, bootstrapSHA256, 
 !macroend
 !macro customUnInit
   \${IfNot} \${RunningX64}
-    SetErrorLevel 2
+    SetErrorLevel 22
     Quit
   \${EndIf}
   \${If} $INSTDIR != "$PROGRAMFILES64\\LuminaVPN"
     DetailPrint "Unexpected installation directory; files were retained."
-    SetErrorLevel 2
+    SetErrorLevel 23
     Quit
   \${EndIf}
   SetShellVarContext all
@@ -156,12 +156,12 @@ export function installerInclude(releaseID, { bootstrapSource, bootstrapSHA256, 
 !macro LuminaRequireUninstallSuccess
   \${If} \${Errors}
     DetailPrint "The previous uninstaller could not be started; upgrade stopped."
-    SetErrorLevel 2
+    SetErrorLevel 24
     Quit
   \${EndIf}
   \${If} $R0 != 0
     DetailPrint "The previous uninstaller did not confirm recovery; upgrade stopped."
-    SetErrorLevel 2
+    SetErrorLevel 25
     Quit
   \${EndIf}
 !macroend
@@ -178,11 +178,11 @@ export function installerInclude(releaseID, { bootstrapSource, bootstrapSHA256, 
   ClearErrors
   ExecWait '"$LuminaNoncePath\\lumina-service.exe" --resume-install-preflight' $R0
   \${If} \${Errors}
-    StrCpy $LuminaFailure "REGISTRY_CLAIM_START"
+    !insertmacro LuminaRecordFailure REGISTRY_CLAIM_START 94
     Call LuminaBootstrapFatal
   \${EndIf}
   \${If} $R0 != 0
-    StrCpy $LuminaFailure "REGISTRY_CLAIM_REJECTED"
+    !insertmacro LuminaRecordNativeFailure REGISTRY_CLAIM_REJECTED 95
     Call LuminaBootstrapFatal
   \${EndIf}
   Call LuminaCloseBootstrap
@@ -196,11 +196,11 @@ export function installerInclude(releaseID, { bootstrapSource, bootstrapSHA256, 
   ClearErrors
   ExecWait '"$LuminaNoncePath\\lumina-service.exe" --bootstrap' $R0
   \${If} \${Errors}
-    StrCpy $LuminaFailure "BOOTSTRAP_START"
+    !insertmacro LuminaRecordFailure BOOTSTRAP_START 96
     Call LuminaBootstrapFatal
   \${EndIf}
   \${If} $R0 != 0
-    StrCpy $LuminaFailure "BOOTSTRAP_REJECTED"
+    !insertmacro LuminaRecordNativeFailure BOOTSTRAP_REJECTED 97
     Call LuminaBootstrapFatal
   \${EndIf}
   Call LuminaCloseBootstrap
@@ -211,11 +211,11 @@ export function installerInclude(releaseID, { bootstrapSource, bootstrapSHA256, 
   ClearErrors
   ExecWait '"$LuminaNoncePath\\lumina-service.exe" --uninstall' $R0
   \${If} \${Errors}
-    StrCpy $LuminaFailure "UNINSTALL_START"
+    !insertmacro LuminaRecordFailure UNINSTALL_START 98
     Call un.LuminaBootstrapFatal
   \${EndIf}
   \${If} $R0 != 0
-    StrCpy $LuminaFailure "UNINSTALL_REJECTED"
+    !insertmacro LuminaRecordNativeFailure UNINSTALL_REJECTED 99
     Call un.LuminaBootstrapFatal
   \${EndIf}
   Call un.LuminaCloseBootstrap

@@ -27,19 +27,19 @@ func resumeInstallPreflight(ctx context.Context, control resumeInstallPreflightC
 	}
 	release, err := control.acquire()
 	if err != nil {
-		return result, err
+		return result, installerFailed(installExitLock, err)
 	}
 	if release == nil {
-		return result, errors.New("resume preflight has no installer lock")
+		return result, installerFailed(installExitLock, errors.New("resume preflight has no installer lock"))
 	}
 	defer release()
 	j, exists, err := control.journal()
 	if err != nil {
-		return result, err
+		return result, installerFailed(installExitJournal, err)
 	}
 	if exists {
 		if err = validateInstallJournal(j); err != nil {
-			return result, err
+			return result, installerFailed(installExitJournal, err)
 		}
 	}
 	if !exists || j.Action == "retire" || j.Phase == "complete" {
@@ -48,7 +48,7 @@ func resumeInstallPreflight(ctx context.Context, control resumeInstallPreflightC
 		}
 		if control.finalize != nil {
 			if err := control.finalize(); err != nil {
-				return result, err
+				return result, installerFailed(installExitRegistry, err)
 			}
 		}
 		result.Completed = true
@@ -59,10 +59,10 @@ func resumeInstallPreflight(ctx context.Context, control resumeInstallPreflightC
 	}
 	system, err := control.pending(ctx, j)
 	if err != nil {
-		return result, err
+		return result, installerFailed(installExitResumeIdentity, err)
 	}
 	if system == nil {
-		return result, errors.New("pending installer system unavailable")
+		return result, installerFailed(installExitResumeIdentity, errors.New("pending installer system unavailable"))
 	}
 	if err = ctx.Err(); err != nil {
 		return result, err
@@ -72,7 +72,7 @@ func resumeInstallPreflight(ctx context.Context, control resumeInstallPreflightC
 	if err == nil && result.Completed {
 		err = ctx.Err()
 		if err == nil && control.finalize != nil {
-			err = control.finalize()
+			err = installerFailed(installExitRegistry, control.finalize())
 		}
 		if err != nil {
 			result.Completed = false

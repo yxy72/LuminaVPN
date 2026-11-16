@@ -44,6 +44,10 @@ func TestResumeRegistryClaimRunsUnderLockOnlyAfterValidState(t *testing.T) {
 			if locked || claimed != (failure == "none" || failure == "claim") || result.Completed != (failure == "none") || (err == nil) != (failure == "none") {
 				t.Fatalf("result=%+v claimed=%v locked=%v err=%v", result, claimed, locked, err)
 			}
+			want := map[string]int{"none": 0, "journal": 124, "claim": 128, "cancel": 1}[failure]
+			if got := InstallerCommandExitCode(CommandResumePreflight, err); got != want {
+				t.Fatalf("%s exit = %d, want %d", failure, got, want)
+			}
 		})
 	}
 }

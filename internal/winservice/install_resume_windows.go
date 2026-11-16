@@ -17,27 +17,27 @@ func runWindowsResumePreflight(ctx context.Context) (InstallResult, error) {
 	result := InstallResult{Action: "resume-install-preflight"}
 	base, err := windows.KnownFolderPath(windows.FOLDERID_ProgramData, windows.KF_FLAG_DEFAULT)
 	if err != nil {
-		return result, err
+		return result, installerFailed(installExitPath, err)
 	}
 	self, err := os.Executable()
 	if err != nil {
-		return result, err
+		return result, installerFailed(installExitPath, err)
 	}
 	self = filepath.Clean(self)
 	if !resumeBootstrapNoncePath(self, base) {
-		return result, errors.New("resume preflight requires the fresh protected setup nonce")
+		return result, installerFailed(installExitPath, errors.New("resume preflight requires the fresh protected setup nonce"))
 	}
 	// The path predicate above prevents this call taking its installed-PF
 	// fallback. It must verify the fresh nonce envelope and resource-pinned image.
 	if err = ValidateInstallerImage(); err != nil {
-		return result, err
+		return result, installerFailed(installExitImageTrust, err)
 	}
 	if err = requireInstallerAdministrator(); err != nil {
-		return result, err
+		return result, installerFailed(installExitAdministrator, err)
 	}
 	imageBytes, err := (WindowsProtectedFiles{Root: filepath.Dir(self)}).ReadProtected(self)
 	if err != nil {
-		return result, err
+		return result, installerFailed(installExitImageTrust, err)
 	}
 	sum := sha256.Sum256(imageBytes)
 	helperSHA := hex.EncodeToString(sum[:])
@@ -63,7 +63,7 @@ func runWindowsResumePreflight(ctx context.Context) (InstallResult, error) {
 			// occurs on fresh/complete/retirement preflight paths.
 			installation, err := LoadInstallation()
 			if err != nil {
-				return nil, err
+				return nil, installerFailed(installExitRelease, err)
 			}
 			system := &windowsInstallSystem{installation: installation, root: root, command: CommandBootstrap, ctx: ctx, installerLock: held}
 			image, digest, err := system.journalIdentity()
@@ -72,7 +72,7 @@ func runWindowsResumePreflight(ctx context.Context) (InstallResult, error) {
 			}
 			enrollment, err := captureInstallerEnrollment()
 			if err != nil {
-				return nil, err
+				return nil, installerFailed(installExitEnrollment, err)
 			}
 			if err = verifyPendingResume(j, resumeInstallerEvidence{Image: image, ReleaseDigest: digest, HelperSHA256: helperSHA, ServiceSHA256: installation.pins[ServiceImage].SHA256, Enrollment: enrollment}); err != nil {
 				return nil, err

@@ -176,20 +176,20 @@ func Bootstrap(ctx context.Context, system InstallSystem) (InstallResult, error)
 	result := InstallResult{Action: "bootstrap"}
 	state, err := system.Inspect()
 	if err != nil {
-		return result, err
+		return result, installerFailed(installExitBootstrapState, err)
 	}
 	if state.Present {
 		if state.BootstrapPending {
 			if !state.Trusted || !state.Enrolled {
-				return result, errors.New("pending installer enrollment is unknown")
+				return result, installerFailed(installExitBootstrapState, errors.New("pending installer enrollment is unknown"))
 			}
 		} else {
 			if !state.Trusted || (!state.Enrolled && !(state.Retired && state.ReenrollmentAllowed)) || (!state.ServicesMatch && !state.Retired) {
-				return result, errors.New("existing installation is unknown; no state was replaced")
+				return result, installerFailed(installExitBootstrapState, errors.New("existing installation is unknown; no state was replaced"))
 			}
 			if !state.Retired {
 				if err = system.StartMain(ctx); err != nil {
-					return result, err
+					return result, installerFailed(installExitStartSCM, err)
 				}
 				result.Completed = true
 				return result, nil
@@ -198,20 +198,20 @@ func Bootstrap(ctx context.Context, system InstallSystem) (InstallResult, error)
 	}
 	enrollment, err := system.Enrollment()
 	if err != nil {
-		return result, err
+		return result, installerFailed(installExitEnrollment, err)
 	}
 	if err = system.ConfigureServices(); err != nil {
-		return result, err
+		return result, installerFailed(installExitConfigureSCM, err)
 	}
 	if err = system.Provision(enrollment); err != nil {
-		return result, err
+		return result, installerFailed(installExitProvision, err)
 	}
 	if err = system.StartMain(ctx); err != nil {
-		return result, err
+		return result, installerFailed(installExitStartSCM, err)
 	}
 	if commit, ok := system.(interface{ CommitBootstrap() error }); ok {
 		if err = commit.CommitBootstrap(); err != nil {
-			return result, err
+			return result, installerFailed(installExitBootstrapCommit, err)
 		}
 	}
 	result.Completed = true
@@ -221,17 +221,17 @@ func Uninstall(ctx context.Context, system InstallSystem) (InstallResult, error)
 	result := InstallResult{Action: "uninstall"}
 	state, err := system.Inspect()
 	if err != nil {
-		return result, err
+		return result, installerFailed(installExitUninstallState, err)
 	}
 	if !state.Present || !state.Trusted || !state.Enrolled || !state.ServicesMatch {
-		return result, errors.New("known installed enrollment required")
+		return result, installerFailed(installExitUninstallState, errors.New("known installed enrollment required"))
 	}
 	if state.UninstallPending {
 		// The journal was written only after exact recovery and is rechecked
 		// before every remaining fixed SCM deletion. Never repeat unknown recovery.
 		result.Restored = true
 		if err = system.DeleteServices(); err != nil {
-			return result, err
+			return result, installerFailed(installExitDeleteSCM, err)
 		}
 		result.Completed = true
 		return result, nil
@@ -241,14 +241,14 @@ func Uninstall(ctx context.Context, system InstallSystem) (InstallResult, error)
 	_ = system.StopMain(ctx)
 	stopped, observeErr := system.MainStopped()
 	if observeErr != nil || !stopped {
-		return result, errors.New("main service quiescence was not proved")
+		return result, installerFailed(installExitStopSCM, errors.New("main service quiescence was not proved"))
 	}
 	if err = system.RecoverExact(ctx); err != nil {
-		return result, err
+		return result, installerFailed(installExitRecovery, err)
 	}
 	result.Restored = true
 	if err = system.DeleteServices(); err != nil {
-		return result, err
+		return result, installerFailed(installExitDeleteSCM, err)
 	}
 	result.Completed = true
 	// Installer-owned release deletion is a later step, gated by this result.

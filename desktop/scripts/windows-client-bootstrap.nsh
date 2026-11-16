@@ -16,6 +16,8 @@
 !endif
 
 Var LuminaFailure
+Var LuminaFailureCode
+Var LuminaDirectoryFailureBase
 Var LuminaSD
 Var LuminaSA
 Var LuminaSystemSID
@@ -39,6 +41,21 @@ Var LuminaCheckStrict
 Var LuminaCheckOK
 Var LuminaCreated
 Var LuminaExpires
+
+!macro LuminaRecordFailure REASON CODE
+  StrCpy $LuminaFailure "${REASON}"
+  StrCpy $LuminaFailureCode ${CODE}
+!macroend
+
+; Only this package's verified subprocess supplies the native stage range.
+; Keep crash codes and generic helper failures scoped to the invoking stage.
+!macro LuminaRecordNativeFailure REASON CODE
+  !insertmacro LuminaRecordFailure "${REASON}" ${CODE}
+  ${If} $R0 >= 120
+  ${AndIf} $R0 <= 138
+    StrCpy $LuminaFailureCode $R0
+  ${EndIf}
+!macroend
 
 !macro LuminaBootstrapFunctions P
 Function ${P}LuminaCloseBootstrap
@@ -114,8 +131,8 @@ FunctionEnd
 
 Function ${P}LuminaBootstrapFatal
   Call ${P}LuminaCloseBootstrap
-  DetailPrint "LuminaVPN protected setup failed ($LuminaFailure). Installed files were retained."
-  SetErrorLevel 2
+  DetailPrint "LuminaVPN protected setup failed ($LuminaFailure, exit $LuminaFailureCode). Installed files were retained."
+  SetErrorLevel $LuminaFailureCode
   Quit
 FunctionEnd
 
@@ -238,7 +255,7 @@ Function ${P}LuminaOpenDirectory
   StrCpy $LuminaCheckHandle 0
   System::Call '$SYSDIR\kernel32.dll::CreateFileW(w r0, i 0x120081, i 1, p 0, i 3, i 0x02200000, p 0)p.r1'
   ${If} $1 == -1
-    StrCpy $LuminaFailure "OPEN_DIRECTORY"
+    !insertmacro LuminaRecordFailure OPEN_DIRECTORY $LuminaDirectoryFailureBase
     Goto directory_done
   ${EndIf}
   System::Call '*(i 0, i 0)p.r2'
@@ -261,7 +278,8 @@ Function ${P}LuminaOpenDirectory
   System::Free $2
   ${If} $LuminaCheckHandle == 0
     System::Call '$SYSDIR\kernel32.dll::CloseHandle(p r1)'
-    StrCpy $LuminaFailure "DIRECTORY_REPARSE_OR_QUERY"
+    IntOp $3 $LuminaDirectoryFailureBase + 1
+    !insertmacro LuminaRecordFailure DIRECTORY_REPARSE_OR_QUERY $3
   ${EndIf}
   directory_done:
   System::Store "r5 r4 r3 r2 r1"
@@ -313,13 +331,13 @@ Function ${P}LuminaCopyImage
   StrCpy $0 "$LuminaNoncePath\lumina-service.exe"
   Call ${P}LuminaCreateFile
   ${If} $1 == -1
-    StrCpy $LuminaFailure "CREATE_IMAGE"
+    !insertmacro LuminaRecordFailure CREATE_IMAGE 63
     Goto copy_done
   ${EndIf}
   StrCpy $R1 $1
   System::Call '$SYSDIR\kernel32.dll::CreateFileW(w "$PLUGINSDIR\lumina-bootstrap.bin", i 0x80000000, i 1, p 0, i 3, i 0x00200080, p 0)p.r2'
   ${If} $2 == -1
-    StrCpy $LuminaFailure "OPEN_EMBEDDED_DATA"
+    !insertmacro LuminaRecordFailure OPEN_EMBEDDED_DATA 64
     Goto copy_close_writer
   ${EndIf}
   StrCpy $R2 $2
@@ -330,24 +348,24 @@ Function ${P}LuminaCopyImage
     System::Call '$SYSDIR\kernel32.dll::ReadFile(p $R2, p $R3, i 65536, *i .r3, p 0)i.r4'
     ${If} $4 == 0
     ${OrIf} $3 > 65536
-      StrCpy $LuminaFailure "READ_EMBEDDED_DATA"
+      !insertmacro LuminaRecordFailure READ_EMBEDDED_DATA 65
       Goto copy_free
     ${EndIf}
     ${If} $3 == 0
       ${If} $R4 == 0
-        StrCpy $LuminaFailure "EMPTY_IMAGE"
+        !insertmacro LuminaRecordFailure EMPTY_IMAGE 66
       ${EndIf}
       Goto copy_free
     ${EndIf}
     IntOp $R4 $R4 + $3
     ${If} $R4 > 67108864
-      StrCpy $LuminaFailure "IMAGE_SIZE"
+      !insertmacro LuminaRecordFailure IMAGE_SIZE 67
       Goto copy_free
     ${EndIf}
     System::Call '$SYSDIR\kernel32.dll::WriteFile(p $R1, p $R3, i r3, *i .r5, p 0)i.r4'
     ${If} $4 == 0
     ${OrIf} $5 != $3
-      StrCpy $LuminaFailure "WRITE_IMAGE"
+      !insertmacro LuminaRecordFailure WRITE_IMAGE 68
       Goto copy_free
     ${EndIf}
     Goto copy_loop
@@ -357,7 +375,7 @@ Function ${P}LuminaCopyImage
   copy_close_writer:
   System::Call '$SYSDIR\kernel32.dll::FlushFileBuffers(p $R1)i.r4'
   ${If} $4 == 0
-    StrCpy $LuminaFailure "FLUSH_IMAGE"
+    !insertmacro LuminaRecordFailure FLUSH_IMAGE 69
   ${EndIf}
   System::Call '$SYSDIR\kernel32.dll::CloseHandle(p $R1)'
   copy_done:
@@ -368,31 +386,31 @@ Function ${P}LuminaLockAndHashImage
   System::Store "s"
   System::Call '$SYSDIR\kernel32.dll::CreateFileW(w "$LuminaNoncePath\lumina-service.exe", i 0x80020000, i 1, p 0, i 3, i 0x00200080, p 0)p.r0'
   ${If} $0 == -1
-    StrCpy $LuminaFailure "LOCK_IMAGE"
+    !insertmacro LuminaRecordFailure LOCK_IMAGE 70
     Goto hash_done
   ${EndIf}
   StrCpy $LuminaImageHandle $0
   StrCpy $LuminaCheckHandle $0
   Call ${P}LuminaCheckRegular
   ${If} $LuminaCheckOK != 1
-    StrCpy $LuminaFailure "IMAGE_REPARSE_OR_DIRECTORY"
+    !insertmacro LuminaRecordFailure IMAGE_REPARSE_OR_DIRECTORY 71
     Goto hash_done
   ${EndIf}
   StrCpy $LuminaCheckStrict 1
   Call ${P}LuminaCheckProtected
   ${If} $LuminaCheckOK != 1
-    StrCpy $LuminaFailure "IMAGE_ACL"
+    !insertmacro LuminaRecordFailure IMAGE_ACL 72
     Goto hash_done
   ${EndIf}
   System::Call '$SYSDIR\bcrypt.dll::BCryptOpenAlgorithmProvider(*p .r1, w "SHA256", p 0, i 0)i.r0'
   ${If} $0 != 0
-    StrCpy $LuminaFailure "HASH_PROVIDER"
+    !insertmacro LuminaRecordFailure HASH_PROVIDER 73
     Goto hash_done
   ${EndIf}
   ; Win7+ can allocate the hash object internally, avoiding object-size ABI assumptions.
   System::Call '$SYSDIR\bcrypt.dll::BCryptCreateHash(p r1, *p .r2, p 0, i 0, p 0, i 0, i 0)i.r0'
   ${If} $0 != 0
-    StrCpy $LuminaFailure "HASH_CREATE"
+    !insertmacro LuminaRecordFailure HASH_CREATE 74
     Goto hash_close_provider
   ${EndIf}
   System::Alloc 65536
@@ -401,7 +419,7 @@ Function ${P}LuminaLockAndHashImage
     System::Call '$SYSDIR\kernel32.dll::ReadFile(p $LuminaImageHandle, p $R0, i 65536, *i .r3, p 0)i.r4'
     ${If} $4 == 0
     ${OrIf} $3 > 65536
-      StrCpy $LuminaFailure "HASH_READ"
+      !insertmacro LuminaRecordFailure HASH_READ 75
       Goto hash_free
     ${EndIf}
     ${If} $3 == 0
@@ -409,14 +427,14 @@ Function ${P}LuminaLockAndHashImage
     ${EndIf}
     System::Call '$SYSDIR\bcrypt.dll::BCryptHashData(p r2, p $R0, i r3, i 0)i.r4'
     ${If} $4 != 0
-      StrCpy $LuminaFailure "HASH_UPDATE"
+      !insertmacro LuminaRecordFailure HASH_UPDATE 76
       Goto hash_free
     ${EndIf}
     Goto hash_loop
   hash_finish:
     System::Call '$SYSDIR\bcrypt.dll::BCryptFinishHash(p r2, p $R0, i 32, i 0)i.r4'
     ${If} $4 != 0
-      StrCpy $LuminaFailure "HASH_FINISH"
+      !insertmacro LuminaRecordFailure HASH_FINISH 77
       Goto hash_free
     ${EndIf}
     StrCpy $5 ""
@@ -433,7 +451,7 @@ Function ${P}LuminaLockAndHashImage
         Goto hash_hex
       ${EndIf}
     ${If} $5 != "${LUMINA_BOOTSTRAP_SHA256}"
-      StrCpy $LuminaFailure "HASH_MISMATCH"
+      !insertmacro LuminaRecordFailure HASH_MISMATCH 78
     ${EndIf}
   hash_free:
   System::Free $R0
@@ -447,6 +465,7 @@ FunctionEnd
 Function ${P}LuminaPrepareBootstrap
   System::Store "s"
   StrCpy $LuminaFailure ""
+  StrCpy $LuminaFailureCode 26
   StrCpy $LuminaSD 0
   StrCpy $LuminaSA 0
   StrCpy $LuminaSystemSID 0
@@ -465,7 +484,7 @@ Function ${P}LuminaPrepareBootstrap
   ; All structure pointers use the NSIS host ABI (Unicode x86), not the x64 target ABI.
   System::Call '$SYSDIR\advapi32.dll::ConvertStringSecurityDescriptorToSecurityDescriptorW(w "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)", i 1, *p .r0, p 0)i.r1'
   ${If} $1 == 0
-    StrCpy $LuminaFailure "SECURITY_DESCRIPTOR"
+    !insertmacro LuminaRecordFailure SECURITY_DESCRIPTOR 30
     Goto prepare_done
   ${EndIf}
   StrCpy $LuminaSD $0
@@ -473,13 +492,13 @@ Function ${P}LuminaPrepareBootstrap
   StrCpy $LuminaSA $0
   System::Call '$SYSDIR\advapi32.dll::ConvertStringSidToSidW(w "S-1-5-18", *p .r0)i.r1'
   ${If} $1 == 0
-    StrCpy $LuminaFailure "SYSTEM_SID"
+    !insertmacro LuminaRecordFailure SYSTEM_SID 31
     Goto prepare_done
   ${EndIf}
   StrCpy $LuminaSystemSID $0
   System::Call '$SYSDIR\advapi32.dll::ConvertStringSidToSidW(w "S-1-5-32-544", *p .r0)i.r1'
   ${If} $1 == 0
-    StrCpy $LuminaFailure "ADMIN_SID"
+    !insertmacro LuminaRecordFailure ADMIN_SID 32
     Goto prepare_done
   ${EndIf}
   StrCpy $LuminaAdminSID $0
@@ -489,13 +508,13 @@ Function ${P}LuminaPrepareBootstrap
   System::Alloc 68 ; SECURITY_MAX_SID_SIZE, including every possible subauthority.
   Pop $LuminaTrustedInstallerSID
   ${If} $LuminaTrustedInstallerSID == 0
-    StrCpy $LuminaFailure "TRUSTED_INSTALLER_MEMORY"
+    !insertmacro LuminaRecordFailure TRUSTED_INSTALLER_MEMORY 33
     Goto prepare_done
   ${EndIf}
   System::Alloc 512 ; Bounded 256-WCHAR referenced-domain buffer.
   Pop $5
   ${If} $5 == 0
-    StrCpy $LuminaFailure "TRUSTED_INSTALLER_MEMORY"
+    !insertmacro LuminaRecordFailure TRUSTED_INSTALLER_MEMORY 33
     Goto prepare_done
   ${EndIf}
   System::Call '$SYSDIR\advapi32.dll::LookupAccountNameW(p 0, w "NT SERVICE\TrustedInstaller", p $LuminaTrustedInstallerSID, *i 68 r1, p r5, *i 256 r2, *i .r3)i.r0'
@@ -503,25 +522,25 @@ Function ${P}LuminaPrepareBootstrap
   ${If} $0 == 0
   ${OrIf} $1 < 8
   ${OrIf} $1 > 68
-    StrCpy $LuminaFailure "TRUSTED_INSTALLER_SID"
+    !insertmacro LuminaRecordFailure TRUSTED_INSTALLER_SID 34
     Goto prepare_done
   ${EndIf}
   System::Call '$SYSDIR\advapi32.dll::IsValidSid(p $LuminaTrustedInstallerSID)i.r0'
   ${If} $0 == 0
-    StrCpy $LuminaFailure "TRUSTED_INSTALLER_SID"
+    !insertmacro LuminaRecordFailure TRUSTED_INSTALLER_SID 34
     Goto prepare_done
   ${EndIf}
   System::Call '$SYSDIR\advapi32.dll::GetLengthSid(p $LuminaTrustedInstallerSID)i.r0'
   ${If} $0 < 8
   ${OrIf} $0 > 68
-    StrCpy $LuminaFailure "TRUSTED_INSTALLER_SID"
+    !insertmacro LuminaRecordFailure TRUSTED_INSTALLER_SID 34
     Goto prepare_done
   ${EndIf}
   System::Call '$SYSDIR\shell32.dll::SHGetKnownFolderPath(g "{62AB5D82-FDC1-4DC3-A9DD-070D1D495D97}", i 0, p 0, *p .r0)i.r1'
   ${If} $1 != 0
   ${OrIf} $0 == 0
     System::Call '$SYSDIR\ole32.dll::CoTaskMemFree(p r0)'
-    StrCpy $LuminaFailure "PROGRAMDATA"
+    !insertmacro LuminaRecordFailure PROGRAMDATA 35
     Goto prepare_done
   ${EndIf}
   ; The OS allocates only the actual NUL-terminated string. Reading it as a
@@ -530,7 +549,7 @@ Function ${P}LuminaPrepareBootstrap
   ${If} $2 <= 0
   ${OrIf} $2 >= ${NSIS_MAX_STRLEN}
     System::Call '$SYSDIR\ole32.dll::CoTaskMemFree(p r0)'
-    StrCpy $LuminaFailure "PROGRAMDATA_LENGTH"
+    !insertmacro LuminaRecordFailure PROGRAMDATA_LENGTH 36
     Goto prepare_done
   ${EndIf}
   System::Call '$SYSDIR\kernel32.dll::lstrcpynW(w .r1, p r0, i ${NSIS_MAX_STRLEN})p.r3'
@@ -538,14 +557,14 @@ Function ${P}LuminaPrepareBootstrap
   StrLen $0 $1
   ${If} $3 == 0
   ${OrIf} $0 != $2
-    StrCpy $LuminaFailure "PROGRAMDATA_LENGTH"
+    !insertmacro LuminaRecordFailure PROGRAMDATA_LENGTH 36
     Goto prepare_done
   ${EndIf}
   StrCpy $LuminaProgramData $1
   StrLen $0 $LuminaProgramData
   ${If} $0 > 160
   ${OrIf} $0 < 4
-    StrCpy $LuminaFailure "PROGRAMDATA_LENGTH"
+    !insertmacro LuminaRecordFailure PROGRAMDATA_LENGTH 36
     Goto prepare_done
   ${EndIf}
   ; Walk from the local fixed drive root, opening each component itself rather
@@ -554,19 +573,19 @@ Function ${P}LuminaPrepareBootstrap
   StrCpy $1 $LuminaProgramData 1 2
   ${If} $0 != ":"
   ${OrIf} $1 != "\"
-    StrCpy $LuminaFailure "PROGRAMDATA_LOCAL_PATH"
+    !insertmacro LuminaRecordFailure PROGRAMDATA_LOCAL_PATH 37
     Goto prepare_done
   ${EndIf}
   StrCpy $R5 $LuminaProgramData 3
   System::Call '$SYSDIR\kernel32.dll::GetDriveTypeW(w "$R5")i.r0'
   ${If} $0 != 3
-    StrCpy $LuminaFailure "PROGRAMDATA_FIXED_DRIVE"
+    !insertmacro LuminaRecordFailure PROGRAMDATA_FIXED_DRIVE 38
     Goto prepare_done
   ${EndIf}
   System::Alloc 128
   Pop $LuminaAncestorHandles
   ${If} $LuminaAncestorHandles == 0
-    StrCpy $LuminaFailure "ANCESTOR_MEMORY"
+    !insertmacro LuminaRecordFailure ANCESTOR_MEMORY 39
     Goto prepare_done
   ${EndIf}
   StrCpy $LuminaAncestorCount 0
@@ -574,6 +593,7 @@ Function ${P}LuminaPrepareBootstrap
   StrLen $R7 $LuminaProgramData
   ancestor_open:
     StrCpy $0 $R5
+    StrCpy $LuminaDirectoryFailureBase 55
     Call ${P}LuminaOpenDirectory
     ${If} $LuminaCheckHandle == 0
       Goto prepare_done
@@ -583,7 +603,7 @@ Function ${P}LuminaPrepareBootstrap
     ${Else}
       ${If} $LuminaAncestorCount >= 32
         System::Call '$SYSDIR\kernel32.dll::CloseHandle(p $LuminaCheckHandle)'
-        StrCpy $LuminaFailure "PROGRAMDATA_DEPTH"
+        !insertmacro LuminaRecordFailure PROGRAMDATA_DEPTH 40
         Goto prepare_done
       ${EndIf}
       IntOp $0 $LuminaAncestorCount * 4
@@ -594,7 +614,7 @@ Function ${P}LuminaPrepareBootstrap
     StrCpy $LuminaCheckStrict 0
     Call ${P}LuminaCheckProtected
     ${If} $LuminaCheckOK != 1
-      StrCpy $LuminaFailure "PROGRAMDATA_ANCESTOR_ACL"
+      !insertmacro LuminaRecordFailure PROGRAMDATA_ANCESTOR_ACL 41
       Goto prepare_done
     ${EndIf}
     ${If} $R6 > $R7
@@ -617,7 +637,7 @@ Function ${P}LuminaPrepareBootstrap
       ${If} $R8 == ""
       ${OrIf} $R8 == "."
       ${OrIf} $R8 == ".."
-        StrCpy $LuminaFailure "PROGRAMDATA_COMPONENT"
+        !insertmacro LuminaRecordFailure PROGRAMDATA_COMPONENT 42
         Goto prepare_done
       ${EndIf}
       StrCpy $0 $R5 1 -1
@@ -639,21 +659,21 @@ Function ${P}LuminaPrepareBootstrap
     ${OrIf} $1 == 3
       StrCpy $LuminaAnchorPath "$LuminaProgramData\Microsoft"
     ${Else}
-      StrCpy $LuminaFailure "PROGRAMDATA_ANCHOR_QUERY"
+      !insertmacro LuminaRecordFailure PROGRAMDATA_ANCHOR_QUERY 43
       Goto prepare_done
     ${EndIf}
   ${EndIf}
   StrCpy $0 $LuminaAnchorPath
+  StrCpy $LuminaDirectoryFailureBase 61
   Call ${P}LuminaOpenDirectory
   StrCpy $LuminaAnchorHandle $LuminaCheckHandle
   ${If} $LuminaAnchorHandle == 0
-    StrCpy $LuminaFailure "PROGRAMDATA_ANCHOR_OPEN"
     Goto prepare_done
   ${EndIf}
   StrCpy $LuminaCheckStrict 0
   Call ${P}LuminaCheckProtected
   ${If} $LuminaCheckOK != 1
-    StrCpy $LuminaFailure "PROGRAMDATA_ANCHOR_ACL"
+    !insertmacro LuminaRecordFailure PROGRAMDATA_ANCHOR_ACL 45
     Goto prepare_done
   ${EndIf}
   StrCpy $4 0
@@ -663,7 +683,7 @@ Function ${P}LuminaPrepareBootstrap
     StrCpy $LuminaCheckHandle $0
     Call ${P}LuminaCheckPinnedDirectory
     ${If} $LuminaCheckOK != 1
-      StrCpy $LuminaFailure "PROGRAMDATA_ANCESTOR_CHANGED"
+      !insertmacro LuminaRecordFailure PROGRAMDATA_ANCESTOR_CHANGED 46
       Goto prepare_done
     ${EndIf}
     IntOp $5 $5 + 4
@@ -672,23 +692,24 @@ Function ${P}LuminaPrepareBootstrap
   StrCpy $LuminaCheckHandle $LuminaProgramDataHandle
   Call ${P}LuminaCheckPinnedDirectory
   ${If} $LuminaCheckOK != 1
-    StrCpy $LuminaFailure "PROGRAMDATA_CHANGED"
+    !insertmacro LuminaRecordFailure PROGRAMDATA_CHANGED 47
     Goto prepare_done
   ${EndIf}
   StrCpy $LuminaCheckHandle $LuminaAnchorHandle
   Call ${P}LuminaCheckPinnedDirectory
   ${If} $LuminaCheckOK != 1
-    StrCpy $LuminaFailure "PROGRAMDATA_ANCHOR_CHANGED"
+    !insertmacro LuminaRecordFailure PROGRAMDATA_ANCHOR_CHANGED 48
     Goto prepare_done
   ${EndIf}
   System::Call '$SYSDIR\kernel32.dll::CreateDirectoryW(w "$LuminaSetupParent", p $LuminaSA)i.r0 ?e'
   Pop $1
   ${If} $0 == 0
   ${AndIf} $1 != 183
-    StrCpy $LuminaFailure "SETUP_PARENT_CREATE"
+    !insertmacro LuminaRecordFailure SETUP_PARENT_CREATE 49
     Goto prepare_done
   ${EndIf}
   StrCpy $0 $LuminaSetupParent
+  StrCpy $LuminaDirectoryFailureBase 57
   Call ${P}LuminaOpenDirectory
   StrCpy $LuminaSetupHandle $LuminaCheckHandle
   ${If} $LuminaSetupHandle == 0
@@ -697,7 +718,7 @@ Function ${P}LuminaPrepareBootstrap
   StrCpy $LuminaCheckStrict 1
   Call ${P}LuminaCheckProtected
   ${If} $LuminaCheckOK != 1
-    StrCpy $LuminaFailure "SETUP_PARENT_ACL"
+    !insertmacro LuminaRecordFailure SETUP_PARENT_ACL 50
     Goto prepare_done
   ${EndIf}
   System::Alloc 16
@@ -705,7 +726,7 @@ Function ${P}LuminaPrepareBootstrap
   System::Call '$SYSDIR\bcrypt.dll::BCryptGenRandom(p 0, p $R0, i 16, i 2)i.r0'
   ${If} $0 != 0
     System::Free $R0
-    StrCpy $LuminaFailure "NONCE_RANDOM"
+    !insertmacro LuminaRecordFailure NONCE_RANDOM 51
     Goto prepare_done
   ${EndIf}
   StrCpy $LuminaNonce ""
@@ -725,10 +746,11 @@ Function ${P}LuminaPrepareBootstrap
   StrCpy $LuminaNoncePath "$LuminaSetupParent\$LuminaNonce"
   System::Call '$SYSDIR\kernel32.dll::CreateDirectoryW(w "$LuminaNoncePath", p $LuminaSA)i.r0'
   ${If} $0 == 0 ; Never reuse or repair a colliding nonce directory.
-    StrCpy $LuminaFailure "NONCE_CREATE"
+    !insertmacro LuminaRecordFailure NONCE_CREATE 52
     Goto prepare_done
   ${EndIf}
   StrCpy $0 $LuminaNoncePath
+  StrCpy $LuminaDirectoryFailureBase 59
   Call ${P}LuminaOpenDirectory
   StrCpy $LuminaNonceHandle $LuminaCheckHandle
   ${If} $LuminaNonceHandle == 0
@@ -737,7 +759,7 @@ Function ${P}LuminaPrepareBootstrap
   StrCpy $LuminaCheckStrict 1
   Call ${P}LuminaCheckProtected
   ${If} $LuminaCheckOK != 1
-    StrCpy $LuminaFailure "NONCE_ACL"
+    !insertmacro LuminaRecordFailure NONCE_ACL 53
     Goto prepare_done
   ${EndIf}
   InitPluginsDir
@@ -745,7 +767,7 @@ Function ${P}LuminaPrepareBootstrap
   ClearErrors
   File /oname=lumina-bootstrap.bin "${LUMINA_BOOTSTRAP_SOURCE}"
   ${If} ${Errors}
-    StrCpy $LuminaFailure "EXTRACT_EMBEDDED_DATA"
+    !insertmacro LuminaRecordFailure EXTRACT_EMBEDDED_DATA 54
     Goto prepare_done
   ${EndIf}
   Call ${P}LuminaCopyImage
@@ -766,7 +788,7 @@ Function ${P}LuminaPrepareBootstrap
   StrCpy $0 "$LuminaNoncePath\bootstrap-trust.json"
   Call ${P}LuminaCreateFile
   ${If} $1 == -1
-    StrCpy $LuminaFailure "CREATE_TRUST"
+    !insertmacro LuminaRecordFailure CREATE_TRUST 79
     Goto prepare_done
   ${EndIf}
   StrCpy $R0 $1
@@ -775,11 +797,11 @@ Function ${P}LuminaPrepareBootstrap
   System::Call '$SYSDIR\kernel32.dll::WriteFile(p $R0, m r2, i r3, *i .r4, p 0)i.r5'
   ${If} $5 == 0
   ${OrIf} $4 != $3
-    StrCpy $LuminaFailure "WRITE_TRUST"
+    !insertmacro LuminaRecordFailure WRITE_TRUST 80
   ${EndIf}
   System::Call '$SYSDIR\kernel32.dll::FlushFileBuffers(p $R0)i.r5'
   ${If} $5 == 0
-    StrCpy $LuminaFailure "FLUSH_TRUST"
+    !insertmacro LuminaRecordFailure FLUSH_TRUST 81
   ${EndIf}
   System::Call '$SYSDIR\kernel32.dll::CloseHandle(p $R0)'
   ${If} $LuminaFailure != ""
@@ -787,20 +809,20 @@ Function ${P}LuminaPrepareBootstrap
   ${EndIf}
   System::Call '$SYSDIR\kernel32.dll::CreateFileW(w "$LuminaNoncePath\bootstrap-trust.json", i 0x80020000, i 1, p 0, i 3, i 0x00200080, p 0)p.r0'
   ${If} $0 == -1
-    StrCpy $LuminaFailure "LOCK_TRUST"
+    !insertmacro LuminaRecordFailure LOCK_TRUST 82
     Goto prepare_done
   ${EndIf}
   StrCpy $LuminaTrustHandle $0
   StrCpy $LuminaCheckHandle $0
   Call ${P}LuminaCheckRegular
   ${If} $LuminaCheckOK != 1
-    StrCpy $LuminaFailure "TRUST_REPARSE_OR_DIRECTORY"
+    !insertmacro LuminaRecordFailure TRUST_REPARSE_OR_DIRECTORY 83
     Goto prepare_done
   ${EndIf}
   StrCpy $LuminaCheckStrict 1
   Call ${P}LuminaCheckProtected
   ${If} $LuminaCheckOK != 1
-    StrCpy $LuminaFailure "TRUST_ACL"
+    !insertmacro LuminaRecordFailure TRUST_ACL 84
   ${EndIf}
   ${If} $LuminaFailure == ""
     ; The executed image must not use the untrusted extraction directory as CWD.
