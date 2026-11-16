@@ -185,7 +185,7 @@ func serve(run string) (returned error) {
 			return e
 		}
 	}
-	config, e := darwinCoreConfig(s.Manifest, nodes, secret, company, verification)
+	config, e := darwinCoreConfig(s.Manifest, nodes, secret, company, verification, false)
 	if e != nil {
 		return e
 	}
@@ -378,14 +378,16 @@ func serve(run string) (returned error) {
 	retry := &vpnRetry{}
 	disconnected := false
 	networkUnavailable := false
+	var fallbackProofUntil time.Time
 	transitionFallback := func(state State, wake string, direct bool) error {
-		next, err := applyDarwinAutoFallback(ctx, run, state, company, verification, nodes, secret, wake, direct, func(current State) time.Time {
+		next, proofUntil, err := applyDarwinAutoFallback(ctx, run, state, company, verification, nodes, secret, wake, direct, func(current State) time.Time {
 			return health.directDeadline(current, wake, nodes, time.Now())
 		})
 		if err != nil {
 			return err
 		}
 		verification = next
+		fallbackProofUntil = proofUntil
 		selection = selector.New(names)
 		health.sampledAt = make(map[string]time.Time)
 		boundChecks.reset()
@@ -489,7 +491,7 @@ func serve(run string) (returned error) {
 				}
 				s.VPN.Bootstrap, s.Leases, s.Channels, s.Phase = false, nil, nil, "reconnecting"
 				s.PersonalFallback = false
-				s.DarwinAutoFallbackUntil = nil
+				s.PersonalFallbackUntil, s.DarwinAutoFallbackUntil = nil, nil
 				return nil
 			}); e != nil {
 				return e
@@ -542,7 +544,7 @@ func serve(run string) (returned error) {
 				s.Phase = "network_unavailable"
 				if s.PersonalFallback {
 					s.PersonalFallback = false
-					s.DarwinAutoFallbackUntil = nil
+					s.PersonalFallbackUntil, s.DarwinAutoFallbackUntil = nil, nil
 					s.Personal = selector.Reject
 				}
 				return nil
@@ -583,7 +585,7 @@ func serve(run string) (returned error) {
 					s.Channels = nil
 					s.Phase, s.Personal = "reconnecting", selector.Reject
 					s.PersonalFallback = false
-					s.DarwinAutoFallbackUntil = nil
+					s.PersonalFallbackUntil, s.DarwinAutoFallbackUntil = nil, nil
 				}
 				return nil
 			}); e != nil {
@@ -607,7 +609,7 @@ func serve(run string) (returned error) {
 					return e
 				}
 			}
-			config, e = darwinCoreConfig(manifest, nodes, secret, company, verification)
+			config, e = darwinCoreConfig(manifest, nodes, secret, company, verification, false)
 			if e != nil {
 				return e
 			}
@@ -668,8 +670,14 @@ func serve(run string) (returned error) {
 			if current.PersonalFallback {
 				direct = direct && current.Personal == "PHYSICAL" && !darwinFallbackExpired(current, time.Now())
 				if direct {
-					if e := renewDarwinFallback(ctx, run, current, proof); e != nil {
-						return e
+					next, err := renewDarwinFallback(ctx, run, current, fallbackProofUntil, proof)
+					switch {
+					case errors.Is(err, errFallbackLeaseStateChanged), errors.Is(err, context.DeadlineExceeded):
+						direct = false
+					case err != nil:
+						return err
+					default:
+						fallbackProofUntil = next
 					}
 				}
 			}

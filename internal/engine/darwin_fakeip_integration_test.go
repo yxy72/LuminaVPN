@@ -188,8 +188,6 @@ func testDarwinFakeIPContinuity(t *testing.T, executable string, preservesPool b
 	}
 	config := func(personal bool) map[string]any {
 		t.Helper()
-		// The fallback variant keeps candidate adapters for authenticated
-		// independent health, with no candidate ingress or PERSONAL membership.
 		nodes := []policy.Node{{"name": "P001", "type": "hysteria2", "server": "192.0.2.77", "port": 443, "password": "fixture-only"}}
 		manifest := Manifest{Mode: Daily, Channels: &policy.ChannelIntent{Personal: personal}, Config: cfg,
 			Binding: policy.Binding{Physical: "lo0", VPN: "utun50", TUN: "utun51", ControllerPort: controllerPort}}
@@ -197,7 +195,7 @@ func testDarwinFakeIPContinuity(t *testing.T, executable string, preservesPool b
 		if personal {
 			verification = &personalVerification{}
 		}
-		result, err := darwinCoreConfig(manifest, nodes, secret, nil, verification)
+		result, err := darwinCoreConfig(manifest, nodes, secret, nil, verification, false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -223,8 +221,7 @@ func testDarwinFakeIPContinuity(t *testing.T, executable string, preservesPool b
 			switch server := record.([]string)[0]; {
 			case server == "rcode://refused":
 			case strings.HasSuffix(server, "#PERSONAL"):
-				// A fallback that still depends on the personal DNS policy
-				// must fail, even if it selects the direct data path.
+				// Explicit Personal Off uses the separate direct DNS policy.
 				dnsPolicy[host] = []string{"rcode://refused"}
 			default:
 				dnsPolicy[host] = []string{loopback + "#PHYSICAL"}

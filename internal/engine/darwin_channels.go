@@ -126,15 +126,20 @@ func darwinCanRetainCompany(m Manifest, nodes []policy.Node) bool {
 	return m.Config.ValidateForIntent(intent) == nil && policy.ValidateEndpointsForIntent(m.Config, nodes, intent) == nil
 }
 
-func darwinCoreConfig(m Manifest, nodes []policy.Node, secret string, company *companyRuntime, verification *personalVerification) (map[string]any, error) {
+func darwinCoreConfig(m Manifest, nodes []policy.Node, secret string, company *companyRuntime, verification *personalVerification, fallback bool) (map[string]any, error) {
 	intent := m.InitialChannels()
-	if (intent.Company && company == nil) || (verification != nil) != intent.Personal {
+	if (intent.Company && company == nil) || (verification != nil) != (intent.Personal && !fallback) ||
+		fallback && (m.Mode == "" || !intent.Personal) {
 		return nil, errors.New("macOS channel resources do not match the run intent")
 	}
 	// Keep the same company rules and resolver in both live states. CORP
 	// starts at REJECT and the authenticated ingress needs an active lease.
 	intent.Company = company != nil
-	config, err := policy.CompileWithIntent(m.Config, nodes, m.Binding, secret, intent)
+	compile := policy.CompileWithIntent
+	if fallback {
+		compile = policy.CompilePersonalFallback
+	}
+	config, err := compile(m.Config, nodes, m.Binding, secret, intent)
 	if err != nil {
 		return nil, err
 	}

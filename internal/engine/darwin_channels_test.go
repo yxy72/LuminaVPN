@@ -78,7 +78,7 @@ func TestDarwinStartupConfigProtectsCompanyAndSelectsPersonalDirect(t *testing.T
 			Probes:    []policy.Probe{{URL: "https://direct.example/health", Channel: "direct"}},
 		},
 	}
-	config, err := darwinCoreConfig(m, nil, strings.Repeat("s", 32), nil, nil)
+	config, err := darwinCoreConfig(m, nil, strings.Repeat("s", 32), nil, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,12 +215,12 @@ func TestDarwinRetainedCompanyUsesSameBlockedPolicyAcrossIntents(t *testing.T) {
 	proxy["interface-name"] = "lo0"
 	company := &companyRuntime{proxy: proxy}
 	secret := strings.Repeat("s", 32)
-	off, err := darwinCoreConfig(m, nil, secret, company, nil)
+	off, err := darwinCoreConfig(m, nil, secret, company, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	intent.Company = true
-	on, err := darwinCoreConfig(m, nil, secret, company, nil)
+	on, err := darwinCoreConfig(m, nil, secret, company, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -40,7 +40,7 @@ func beginDarwinAutoFallback(s *State, before State, direct bool, allows func(St
 	}
 	s.DarwinAutoFallbackPending = true
 	s.PersonalFallback = false
-	s.DarwinAutoFallbackUntil = nil
+	s.PersonalFallbackUntil, s.DarwinAutoFallbackUntil = nil, nil
 	s.Personal, s.Phase = selector.Reject, "reconnecting"
 	s.Channels = nil
 	return nil
@@ -54,7 +54,7 @@ func darwinFallbackCutoff(s State, proofDeadline time.Time) time.Time {
 	return proofDeadline
 }
 
-func publishDarwinAutoFallback(ctx context.Context, s *State, direct bool, until time.Time, authorize func(State) error, selectGroup func(context.Context, string, string) error) error {
+func publishDarwinAutoFallback(ctx context.Context, s *State, direct bool, until time.Time, authorize func(State) error, selectGroup func(context.Context, string, string) error, openLease func(context.Context, time.Time) (time.Time, error)) error {
 	if direct {
 		if until.IsZero() {
 			return errDarwinFallbackDeferred
@@ -76,13 +76,22 @@ func publishDarwinAutoFallback(ctx context.Context, s *State, direct bool, until
 	if err := check(); err != nil {
 		return err
 	}
-	if err := openDesktopConfig(func(group, target string) error {
+	if err := selectGroup(ctx, "PHYSICAL", "PHYSICAL-BOUND"); err != nil {
+		return err
+	}
+	var readback time.Time
+	if direct {
 		if err := check(); err != nil {
 			return err
 		}
-		return selectGroup(ctx, group, target)
-	}, direct); err != nil {
-		return err
+		cutoff, err := openLease(ctx, until)
+		if err != nil {
+			return err
+		}
+		if cutoff.After(until) || !time.Now().Before(cutoff) {
+			return errors.New("macOS automatic fallback did not confirm a current lease")
+		}
+		readback = cutoff
 	}
 	if err := check(); err != nil {
 		return err
@@ -91,12 +100,12 @@ func publishDarwinAutoFallback(ctx context.Context, s *State, direct bool, until
 	s.Personal = selector.Reject
 	if direct {
 		s.Personal = "PHYSICAL"
-		s.DarwinAutoFallbackUntil = &until
+		s.PersonalFallbackUntil = &readback
 	}
 	return nil
 }
 
-func applyDarwinAutoFallback(ctx context.Context, run string, before State, company *companyRuntime, previous *personalVerification, nodes []policy.Node, secret, wake string, direct bool, deadline func(State) time.Time) (*personalVerification, error) {
+func applyDarwinAutoFallback(ctx context.Context, run string, before State, company *companyRuntime, previous *personalVerification, nodes []policy.Node, secret, wake string, direct bool, deadline func(State) time.Time) (*personalVerification, time.Time, error) {
 	allows := func(s State) bool {
 		return !darwinManualReadbackPending(run, s) && deadline(s).After(time.Now().Add(time.Second))
 	}
@@ -104,15 +113,14 @@ func applyDarwinAutoFallback(ctx context.Context, run string, before State, comp
 	// configuration preflight must not prolong the old authorization.
 	if !direct {
 		if err := closeDarwinFallbackPaths(ctx, run); err != nil {
-			return nil, err
+			return nil, time.Time{}, err
 		}
 	}
 	if direct && !allows(before) {
-		return nil, errDarwinFallbackDeferred
+		return nil, time.Time{}, errDarwinFallbackDeferred
 	}
 	manifest := before.Manifest
 	effective := currentIntent(before)
-	effective.Personal = !direct
 	manifest.Channels = &effective
 	// Keeping the explicit node adapters lets the authenticated controller
 	// continue independent delay checks without a candidate listener or a
@@ -120,15 +128,15 @@ func applyDarwinAutoFallback(ctx context.Context, run string, before State, comp
 	config, verification, err := stageDarwinPersonalConfig(ctx, run, manifest, nodes, company, secret, direct)
 	if err != nil {
 		if direct {
-			return nil, errDarwinFallbackDeferred
+			return nil, time.Time{}, errDarwinFallbackDeferred
 		}
-		return nil, err
+		return nil, time.Time{}, err
 	}
 	if err := verifyDarwinPersonalResolverOwnership(before); err != nil {
 		if direct {
-			return nil, errDarwinFallbackDeferred
+			return nil, time.Time{}, errDarwinFallbackDeferred
 		}
-		return nil, err
+		return nil, time.Time{}, err
 	}
 	if err := update(run, func(s *State) error {
 		if err := checkDarwinCompanyOwner(run, *s); err != nil {
@@ -137,9 +145,9 @@ func applyDarwinAutoFallback(ctx context.Context, run string, before State, comp
 		return beginDarwinAutoFallback(s, before, direct, allows)
 	}); err != nil {
 		if !direct && errors.Is(err, errDarwinFallbackDeferred) {
-			return nil, errors.New("could not restore macOS proxy mode after closing direct fallback")
+			return nil, time.Time{}, errors.New("could not restore macOS proxy mode after closing direct fallback")
 		}
-		return nil, err
+		return nil, time.Time{}, err
 	}
 	authorize := func(s State) error {
 		if err := checkDarwinCompanyOwner(run, s); err != nil {
@@ -152,12 +160,12 @@ func applyDarwinAutoFallback(ctx context.Context, run string, before State, comp
 		return nil
 	}
 	fallbackAttempted := false
-	failClosed := func(err error) (*personalVerification, error) {
+	failClosed := func(err error) (*personalVerification, time.Time, error) {
 		if fallbackAttempted {
-			// The controller may have accepted a selector write before readback failed.
-			return nil, errors.Join(err, closeDarwinFallbackPaths(ctx, run))
+			// The core may have granted the lease before readback failed.
+			return nil, time.Time{}, errors.Join(err, closeDarwinFallbackPaths(ctx, run))
 		}
-		return nil, errors.Join(err, closeDarwinBasePaths(ctx, run))
+		return nil, time.Time{}, errors.Join(err, closeDarwinBasePaths(ctx, run))
 	}
 	if err := closeDarwinVerification(run, previous); err != nil {
 		return failClosed(err)
@@ -176,27 +184,30 @@ func applyDarwinAutoFallback(ctx context.Context, run string, before State, comp
 	}
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
+	var proofUntil time.Time
 	if err := update(run, func(s *State) error {
-		var until time.Time
 		if direct {
-			until = deadline(*s)
+			proofUntil = darwinFallbackCutoff(*s, deadline(*s))
 		}
-		return publishDarwinAutoFallback(ctx, s, direct, until, authorizePublication, func(work context.Context, group, target string) error {
-			fallbackAttempted = fallbackAttempted || group == "PERSONAL" && target == "PHYSICAL"
+		return publishDarwinAutoFallback(ctx, s, direct, proofUntil, authorizePublication, func(work context.Context, group, target string) error {
 			return selectCoreGroupContext(work, run, group, target)
+		}, func(work context.Context, cutoff time.Time) (time.Time, error) {
+			fallbackAttempted = true
+			return setPersonalFallbackLease(work, run, openFallbackLease, cutoff)
 		})
 	}); err != nil {
 		return failClosed(err)
 	}
-	return verification, nil
+	return verification, proofUntil, nil
 }
 
 // The heartbeat also attempts to revoke the selector and close tracked
 // fallback connections when the owning loop is busy. The fallback marker
 // remains until the owning loop finishes restoring the regular resolver.
 func darwinFallbackExpired(s State, now time.Time) bool {
+	until := fallbackUntil(s)
 	return s.PersonalFallback && s.Personal == "PHYSICAL" &&
-		(s.DarwinAutoFallbackUntil == nil || !now.Before(*s.DarwinAutoFallbackUntil))
+		(until == nil || !now.Before(*until))
 }
 
 func fenceExpiredDarwinFallback(ctx context.Context, run string) error {
@@ -259,12 +270,13 @@ func drainDarwinFallbackConnections(request func(method, path string, payload, o
 	return nil
 }
 
-func renewDarwinFallback(ctx context.Context, run string, before State, deadline func(State) time.Time) error {
+func renewDarwinFallback(ctx context.Context, run string, before State, previousProof time.Time, deadline func(State) time.Time) (time.Time, error) {
 	until := darwinFallbackCutoff(before, deadline(before))
-	if before.DarwinAutoFallbackUntil != nil && !until.After(*before.DarwinAutoFallbackUntil) {
-		return nil
+	if !until.After(previousProof) {
+		return previousProof, nil
 	}
-	return update(run, func(s *State) error {
+	published := previousProof
+	err := update(run, func(s *State) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -276,9 +288,15 @@ func renewDarwinFallback(ctx context.Context, run string, before State, deadline
 			return nil
 		}
 		until := darwinFallbackCutoff(*s, deadline(*s))
-		if until.After(time.Now()) && (s.DarwinAutoFallbackUntil == nil || until.After(*s.DarwinAutoFallbackUntil)) {
-			s.DarwinAutoFallbackUntil = &until
+		if until.After(previousProof) {
+			readback, err := setPersonalFallbackLease(ctx, run, renewFallbackLease, until)
+			if err != nil {
+				return err
+			}
+			s.PersonalFallbackUntil = &readback
+			published = until
 		}
 		return nil
 	})
+	return published, err
 }

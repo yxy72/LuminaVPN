@@ -73,6 +73,10 @@ func setFallbackLease(ctx context.Context, operation fallbackLeaseOperation, exp
 	var after fallbackLeaseState
 	update := fallbackLeaseUpdate{before.Revision, operation, deadlineMS}
 	if err := request(ctx, "PUT", update, &after); err != nil {
+		var rejected *coreFailure
+		if errors.As(err, &rejected) && rejected.status == 409 {
+			return time.Time{}, errFallbackLeaseStateChanged
+		}
 		return time.Time{}, err
 	}
 	if !after.Active || after.Revision == "" || len(after.Revision) > 128 || after.Revision == before.Revision ||

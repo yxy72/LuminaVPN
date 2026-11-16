@@ -99,7 +99,7 @@ func (change darwinPersonalChange) publish(s *State, check func(State) error, se
 	s.ChannelGeneration++
 	s.AppliedGeneration = s.ChannelGeneration
 	s.Personal, s.PersonalFallback = selector.Reject, false
-	s.DarwinAutoFallbackUntil = nil
+	s.PersonalFallbackUntil, s.DarwinAutoFallbackUntil = nil, nil
 	if !change.to.Personal {
 		s.Personal = "PHYSICAL"
 	}
@@ -125,9 +125,9 @@ func (change darwinPersonalChange) decline(run string, failure error) error {
 	return failure
 }
 
-func stageDarwinPersonalConfig(ctx context.Context, run string, m Manifest, nodes []policy.Node, company *companyRuntime, secret string, keepCandidateAdapters bool) (map[string]any, *personalVerification, error) {
+func stageDarwinPersonalConfig(ctx context.Context, run string, m Manifest, nodes []policy.Node, company *companyRuntime, secret string, fallback bool) (map[string]any, *personalVerification, error) {
 	var verification *personalVerification
-	if m.InitialChannels().Personal {
+	if m.InitialChannels().Personal && !fallback {
 		if len(nodes) == 0 || policy.ValidateEndpointsForIntent(m.Config, nodes, m.InitialChannels()) != nil {
 			return nil, nil, errDarwinPersonalPreflight
 		}
@@ -136,10 +136,10 @@ func stageDarwinPersonalConfig(ctx context.Context, run string, m Manifest, node
 		if err != nil {
 			return nil, nil, err
 		}
-	} else if !keepCandidateAdapters {
+	} else if !fallback {
 		nodes = nil
 	}
-	config, err := darwinCoreConfig(m, nodes, secret, company, verification)
+	config, err := darwinCoreConfig(m, nodes, secret, company, verification, fallback)
 	if err != nil {
 		return nil, nil, err
 	}
