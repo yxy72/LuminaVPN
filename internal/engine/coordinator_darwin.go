@@ -670,7 +670,7 @@ func serve(run string) (returned error) {
 			if current.PersonalFallback {
 				direct = direct && current.Personal == "PHYSICAL" && !darwinFallbackExpired(current, time.Now())
 				if direct {
-					next, err := renewDarwinFallback(ctx, run, current, fallbackProofUntil, proof)
+					next, err := renewDarwinFallback(ctx, run, lastResumeRequest, current, fallbackProofUntil, proof)
 					switch {
 					case errors.Is(err, errFallbackLeaseStateChanged), errors.Is(err, context.DeadlineExceeded):
 						direct = false

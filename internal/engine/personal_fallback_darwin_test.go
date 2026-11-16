@@ -202,7 +202,7 @@ func TestDarwinFallbackExpiryDrainsOnlyPersonalPhysicalConnections(t *testing.T)
 		if out == nil {
 			return nil
 		}
-		return json.Unmarshal([]byte(`{"connections":[{"id":"personal","chains":["PHYSICAL-BOUND","PHYSICAL","PERSONAL"]},{"id":"local","chains":["PHYSICAL-BOUND","PHYSICAL"]},{"id":"company","chains":["CORP-BOUND","CORP"]}]}`), out)
+		return json.Unmarshal([]byte(`{"connections":[{"id":"personal","chains":["PHYSICAL-BOUND","PHYSICAL","PERSONAL"]},{"id":"local","chains":["PHYSICAL-BOUND","PHYSICAL"]},{"id":"company","chains":["CORP-BOUND","CORP"]},{"id":"rejected","chains":["REJECT","PERSONAL"]}]}`), out)
 	})
 	if err != nil || !reflect.DeepEqual(calls, []string{"GET /connections", "DELETE /connections/personal"}) {
 		t.Fatal(calls, err)

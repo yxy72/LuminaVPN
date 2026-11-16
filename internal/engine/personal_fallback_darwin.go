@@ -54,6 +54,26 @@ func darwinFallbackCutoff(s State, proofDeadline time.Time) time.Time {
 	return proofDeadline
 }
 
+func requireDarwinFallbackWake(wake string) error {
+	if actual, err := platform.WakeEpoch(); err != nil || actual != wake {
+		return errFallbackLeaseStateChanged
+	}
+	return nil
+}
+
+func setDarwinFallbackLease(ctx context.Context, run, wake string, operation fallbackLeaseOperation, expiresAt time.Time) (time.Time, error) {
+	return setFallbackLease(ctx, operation, expiresAt, func(work context.Context, method string, in, out any) error {
+		if method == "PUT" {
+			// The core clock was read before this check. A grant sent past a
+			// later wake can only use the core deadline from that observation.
+			if err := requireDarwinFallbackWake(wake); err != nil {
+				return err
+			}
+		}
+		return apiContext(work, run, method, personalFallbackLeasePath, in, out)
+	})
+}
+
 func publishDarwinAutoFallback(ctx context.Context, s *State, direct bool, until time.Time, authorize func(State) error, selectGroup func(context.Context, string, string) error, openLease func(context.Context, time.Time) (time.Time, error)) error {
 	if direct {
 		if until.IsZero() {
@@ -177,8 +197,8 @@ func applyDarwinAutoFallback(ctx context.Context, run string, before State, comp
 		return failClosed(err)
 	}
 	authorizePublication := func(s State) error {
-		if actual, err := platform.WakeEpoch(); err != nil || actual != wake {
-			return errors.New("macOS wake generation changed during fallback")
+		if err := requireDarwinFallbackWake(wake); err != nil {
+			return err
 		}
 		return authorize(s)
 	}
@@ -193,7 +213,7 @@ func applyDarwinAutoFallback(ctx context.Context, run string, before State, comp
 			return selectCoreGroupContext(work, run, group, target)
 		}, func(work context.Context, cutoff time.Time) (time.Time, error) {
 			fallbackAttempted = true
-			return setPersonalFallbackLease(work, run, openFallbackLease, cutoff)
+			return setDarwinFallbackLease(work, run, wake, openFallbackLease, cutoff)
 		})
 	}); err != nil {
 		return failClosed(err)
@@ -260,6 +280,9 @@ func drainDarwinFallbackConnections(request func(method, path string, payload, o
 		if !slices.Contains(connection.Chains, "PERSONAL") {
 			continue
 		}
+		if slices.Equal(connection.Chains, []string{"REJECT", "PERSONAL"}) {
+			continue
+		}
 		if !slices.Contains(connection.Chains, "PHYSICAL") || slices.Contains(connection.Chains, "CORP") || slices.Contains(connection.Chains, "CORP-BOUND") {
 			return errors.New("unexpected personal connection during macOS fallback expiry")
 		}
@@ -270,7 +293,7 @@ func drainDarwinFallbackConnections(request func(method, path string, payload, o
 	return nil
 }
 
-func renewDarwinFallback(ctx context.Context, run string, before State, previousProof time.Time, deadline func(State) time.Time) (time.Time, error) {
+func renewDarwinFallback(ctx context.Context, run, wake string, before State, previousProof time.Time, deadline func(State) time.Time) (time.Time, error) {
 	until := darwinFallbackCutoff(before, deadline(before))
 	if !until.After(previousProof) {
 		return previousProof, nil
@@ -289,8 +312,11 @@ func renewDarwinFallback(ctx context.Context, run string, before State, previous
 		}
 		until := darwinFallbackCutoff(*s, deadline(*s))
 		if until.After(previousProof) {
-			readback, err := setPersonalFallbackLease(ctx, run, renewFallbackLease, until)
+			readback, err := setDarwinFallbackLease(ctx, run, wake, renewFallbackLease, until)
 			if err != nil {
+				return err
+			}
+			if err := requireDarwinFallbackWake(wake); err != nil {
 				return err
 			}
 			s.PersonalFallbackUntil = &readback
