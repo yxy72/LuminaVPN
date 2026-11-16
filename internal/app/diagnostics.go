@@ -32,12 +32,13 @@ type diagnosticStatus struct {
 }
 
 type diagnosticChannel struct {
-	State        string `json:"state"`
-	Reason       string `json:"reason"`
-	NextAction   string `json:"next_action"`
-	PathState    string `json:"path_state"`
-	ServiceState string `json:"service_state"`
-	ProbeScope   string `json:"probe_scope"`
+	State        string     `json:"state"`
+	Reason       string     `json:"reason"`
+	NextAction   string     `json:"next_action"`
+	PathState    string     `json:"path_state"`
+	ServiceState string     `json:"service_state"`
+	ProbeScope   string     `json:"probe_scope"`
+	CheckedAt    *time.Time `json:"checked_at,omitempty"`
 }
 
 // Exact membership is intentional: accepting arbitrary snake_case values would
@@ -52,6 +53,7 @@ func publicCode(value, allowed string) string {
 }
 
 const diagnosticReasons = `path_verified service_healthy path_probe_failed http_response_missing
+disabled_blocked disabled_direct all_candidates_failed intent_pending
 http_status_rejected tcp_unavailable tls_certificate_invalid tls_timeout tls_failed http_write_failed
 probe_budget_expired check_expired stopped stopping recovery_failed physical_network_unavailable
 authentication_required vpn_not_ready company_check_failed generation_changed lease_unavailable
@@ -67,7 +69,7 @@ vpn_tun_failed vpn_certificate_rejected vpn_exit_observation_failed vpn_failure_
 func diagnosticProjection(s engine.Status, now time.Time) *diagnosticStatus {
 	s = engine.RefreshStatus(s, now)
 	d := &diagnosticStatus{
-		Phase:          publicCode(s.Phase, "prepared preparing starting reconnecting ready degraded network_unavailable company_unavailable authentication_required stopping stopped recovery_failed"),
+		Phase:          publicCode(s.Phase, "prepared preparing starting connecting reconnecting managed ready degraded network_unavailable company_unavailable personal_unavailable authentication_required stopping stopped recovery_failed"),
 		Lifecycle:      publicCode(s.Lifecycle, "starting running stopping stopped recovery_failed"),
 		HasError:       s.Error != "",
 		RecoveryReason: publicCode(s.RecoveryReason, diagnosticReasons),
@@ -82,14 +84,19 @@ func diagnosticProjection(s engine.Status, now time.Time) *diagnosticStatus {
 	}
 	for _, name := range []string{"company", "personal", "direct"} {
 		h := s.Channels[name]
-		d.Channels[name] = diagnosticChannel{
-			State:        publicCode(h.State, "ready unavailable unknown"),
+		channel := diagnosticChannel{
+			State:        publicCode(h.State, "ready unavailable unknown degraded"),
 			Reason:       publicCode(h.Reason, diagnosticReasons),
-			NextAction:   publicCode(h.NextAction, "check_company check_personal check_direct check_runtime check_service_expectation wait_for_probe start run_down check_network run_auth wait_for_reconnect wait_for_renewal wait_for_selection check_status"),
-			PathState:    publicCode(h.PathState, "verified failed unknown not_checked"),
+			NextAction:   publicCode(h.NextAction, "check_company check_personal check_direct check_runtime check_service_expectation wait_for_probe wait_for_apply start run_down check_network run_auth wait_for_reconnect wait_for_renewal wait_for_selection check_status"),
+			PathState:    publicCode(h.PathState, "verified failed unknown not_checked blocked physical_direct"),
 			ServiceState: publicCode(h.ServiceState, "healthy failed unknown not_checked"),
-			ProbeScope:   publicCode(h.ProbeScope, "system_tun mixed_ingress"),
+			ProbeScope:   publicCode(h.ProbeScope, "system_tun mixed_ingress company_binding"),
 		}
+		if !h.CheckedAt.IsZero() && !now.Before(h.CheckedAt) {
+			checkedAt := h.CheckedAt.UTC()
+			channel.CheckedAt = &checkedAt
+		}
+		d.Channels[name] = channel
 	}
 	return d
 }

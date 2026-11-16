@@ -201,7 +201,7 @@ func (d *Desktop) GetState() State {
 		return s
 	}
 	raw = engine.RefreshStatus(raw, now)
-	s.Status.Phase = oneOf(raw.Phase, "interrupted", "prepared", "preparing", "connecting", "reconnecting", "starting", "ready", "degraded", "authentication_required", "company_unavailable", "personal_unavailable", "network_unavailable", "stopping", "stopped", "recovery_failed")
+	s.Status.Phase = oneOf(raw.Phase, "interrupted", "prepared", "preparing", "connecting", "reconnecting", "starting", "managed", "ready", "degraded", "authentication_required", "company_unavailable", "personal_unavailable", "network_unavailable", "stopping", "stopped", "recovery_failed")
 	s.Status.Lifecycle = oneOf(raw.Lifecycle, "unknown", "starting", "running", "stopping", "stopped", "recovery_failed")
 	s.Status.Updated, s.Status.LastReady = timestamp(raw.Updated), timestamp(raw.LastReady)
 	if nodeID.MatchString(raw.Personal) {

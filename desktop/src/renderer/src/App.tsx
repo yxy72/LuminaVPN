@@ -138,6 +138,8 @@ const phaseNames: Record<string, string> = {
   recovery_failed: "恢复尚未完成",
   network_unavailable: "网络暂不可用",
   company_unavailable: "公司通道暂不可用",
+  personal_unavailable: "个人通道暂不可用",
+  managed: "已接管，等待通道验证",
   degraded: "部分通道待确认",
 };
 

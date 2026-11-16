@@ -86,6 +86,28 @@ func TestDiagnosticsAllowlistRejectsPrivateAndUnknownFields(t *testing.T) {
 	}
 }
 
+func TestDiagnosticsExportsManagedRoutesWithoutClaimingLiveChecks(t *testing.T) {
+	now := time.Now()
+	observed := now.Add(-time.Second)
+	s := engine.Status{
+		Phase: "managed", Lifecycle: "running", Updated: now,
+		Channels: map[string]engine.ChannelStatus{
+			"company":  {State: "ready", Reason: "disabled_blocked", CheckedAt: observed, PathState: "blocked"},
+			"personal": {State: "degraded", Reason: "all_candidates_failed", CheckedAt: observed, PathState: "physical_direct"},
+			"direct":   {State: "unknown", CheckedAt: now.Add(time.Minute), PathState: "unknown"},
+		},
+	}
+	d := diagnosticProjection(s, now)
+	company := d.Channels["company"]
+	personal := d.Channels["personal"]
+	if d.Phase != "managed" || company.Reason != "disabled_blocked" || company.PathState != "blocked" ||
+		company.CheckedAt == nil || !company.CheckedAt.Equal(observed) ||
+		personal.State != "degraded" || personal.Reason != "all_candidates_failed" ||
+		personal.PathState != "physical_direct" || d.Channels["direct"].CheckedAt != nil {
+		t.Fatalf("invalid managed status projection: %+v", d)
+	}
+}
+
 func TestDiagnosticsExportReadsOnlySavedStatus(t *testing.T) {
 	root := testutil.PrivateTempDir(t)
 	profile := filepath.Join(root, "not-created")

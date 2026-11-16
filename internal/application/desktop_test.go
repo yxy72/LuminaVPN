@@ -110,6 +110,17 @@ func TestDesktopAgesSavedEvidenceWithoutClaimingLiveProcess(t *testing.T) {
 	}
 }
 
+func TestDesktopDoesNotPresentManagedAsInterrupted(t *testing.T) {
+	d := fixtureDesktop(t)
+	now := time.Now()
+	d.Now = func() time.Time { return now }
+	savedRun(t, d, engine.Status{Phase: "managed", Lifecycle: "running", Updated: now})
+	state := d.GetState()
+	if state.Status.Phase != "managed" || state.RecoveryRequired || state.RuntimeLiveness != "not_checked" {
+		t.Fatal(state)
+	}
+}
+
 func TestMissingPolicyDoesNotHideExistingRunOrRecovery(t *testing.T) {
 	d := fixtureDesktop(t)
 	run := savedRun(t, d, engine.Status{Phase: "stopping", Lifecycle: "stopping", Updated: time.Now()})
