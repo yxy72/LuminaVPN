@@ -92,9 +92,25 @@ func TestServiceSnapshotProjectsOnlySafeActualEvidence(t *testing.T) {
 	result.IPv6State = "blocked"
 	result.IPv6Blocked = true
 	result.IPv6CheckedAt = time.Now()
-	result.Status.Channels["company"] = engine.ChannelStatus{State: "ready", PathState: "verified", ProbeScope: "system_tun"}
-	if got := projectServiceChannel(result, "company", true); got.Route != "vpn" || got.IPv6 != "blocked" {
+	checked := time.Now()
+	health := engine.ChannelStatus{State: "ready", PathState: "verified", ServiceState: "healthy", ProbeScope: "system_tun", CheckedAt: checked}
+	result.Status.Channels["company"] = health
+	if got := projectServiceChannel(result, "company", true); got.Route != "vpn" || got.IPv6 != "blocked" || got.Probe == nil || !got.Probe.CheckedAt.Equal(checked) {
 		t.Fatal("actual verified evidence omitted")
+	}
+	result.Status.Channels["direct"] = health
+	if got := projectServiceChannel(result, "direct", true); got.Route != "direct" || got.Probe == nil || got.Probe.ServiceState != "healthy" {
+		t.Fatal("system direct check did not establish the physical route")
+	}
+	health.State, health.ServiceState = "unavailable", "failed"
+	result.Status.Channels["direct"] = health
+	if got := projectServiceChannel(result, "direct", true); got.Route != "direct" || got.State != "unavailable" || got.Probe == nil || got.Probe.PathState != "verified" || got.Probe.ServiceState != "failed" {
+		t.Fatal("service failure discarded the verified path or was shown as ready")
+	}
+	health.ProbeScope = "private-canary"
+	result.Status.Channels["direct"] = health
+	if got := projectServiceChannel(result, "direct", true); got.Route != "unknown" || got.Probe != nil {
+		t.Fatal("unrecognized scope crossed the service boundary")
 	}
 }
 

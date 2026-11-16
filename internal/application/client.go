@@ -140,14 +140,7 @@ func (d *Desktop) ClientRequest(ctx context.Context, method string, raw json.Raw
 		if d.MacClientEnabled() {
 			return d.localWorkspace.networkSnapshot(ctx)
 		}
-		snapshot, err := d.Control.Snapshot(ctx, d.ClientProfileID())
-		if err != nil {
-			return nil, clientFailure(err)
-		}
-		if snapshot.ProfileID != d.ClientProfileID() {
-			return nil, unavailable("PROFILE_MISMATCH", "The service profile did not match the selected workspace.")
-		}
-		return snapshot, nil
+		return d.clientSnapshot(ctx)
 	case "service.operation":
 		var p struct {
 			ID string `json:"operation_id"`
@@ -204,6 +197,53 @@ func (d *Desktop) ClientRequest(ctx context.Context, method string, raw json.Raw
 	return nil, unavailable("METHOD_NOT_FOUND", "Client method is unavailable.")
 }
 
+func (d *Desktop) clientSnapshot(ctx context.Context) (serviceprotocol.Snapshot, error) {
+	profile := d.ClientProfileID()
+	snapshot, err := d.Control.Snapshot(ctx, profile)
+	if err != nil {
+		return serviceprotocol.Snapshot{}, clientFailure(err)
+	}
+	if snapshot.ProfileID != profile {
+		return serviceprotocol.Snapshot{}, unavailable("PROFILE_MISMATCH", "The service profile did not match the selected workspace.")
+	}
+	return snapshot, nil
+}
+
+type diagnosticChannel struct {
+	State string                      `json:"state"`
+	Route string                      `json:"route"`
+	Probe *serviceprotocol.RouteProbe `json:"probe,omitempty"`
+}
+
+func (d *Desktop) serviceDiagnostics(ctx context.Context) (any, error) {
+	snapshot, err := d.clientSnapshot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	channels := make(map[string]diagnosticChannel, 3)
+	for name, channel := range map[string]*serviceprotocol.Channel{
+		"direct": snapshot.Direct, "company": &snapshot.Company, "personal": &snapshot.Personal,
+	} {
+		if channel == nil {
+			channels[name] = diagnosticChannel{State: "unknown", Route: "unknown"}
+			continue
+		}
+		channels[name] = diagnosticChannel{
+			State: oneOf(channel.State, "unknown", "off", "ready", "unavailable", "degraded"),
+			Route: oneOf(channel.Route, "unknown", "direct", "vpn", "personal", "blocked"),
+			Probe: channel.Probe,
+		}
+	}
+	source := "windows_service"
+	if snapshot.LocalExitProof != nil {
+		source = "windows_local"
+	}
+	return map[string]any{
+		"profile_id": snapshot.ProfileID, "source": source, "service_state": snapshot.ServiceState, "phase": snapshot.TakeoverState,
+		"run_ref": snapshot.RunRef, "channels": channels, "restored": snapshot.Restored,
+	}, nil
+}
+
 func validDesktopStart(start *serviceprotocol.StartPayload) bool {
 	if start == nil {
 		return true
@@ -255,6 +295,9 @@ func (d *Desktop) readWorkspace(ctx context.Context, raw json.RawMessage) (any, 
 	case "diagnostics":
 		if !onlyClientKeys(raw, "profile_id", "action") {
 			break
+		}
+		if d.ClientEnabled() {
+			return d.serviceDiagnostics(ctx)
 		}
 		result, err = command.Diagnostics(ctx)
 	case "cleanup_preview":

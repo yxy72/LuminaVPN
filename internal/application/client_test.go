@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"netlaunch/internal/platform"
 	p "netlaunch/internal/serviceprotocol"
@@ -18,6 +19,7 @@ type clientMock struct {
 	calls       int
 	last        p.Mutation
 	response    p.Operation
+	snapshot    *p.Snapshot
 	failure     error
 	unavailable bool
 }
@@ -31,6 +33,9 @@ func scopedWorkspaceJSON(d *Desktop, raw string) json.RawMessage {
 }
 
 func (m *clientMock) Snapshot(context.Context, string) (p.Snapshot, error) {
+	if m.snapshot != nil {
+		return *m.snapshot, m.failure
+	}
 	state := "available"
 	if m.unavailable {
 		state = "not_installed"
@@ -127,6 +132,51 @@ func TestClientProfileAndFailureProjectionNeverEchoPrivateDetails(t *testing.T) 
 	d.Control = nil
 	if _, err := d.ClientRequest(context.Background(), "workspace.read", scopedWorkspaceJSON(d, `{"action":"document"}`)); err == nil {
 		t.Fatal("offline mutation gate missing")
+	}
+}
+
+func TestServiceDiagnosticsIsBoundToTheSelectedRunAndOmitsPrivateFields(t *testing.T) {
+	d := &Desktop{Profile: testutil.PrivateTempDir(t)}
+	view := p.Snapshot{
+		ProfileID: d.ClientProfileID(), RunRef: "run-7", ServiceState: "available", TakeoverState: "managed",
+		Direct: &p.Channel{Desired: true, State: "ready", Route: "direct", Probe: &p.RouteProbe{
+			Scope: "system_tun", PathState: "verified", ServiceState: "healthy", CheckedAt: time.Now(),
+		}},
+		Company:   p.Channel{State: "unknown", Route: "unknown", Reason: "private-hostname"},
+		Personal:  p.Channel{State: "unknown", Route: "unknown", Health: &p.HealthRound{Epoch: "private-epoch"}},
+		Challenge: &p.Challenge{ID: "private-challenge"},
+		Settings:  &p.SettingsPayload{OfficeOverrides: []p.Override{{Value: "private-domain.test"}}},
+	}
+	d.Control = &clientMock{snapshot: &view}
+	read := func() (any, error) {
+		if runtime.GOOS == "windows" {
+			return d.ClientRequest(t.Context(), "workspace.read", scopedWorkspaceJSON(d, `{"action":"diagnostics"}`))
+		}
+		return d.serviceDiagnostics(t.Context())
+	}
+	report, err := read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(report)
+	if err != nil || strings.Contains(string(data), "private") {
+		t.Fatal("unexpected diagnostics data", err)
+	}
+	var fields struct {
+		ProfileID string                       `json:"profile_id"`
+		RunRef    string                       `json:"run_ref"`
+		Source    string                       `json:"source"`
+		Channels  map[string]diagnosticChannel `json:"channels"`
+	}
+	if err = json.Unmarshal(data, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if fields.ProfileID != view.ProfileID || fields.RunRef != view.RunRef || fields.Source != "windows_service" || len(fields.Channels) != 3 || fields.Channels["direct"].Probe == nil || fields.Channels["direct"].Probe.Scope != "system_tun" {
+		t.Fatal("missing service run evidence")
+	}
+	view.ProfileID = "other"
+	if _, err = read(); err == nil {
+		t.Fatal("foreign service run was exported")
 	}
 }
 

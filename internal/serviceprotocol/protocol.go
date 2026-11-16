@@ -316,7 +316,16 @@ type Channel struct {
 	HealthEpoch string       `json:"health_epoch,omitempty"`
 	IPv6        string       `json:"ipv6_state,omitempty"`
 	Health      *HealthRound `json:"health,omitempty"`
+	Probe       *RouteProbe  `json:"probe,omitempty"`
 }
+
+type RouteProbe struct {
+	Scope        string    `json:"scope"`
+	PathState    string    `json:"path_state"`
+	ServiceState string    `json:"service_state"`
+	CheckedAt    time.Time `json:"checked_at"`
+}
+
 type CandidateHealth struct {
 	ID              string `json:"id"`
 	State           string `json:"state"`
@@ -357,6 +366,7 @@ type Snapshot struct {
 	Desired          DesiredChannels  `json:"desired"`
 	Company          Channel          `json:"company"`
 	Personal         Channel          `json:"personal"`
+	Direct           *Channel         `json:"direct,omitempty"`
 	OperationID      string           `json:"operation_id,omitempty"`
 	Challenge        *Challenge       `json:"challenge,omitempty"`
 	RecoveryRequired bool             `json:"recovery_required"`

@@ -68,6 +68,21 @@ describe('Windows client closed boundary', () => {
     expect(validateClientRequest('service.submit',{...auth,auth:{...auth.auth,fields:[...auth.auth.fields,...auth.auth.fields]}})).toBe(false)
     expect(validateClientRequest('service.submit',{...auth,auth:{...auth.auth,fields:[{field_id:'f0',value:'fixture',path:'private-path'}]}})).toBe(false)
   })
+  it('accepts route probe evidence as a bounded optional service result', () => {
+    const channel = { desired: false, state: 'off', route: 'unknown' }
+    const snapshot = {
+      protocol_version: 1, service_state: 'available', takeover_state: 'ready', profile_id: 'profile',
+      revision: 1, recovery_required: true, restored: false, auto_connect: false,
+      desired: { company: false, personal: false }, company: channel, personal: channel,
+    }
+    const probe = { scope: 'system_tun', path_state: 'verified', service_state: 'failed', checked_at: '2026-11-16T08:00:00Z' }
+    const direct = { desired: true, state: 'unavailable', route: 'unknown', probe }
+    expect(validateClientResult('service.snapshot', snapshot)).toBe(true)
+    expect(validateClientResult('service.snapshot', { ...snapshot, direct })).toBe(true)
+    for (const bad of [{ ...probe, scope: 'relay' }, { ...probe, checked_at: 'unknown' }, { ...probe, target: 'private-domain.test' }]) {
+      expect(validateClientResult('service.snapshot', { ...snapshot, direct: { ...direct, probe: bad } })).toBe(false)
+    }
+  })
   it('requires typed complete operation responses and a bounded safe error', () => {
     expect(validateClientResult('workspace.submit',operation)).toBe(true)
     expect(validateClientResult('service.operation',{...operation,kind:'shell'})).toBe(false)

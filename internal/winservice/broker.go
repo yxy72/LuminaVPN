@@ -413,10 +413,9 @@ func (b *Broker) Snapshot(ctx context.Context, v VerifiedPrincipal, profileID st
 		snapshot.TakeoverState = "unknown"
 		snapshot.Restored = false
 		snapshot.RecoveryRequired = true
-		snapshot.Company.State = "unknown"
-		snapshot.Company.Route = "unknown"
-		snapshot.Personal.State = "unknown"
-		snapshot.Personal.Route = "unknown"
+		snapshot.Company = p.Channel{Desired: snapshot.Company.Desired, State: "unknown", Route: "unknown", IPv6: "unknown"}
+		snapshot.Personal = p.Channel{Desired: snapshot.Personal.Desired, State: "unknown", Route: "unknown", IPv6: "unknown"}
+		snapshot.Direct = nil
 	}
 	var selected *entry
 	for _, candidate := range b.operations {

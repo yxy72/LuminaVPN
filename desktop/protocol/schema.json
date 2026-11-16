@@ -1531,6 +1531,27 @@
         "candidates"
       ]
     },
+    "RouteProbe": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "scope": {
+          "enum": ["system_tun", "mixed_ingress", "company_binding"]
+        },
+        "path_state": {
+          "enum": ["verified", "failed", "unknown"]
+        },
+        "service_state": {
+          "enum": ["healthy", "failed", "not_checked", "unknown"]
+        },
+        "checked_at": {
+          "type": "string",
+          "format": "date-time",
+          "maxLength": 64
+        }
+      },
+      "required": ["scope", "path_state", "service_state", "checked_at"]
+    },
     "ServiceChannel": {
       "type": "object",
       "additionalProperties": false,
@@ -1560,6 +1581,9 @@
         },
         "health": {
           "$ref": "#/$defs/HealthRound"
+        },
+        "probe": {
+          "$ref": "#/$defs/RouteProbe"
         }
       },
       "required": [
@@ -1686,6 +1710,9 @@
           "$ref": "#/$defs/ServiceChannel"
         },
         "personal": {
+          "$ref": "#/$defs/ServiceChannel"
+        },
+        "direct": {
           "$ref": "#/$defs/ServiceChannel"
         },
         "operation_id": {

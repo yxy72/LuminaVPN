@@ -71,6 +71,43 @@ func newTestBroker(t *testing.T, f *fakeBackend, bindings ...Binding) (*Broker, 
 	t.Cleanup(cancel)
 	return b, store, cancel
 }
+func TestSnapshotCannotPublishRouteEvidenceAfterRunChanged(t *testing.T) {
+	binding := testBinding("profile")
+	binding.RunRef = "original-run"
+	entered, release := make(chan struct{}), make(chan struct{})
+	proof := &p.RouteProbe{Scope: "system_tun", PathState: "verified", ServiceState: "healthy", CheckedAt: time.Now()}
+	direct := p.Channel{Desired: true, State: "ready", Route: "direct", Probe: proof}
+	broker, store, _ := newTestBroker(t, &fakeBackend{snapshot: func(context.Context, Binding) (p.Snapshot, error) {
+		close(entered)
+		<-release
+		return p.Snapshot{TakeoverState: "ready", Direct: &direct, Company: direct, Personal: direct}, nil
+	}}, binding)
+	type result struct {
+		snapshot p.Snapshot
+		err      error
+	}
+	outcome := make(chan result, 1)
+	go func() {
+		snapshot, err := broker.Snapshot(t.Context(), testPeer(), binding.ProfileID)
+		outcome <- result{snapshot, err}
+	}()
+	<-entered
+	replacement := binding
+	replacement.RunRef = "new-run"
+	replacement.Revision++
+	err := store.Save(replacement)
+	close(release)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := <-outcome
+	if got.err != nil || got.snapshot.TakeoverState != "unknown" || got.snapshot.Direct != nil ||
+		got.snapshot.Company.Probe != nil || got.snapshot.Personal.Probe != nil ||
+		got.snapshot.Company.Route != "unknown" || got.snapshot.Personal.Route != "unknown" {
+		t.Fatalf("old run published routing evidence: %+v", got)
+	}
+}
+
 func waitOperation(t *testing.T, b *Broker, id string) p.Operation {
 	t.Helper()
 	return waitOperationAs(t, b, id, testPeer())

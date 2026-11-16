@@ -290,6 +290,8 @@ func (b *fixedLifecycleBackend) Snapshot(ctx context.Context, binding winservice
 	}
 	view.Company = projectServiceChannel(status, "company", view.Desired.Company)
 	view.Personal = projectServiceChannel(status, "personal", view.Desired.Personal)
+	direct := projectServiceChannel(status, "direct", true)
+	view.Direct = &direct
 	if status.Restored && status.Proof != nil && completeRecoveryProof(*status.Proof) {
 		view.Restored = true
 		view.RecoveryRequired = false
@@ -305,6 +307,14 @@ func projectServiceChannel(result engine.ServiceStatusResult, name string, desir
 	if !ok {
 		return channel
 	}
+	if result.Status.TakeoverActive && !health.CheckedAt.IsZero() {
+		scope := publicCode(health.ProbeScope, "system_tun mixed_ingress company_binding")
+		path := publicCode(health.PathState, "verified failed unknown")
+		service := publicCode(health.ServiceState, "healthy failed not_checked unknown")
+		if scope != "unknown" {
+			channel.Probe = &p.RouteProbe{Scope: scope, PathState: path, ServiceState: service, CheckedAt: health.CheckedAt}
+		}
+	}
 	channel.State = publicCode(health.State, "ready unavailable unknown degraded")
 	if channel.State == "" {
 		channel.State = "unknown"
@@ -318,14 +328,17 @@ func projectServiceChannel(result engine.ServiceStatusResult, name string, desir
 		channel.State = "off"
 		channel.Route = "direct"
 	}
-	if desired && health.State == "ready" && health.PathState == "verified" && health.ProbeScope == "system_tun" {
-		if name == "company" {
+	if desired && channel.Probe != nil && channel.Probe.PathState == "verified" && channel.Probe.Scope == "system_tun" {
+		switch name {
+		case "direct":
+			channel.Route = "direct"
+		case "company":
 			channel.Route = "vpn"
-		} else {
+		case "personal":
 			channel.Route = "personal"
 		}
 	}
-	if name == "personal" && result.Status.PersonalFallback && health.PathState == "physical_direct" {
+	if name == "personal" && result.Status.TakeoverActive && result.Status.PersonalFallback && health.PathState == "physical_direct" {
 		channel.Route = "direct"
 		channel.Reason = "health_evidence_unavailable"
 	}
