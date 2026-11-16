@@ -226,17 +226,20 @@ test('desktop reads real fixtures, protects IPC and ages evidence', async () => 
   }
 })
 
-// An injected local bridge for the Mac Electron Company lifecycle test.
-const macCompanyFixture = String.raw`#!/usr/bin/env node
+// An injected local bridge for the Mac Electron channel lifecycle tests.
+const macChannelFixture = String.raw`#!/usr/bin/env node
 const { appendFileSync, existsSync, unlinkSync } = require('node:fs')
 const { join } = require('node:path')
 const readline = require('node:readline')
 
 const profile = 'fixture-profile'
 const now = () => new Date().toISOString()
-let run = 'fixture-run-1'
-let phase = 'ready_reported'
-let channels = { company: false, personal: true }
+const initialIdle = existsSync(join(process.cwd(), 'initial-idle'))
+let runNumber = initialIdle ? 0 : 1
+let run = initialIdle ? undefined : 'fixture-run-1'
+let phase = initialIdle ? 'idle' : 'ready_reported'
+let channels = { company: false, personal: !initialIdle }
+let frozenPool = false
 let revision = 1
 let active
 const operations = new Map()
@@ -254,8 +257,10 @@ function snapshot() {
     protocol_version: 1, service_state: 'local', takeover_state: active?.phase ?? phase, profile_id: profile,
     revision, run_ref: run, operation_id: active?.operation_id, desired: channels, auto_connect: false,
     company: { desired: channels.company, state: 'unknown', route: running && !channels.company ? 'blocked_reported' : 'unknown' },
-    personal: { desired: channels.personal, state: 'unknown', route: 'unknown' },
+    personal: { desired: channels.personal, state: 'unknown',
+      route: running && !channels.personal && active?.phase !== 'applying_personal' ? 'direct_reported' : 'unknown' },
     recovery_required: running && !restored, restored, mac_company_control: !active && running,
+    mac_personal_control: !active && running && frozenPool,
   }
 }
 
@@ -271,8 +276,11 @@ function submit(request) {
   const { kind } = request
   const priority = kind === 'takeover_stop' || kind === 'exit_restore'
   if (active && !priority) throw new Error('PROFILE_BUSY')
-  if (kind === 'channels_set' && (phase !== 'ready_reported' || request.channels.personal !== channels.personal)) {
-    throw new Error('INVALID_PARAMS')
+  const personalChange = kind === 'channels_set' && request.channels.personal !== channels.personal
+  if (kind === 'channels_set') {
+    const companyChange = request.channels.company !== channels.company
+    if (phase !== 'ready_reported' || companyChange === personalChange) throw new Error('INVALID_PARAMS')
+    if (personalChange && !frozenPool) throw new Error('MAC_PERSONAL_UNAVAILABLE')
   }
   if (kind === 'auth_begin' && !channels.company) throw new Error('INVALID_PARAMS')
   if (active) settle(active, 'cancelled')
@@ -285,7 +293,7 @@ function submit(request) {
 
   switch (kind) {
     case 'channels_set':
-      operation.phase = 'applying_company'
+      operation.phase = personalChange ? 'applying_personal' : 'applying_company'
       active = operation
       operation.nextChannels = request.channels
       break
@@ -298,8 +306,9 @@ function submit(request) {
       settle(operation, phase)
       break
     case 'takeover_start':
-      run = 'fixture-run-2'
+      run = 'fixture-run-' + ++runNumber
       channels = request.start.channels
+      frozenPool = initialIdle && !existsSync(join(process.cwd(), 'missing-pool'))
       phase = 'ready_reported'
       settle(operation, phase)
       break
@@ -314,16 +323,19 @@ function submit(request) {
 }
 
 function handle(method, params) {
-  const marker = join(process.cwd(), 'apply-company')
-  if (active?.kind === 'channels_set' && existsSync(marker)) {
-    unlinkSync(marker)
-    channels = active.nextChannels
-    settle(active, 'company_applied')
+  if (active?.kind === 'channels_set') {
+    const changed = active.phase === 'applying_personal' ? 'personal' : 'company'
+    const marker = join(process.cwd(), 'apply-' + changed)
+    if (existsSync(marker)) {
+      unlinkSync(marker)
+      channels = active.nextChannels
+      settle(active, changed + '_applied')
+    }
   }
   switch (method) {
     case 'session.hello':
       return {
-        protocol_major: 1, session_id: 'company-fixture', mode: 'macos',
+        protocol_major: 1, session_id: 'channel-fixture', mode: 'macos',
         build: { version: 'fixture', os: 'darwin', arch: 'arm64', go_version: 'fixture' },
         capabilities: {
           read_only: false, connection_start: true, connection_stop: true, config_write: true, native_lifecycle: true,
@@ -332,7 +344,7 @@ function handle(method, params) {
       }
     case 'state.get':
       return {
-        profile_configured: true, run_ref: run, snapshot_stale: false, snapshot_age_seconds: 0,
+        profile_configured: true, run_ref: run ?? null, snapshot_stale: false, snapshot_age_seconds: 0,
         runtime_liveness: 'not_checked', recovery_required: phase === 'ready_reported', stop_requested: false,
         observed_at: now(),
         status: { phase: 'ready', lifecycle: 'running', updated: now(), last_ready: null, personal: null,
@@ -352,7 +364,7 @@ function handle(method, params) {
     case 'environment.check':
       return { checked_at: now(), read_only: true, checks: [] }
     case 'recovery.describe':
-      return { required: false, run_ref: run, stop_requested: false, available: true, instructions: [], read_only: true }
+      return { required: false, run_ref: run ?? null, stop_requested: false, available: true, instructions: [], read_only: true }
     case 'workspace.read':
       return params.action === 'activity' ? { profile_id: profile, active: Boolean(active) } : { profile_id: profile }
     case 'service.snapshot':
@@ -374,23 +386,39 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
 })
 `
 
-test('macOS switches only Company on the bound run and can interrupt it to restore', async () => {
-  test.skip(process.platform !== 'darwin', 'Requires the macOS desktop main process')
+async function launchMacChannelFixture(initialIdle = false, missingPool = false) {
   await mkdir(resolve('../.local'), { recursive: true })
-  const root = await mkdtemp(join(resolve('../.local'), 'desktop-company-e2e-'))
+  const root = await mkdtemp(join(resolve('../.local'), 'desktop-channel-e2e-'))
+  if (initialIdle) await writeFile(join(root, 'initial-idle'), '')
+  if (missingPool) await writeFile(join(root, 'missing-pool'), '')
   const userData = join(root, 'userdata')
   const backend = join(root, 'resources', 'backend', 'netlaunch')
   await cp(resolve('out'), join(root, 'out'), { recursive: true })
   await mkdir(userData)
   await mkdir(join(root, 'resources', 'backend'), { recursive: true })
-  await writeFile(backend, macCompanyFixture, { mode: 0o700 })
+  await writeFile(backend, macChannelFixture, { mode: 0o700 })
   await writeFile(join(root, 'package.json'), JSON.stringify({ main: 'out/main/index.js', version: '0.2.0' }))
   const env: Record<string, string> = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined))
   delete env.ELECTRON_RUN_AS_NODE; delete env.NODE_OPTIONS
   const application = await electron.launch({ args: [root, '--user-data-dir=' + userData], cwd: root, env })
   const mainProcess = application.process()
+  const close = async () => {
+    // Always retire this isolated UI, including if its error dialog opens.
+    if (mainProcess.exitCode === null && mainProcess.signalCode === null) {
+      const closed = application.waitForEvent('close')
+      mainProcess.kill('SIGKILL')
+      await closed
+    }
+    await rm(root, { recursive: true, force: true })
+  }
+  await application.context().route(/^https?:\/\//, route => route.abort())
+  return { root, application, close }
+}
+
+test('macOS switches only Company on the bound run and can interrupt it to restore', async () => {
+  test.skip(process.platform !== 'darwin', 'Requires the macOS desktop main process')
+  const { root, application, close } = await launchMacChannelFixture()
   try {
-    await application.context().route(/^https?:\/\//, route => route.abort())
     const page = await application.firstWindow()
     const company = page.getByRole('checkbox', { name: '开启公司 VPN', exact: true })
     const personal = page.getByRole('checkbox', { name: '开启个人代理', exact: true })
@@ -461,14 +489,112 @@ test('macOS switches only Company on the bound run and can interrupt it to resto
       { company: true, personal: true },
     ])
   } finally {
-    // Always retire this isolated UI, including if its error dialog opens.
-    if (mainProcess.exitCode === null && mainProcess.signalCode === null) {
-      const closed = application.waitForEvent('close')
-      mainProcess.kill('SIGKILL')
-      await closed
-    }
-    await rm(root, { recursive: true, force: true })
+    await close()
   }
+})
+
+test('macOS switches Personal on the bound run started with both channels off', async () => {
+  test.skip(process.platform !== 'darwin', 'Requires the macOS desktop main process')
+  const { root, application, close } = await launchMacChannelFixture(true)
+  try {
+    const page = await application.firstWindow()
+    const company = page.getByRole('checkbox', { name: '开启公司 VPN', exact: true })
+    const personal = page.getByRole('checkbox', { name: '开启个人代理', exact: true })
+    const connect = page.getByRole('button', { name: '连接网络', exact: true })
+    const stop = page.getByRole('button', { name: '请求停止', exact: true })
+    const exit = page.getByRole('button', { name: '验证恢复并退出', exact: true })
+    await expect(company).not.toBeChecked()
+    await expect(personal).not.toBeChecked()
+    await connect.click()
+    await expect(page.getByText(/个人：报告走直连/)).toBeVisible()
+    await expect(personal).toBeEnabled()
+
+    await company.click()
+    await expect(company).toBeDisabled()
+    await writeFile(join(root, 'apply-company'), '')
+    await expect(company).toBeChecked()
+    await expect(personal).toBeEnabled()
+
+    const staleResult = await page.evaluate(async () => {
+      const client = window.lumina.client!
+      const stored = await client.snapshot()
+      try {
+        await client.submit({ kind: 'channels_set', request_id: 'stale-fixture', profile_id: stored.profile_id,
+          run_ref: stored.run_ref, expected_revision: stored.revision - 1, channels: { ...stored.desired, personal: true } })
+        return 'unexpected'
+      } catch (error) { return error instanceof Error ? error.message : String(error) }
+    })
+    expect(staleResult).toBe('REVISION_CONFLICT')
+    await expect(personal).not.toBeChecked()
+
+    await personal.click()
+    await expect(page.getByText('正在切换本次运行的个人代理', { exact: true })).toBeVisible()
+    await expect(page.getByText(/个人：等待本次切换报告/)).toBeVisible()
+    await expect(personal).not.toBeChecked()
+    await expect(company).toBeChecked()
+    await expect(stop).toBeEnabled()
+    await writeFile(join(root, 'apply-personal'), '')
+    await expect(personal).toBeChecked()
+    await expect(page.getByText('个人代理设置已应用到本次运行。')).toBeVisible()
+    await expect(page.getByText(/个人：已请求代理/)).toBeVisible()
+    await expect(page.getByText(/个人：报告走直连/)).toHaveCount(0)
+
+    await personal.click()
+    await expect(personal).toBeDisabled()
+    await expect(page.getByText(/个人：等待本次切换报告/)).toBeVisible()
+    await writeFile(join(root, 'apply-personal'), '')
+    await expect(personal).not.toBeChecked()
+    await expect(page.getByText(/个人：报告走直连/)).toBeVisible()
+    await expect(company).toBeChecked()
+
+    await personal.click()
+    await expect(page.getByText('正在切换本次运行的个人代理', { exact: true })).toBeVisible()
+    await stop.click()
+    await expect(connect).toBeEnabled()
+    await connect.click()
+    await expect(page.getByText(/个人：报告走直连/)).toBeVisible()
+    await personal.click()
+    await expect(page.getByText('正在切换本次运行的个人代理', { exact: true })).toBeVisible()
+    await expect(exit).toBeEnabled()
+    const closed = application.waitForEvent('close')
+    await exit.click()
+    await closed
+
+    const requests = (await readFile(join(root, 'accepted.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+    expect(requests.map(({ kind, run_ref }) => [kind, run_ref])).toEqual([
+      ['takeover_start', undefined],
+      ['channels_set', 'fixture-run-1'],
+      ['channels_set', 'fixture-run-1'],
+      ['channels_set', 'fixture-run-1'],
+      ['channels_set', 'fixture-run-1'],
+      ['takeover_stop', 'fixture-run-1'],
+      ['takeover_start', 'fixture-run-1'],
+      ['channels_set', 'fixture-run-2'],
+      ['exit_restore', 'fixture-run-2'],
+    ])
+    expect(requests[0].start.channels).toEqual({ company: false, personal: false })
+    expect(requests.filter(request => request.kind === 'channels_set').map(request => request.channels)).toEqual([
+      { company: true, personal: false },
+      { company: true, personal: true },
+      { company: true, personal: false },
+      { company: true, personal: true },
+      { company: false, personal: true },
+    ])
+  } finally { await close() }
+})
+
+test('macOS leaves Personal unavailable during a run without frozen candidates', async () => {
+  test.skip(process.platform !== 'darwin', 'Requires the macOS desktop main process')
+  const { application, close } = await launchMacChannelFixture(true, true)
+  try {
+    const page = await application.firstWindow()
+    const personal = page.getByRole('checkbox', { name: '开启个人代理', exact: true })
+    await page.getByRole('button', { name: '连接网络', exact: true }).click()
+    await expect(page.getByText('当前运行无法切换个人代理，可在下次连接时调整。')).toBeVisible()
+    await expect(personal).not.toBeChecked()
+    await expect(personal).toBeDisabled()
+    await expect(page.getByRole('checkbox', { name: '开启公司 VPN', exact: true })).toBeEnabled()
+  } finally { await close() }
 })
 
 test('packaged preview uses fixed resources and reloads a crashed renderer', async () => {

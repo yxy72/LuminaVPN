@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
 import type { ClientAPI, DesiredChannels, ServiceMutation, ServiceOperation, ServiceSnapshot, WorkspaceReadBody, WorkspaceWrite, WorkspaceCommand, EnvironmentOverride, ServiceChannel } from '../../../protocol/client'
-import { canPreemptMacCompanyOperation, validateWorkspaceActivity } from '../../../protocol/client'
+import { canPreemptMacRuntimeOperation, validateWorkspaceActivity } from '../../../protocol/client'
 import type { Nodes, Subscriptions, Environment, Config } from '../../../protocol/types'
 import { isRecord } from '../../../protocol/validation-base'
 import { healthLabels, verifiedHealthState, type NodeHealthRound } from './node-health'
@@ -14,7 +14,7 @@ const initialPolicy = (): PolicyDocument => ({ version: 1, company: { domains: [
 const pretty = (x: unknown) => JSON.stringify(x, null, 2)
 const listText = (x: unknown): string => Array.isArray(x) ? x.filter(x => typeof x === 'string').join('\n') : ''
 const lines = (x: string): string[] => x.split(/[\r\n,]+/).map(x => x.trim()).filter(Boolean)
-function safeError(error: unknown): string { const code = isRecord(error) && typeof error.code === 'string' && /^[A-Z_]{1,64}$/.test(error.code) ? error.code : 'CLIENT_OPERATION_FAILED'; return ({ SERVICE_UNAVAILABLE: '后台服务不可用。请检查安装状态；现有连接是否已恢复尚未确认。', PROFILE_NOT_ENROLLED:'此配置尚未登记到后台服务。配置标识不能代替系统登记，连接状态未确认。', PROFILE_UNAVAILABLE:'后台尚无此配置的可信登记。连接状态未确认。', REVISION_CONFLICT: '配置已被其他操作更新，请重新读取并检查差异。', AUTH_REQUIRED: '请完成新的认证挑战。', CLIENT_UNAVAILABLE: '当前平台未提供此操作。', PROFILE_BUSY: '已有配置操作或配置切换正在进行。', EXIT_WORKSPACE_BUSY: '当前操作还在进行，请等待完成后退出。', EXIT_WORKSPACE_STATUS_UNAVAILABLE: '无法确认配置操作已完成。请刷新工作空间后重试。', OPERATION_NOT_FOUND: '操作记录已失效，请重新读取已保存配置。', MAC_START_FAILED: '连接未完成。请检查所选通道的配置及 macOS 授权。', MAC_AUTH_REQUIRED: '公司 VPN 需要有效会话，请在终端完成公司认证后再连接。', MAC_AUTH_FAILED: '公司认证未完成。请检查公司配置或终端提示。', MAC_OPERATION_INTERRUPTED: '网络操作已中断，请检查运行并按需使用恢复入口。', MAC_RECOVERY_UNCONFIRMED: '管理员恢复未确认。请检查诊断页后重试。', MAC_STOP_UNCONFIRMED: '停止报告尚未收到，请检查诊断页。', RECOVERY_REQUIRED: '上一运行需要先确认恢复。', RUN_UNCONFIRMED: '无法绑定当前运行，请刷新诊断页。', EXIT_RESTORE_UNAVAILABLE: '当前运行的管理员恢复未确认，窗口保持打开。', EXIT_RESTORE_FAILED: '恢复操作未完成，窗口保持打开。', EXIT_RESTORE_UNCONFIRMED: '管理员恢复未确认，窗口保持打开。', EXIT_OPERATION_MISMATCH: '当前运行与恢复操作不匹配，请刷新诊断。', EXIT_RESTORE_TIMEOUT: '等待管理员恢复超时，窗口保持打开。' } as Record<string,string>)[code] ?? '操作未完成。请保留恢复入口，刷新状态后检查。' }
+function safeError(error: unknown): string { const code = isRecord(error) && typeof error.code === 'string' && /^[A-Z_]{1,64}$/.test(error.code) ? error.code : 'CLIENT_OPERATION_FAILED'; return ({ SERVICE_UNAVAILABLE: '后台服务不可用。请检查安装状态；现有连接是否已恢复尚未确认。', PROFILE_NOT_ENROLLED:'此配置尚未登记到后台服务。配置标识不能代替系统登记，连接状态未确认。', PROFILE_UNAVAILABLE:'后台尚无此配置的可信登记。连接状态未确认。', REVISION_CONFLICT: '配置已被其他操作更新，请重新读取并检查差异。', AUTH_REQUIRED: '请完成新的认证挑战。', CLIENT_UNAVAILABLE: '当前平台未提供此操作。', PROFILE_BUSY: '已有配置操作或配置切换正在进行。', EXIT_WORKSPACE_BUSY: '当前操作还在进行，请等待完成后退出。', EXIT_WORKSPACE_STATUS_UNAVAILABLE: '无法确认配置操作已完成。请刷新工作空间后重试。', OPERATION_NOT_FOUND: '操作记录已失效，请重新读取已保存配置。', MAC_START_FAILED: '连接未完成。请检查所选通道的配置及 macOS 授权。', MAC_AUTH_REQUIRED: '公司 VPN 需要有效会话，请在终端完成公司认证后再连接。', MAC_AUTH_FAILED: '公司认证未完成。请检查公司配置或终端提示。', MAC_OPERATION_INTERRUPTED: '网络操作已中断，请检查运行并按需使用恢复入口。', MAC_RECOVERY_UNCONFIRMED: '管理员恢复未确认。请检查诊断页后重试。', MAC_STOP_UNCONFIRMED: '停止报告尚未收到，请检查诊断页。', MAC_PERSONAL_UNAVAILABLE: '当前运行不支持切换个人代理，可在下次连接时调整。', MAC_PERSONAL_UNCONFIRMED: '个人代理设置尚未确认，请刷新当前运行状态。', RECOVERY_REQUIRED: '上一运行需要先确认恢复。', RUN_UNCONFIRMED: '无法绑定当前运行，请刷新诊断页。', EXIT_RESTORE_UNAVAILABLE: '当前运行的管理员恢复未确认，窗口保持打开。', EXIT_RESTORE_FAILED: '恢复操作未完成，窗口保持打开。', EXIT_RESTORE_UNCONFIRMED: '管理员恢复未确认，窗口保持打开。', EXIT_OPERATION_MISMATCH: '当前运行与恢复操作不匹配，请刷新诊断。', EXIT_RESTORE_TIMEOUT: '等待管理员恢复超时，窗口保持打开。' } as Record<string,string>)[code] ?? '操作未完成。请保留恢复入口，刷新状态后检查。' }
 function ChannelProbeStatus({ channel }: { channel?: ServiceChannel }) {
   const probe = channel?.probe
   if (!probe || probe.scope !== 'system_tun') return <p>系统路径未确认</p>
@@ -81,7 +81,7 @@ export function ClientWorkspace({ page, api, refreshInventory, nodes, subscripti
   const latest = useRef<ServiceSnapshot | null>(null)
   const [workspaceActivity, setWorkspaceActivity] = useState<boolean | null>(null)
   const canControl = windowsClient ? snapshot?.service_state === 'available' : workspaceActivity === false
-  const macPreemptible = macosClient && snapshot !== null && canPreemptMacCompanyOperation(snapshot, operation)
+  const macPreemptible = macosClient && snapshot !== null && canPreemptMacRuntimeOperation(snapshot, operation)
   const refreshDocumentMetadata = async () => {
     // Never advance a draft's revision without replacing its document. This
     // preserves compare-and-swap protection if another host edited the policy.
@@ -191,11 +191,12 @@ export function ClientWorkspace({ page, api, refreshInventory, nodes, subscripti
     if (next.kind === 'workspace' || next.kind === 'settings_apply') return '配置操作已完成，请重新读取保存结果。'
     if (macosClient && next.phase === 'authenticated') return next.run_ref ? '本次运行的公司会话已更新。' : '公司认证已完成，可以连接网络。'
     if (macosClient && next.phase === 'company_applied') return '公司 VPN 设置已应用到本次运行。'
+    if (macosClient && next.phase === 'personal_applied') return '个人代理设置已应用到本次运行。'
     if (macosClient && next.phase === 'ready_reported') return '已收到运行就绪报告，可在总览查看检查结果。'
     if (macosClient && next.phase === 'stopped_reported') return '已收到停止报告。管理员恢复仍待确认。'
     return '操作完成。'
   }
-  const accepted = (next: ServiceOperation) => { lastOperation.current = next.operation_id; setOperation(next); pending.current = next.completed ? null : next.operation_id; setBusy(!next.completed); if (next.error) setError(safeError(next.error)); else {setNotice(next.completed ? operationNotice(next) : windowsClient ? '后台服务已接受操作。' : next.kind === 'workspace' ? '配置操作进行中，请保持应用打开。' : next.kind === 'auth_begin' ? '请在本机 Terminal 完成公司认证。' : next.kind === 'channels_set' ? '正在应用本次运行的公司 VPN 设置。' : '网络操作进行中，请留意 macOS 授权提示。');if(next.completed&&next.kind==='workspace')void refreshDocumentMetadata()}; editedChannels.current = false; void refresh() }
+  const accepted = (next: ServiceOperation) => { lastOperation.current = next.operation_id; setOperation(next); pending.current = next.completed ? null : next.operation_id; setBusy(!next.completed); if (next.error) setError(safeError(next.error)); else {setNotice(next.completed ? operationNotice(next) : windowsClient ? '后台服务已接受操作。' : next.kind === 'workspace' ? '配置操作进行中，请保持应用打开。' : next.kind === 'auth_begin' ? '请在本机 Terminal 完成公司认证。' : next.kind === 'channels_set' ? '正在应用本次运行的通道设置。' : '网络操作进行中，请留意 macOS 授权提示。');if(next.completed&&next.kind==='workspace')void refreshDocumentMetadata()}; editedChannels.current = false; void refresh() }
   const command = async (request: WorkspaceCommand) => {
     if (!canControl) {setError(windowsClient ? '后台服务尚未确认可用。' : '请等待当前配置操作完成，或刷新工作空间。');return}
     setBusy(true); setError(null); setNotice(null)
@@ -226,9 +227,10 @@ export function ClientWorkspace({ page, api, refreshInventory, nodes, subscripti
       setBusy(false); setError(safeError(e))
     } finally { submitting.current = false }
   }
-  const runtimeCompany = () => {
+  const runtimeChannel = (channel: keyof DesiredChannels) => {
     const current = latest.current
-    if (current?.mac_company_control === true && current.run_ref && current.run_ref === snapshot?.run_ref) return current
+    const available = channel === 'company' ? current?.mac_company_control : current?.mac_personal_control
+    if (available === true && current?.run_ref && current.run_ref === snapshot?.run_ref) return current
     setError('当前运行待确认，请刷新后重试。')
     return null
   }
@@ -256,14 +258,14 @@ export function ClientWorkspace({ page, api, refreshInventory, nodes, subscripti
     {page === 'overview' && macosClient && <MacLifecycle snapshot={snapshot} configured={configured}
       busy={busy || workspaceActivity !== false} preemptible={macPreemptible} desired={desired} setDesired={setDesired}
       start={start => { void submit({ kind: 'takeover_start', start }) }}
-      setCompany={company => {
-        const current = runtimeCompany()
-        if (current && current.desired.company !== company) {
-          void submit({ kind: 'channels_set', channels: { company, personal: current.desired.personal } })
+      setChannel={(channel, enabled) => {
+        const current = runtimeChannel(channel)
+        if (current && current.desired[channel] !== enabled) {
+          void submit({ kind: 'channels_set', channels: { ...current.desired, [channel]: enabled } })
         }
       }}
       authenticate={runtime => {
-        if (!runtime || runtimeCompany()?.desired.company) void submit({ kind: 'auth_begin', begin_auth: {} }, runtime)
+        if (!runtime || runtimeChannel('company')?.desired.company) void submit({ kind: 'auth_begin', begin_auth: {} }, runtime)
       }}
       stop={() => { void submit({ kind: 'takeover_stop', stop: {} }) }} exit={() => { void api.exit() }} />}
     {page === 'overview' && windowsClient && <>

@@ -7,7 +7,7 @@ import { deflateSync } from 'node:zlib'
 import { Bridge } from './bridge'
 import { isRecord, validateRequest } from '../../protocol/validation'
 import { READ_METHODS, type Hello, type ReadMethod, type Profile } from '../../protocol/types'
-import { CLIENT_METHODS, canPreemptMacCompanyOperation, opaqueID, validateClientRequest, validateMacLifecycleMutation, type ServiceSnapshot, type ServiceOperation, type ClientMethod } from '../../protocol/client'
+import { CLIENT_METHODS, canPreemptMacRuntimeOperation, opaqueID, validateClientRequest, validateMacLifecycleMutation, type ServiceSnapshot, type ServiceOperation, type ClientMethod } from '../../protocol/client'
 import { QuitController, checkMacExitOperation, classifyMacExit, confirmedUninstalledWithoutOwnedState, macExitSnapshotMatches } from './quit-controller'
 import {installedRecoveryScript} from './recovery-entry'
 import { assertLocalWorkspaceIdle, assertProfileMayLeave, commitProfileSelection, desktopHello, windowsClientProfile } from './profile-selection'
@@ -85,7 +85,7 @@ async function attemptMacExit(): Promise<boolean> {
       const operation = snapshot.operation_id
         ? await current.request('service.operation', { operation_id: snapshot.operation_id }) as ServiceOperation
         : null
-      if (!canPreemptMacCompanyOperation(snapshot, operation)) {
+      if (!canPreemptMacRuntimeOperation(snapshot, operation)) {
         await assertLocalWorkspaceIdle(current)
         snapshot = await current.request('service.snapshot') as ServiceSnapshot
       }

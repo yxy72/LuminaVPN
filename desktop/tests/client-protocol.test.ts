@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
-import { CLIENT_METHODS, LOCAL_WORKSPACE_METHODS, canPreemptMacCompanyOperation, validateMacLifecycleMutation, validateWorkspaceActivity, validateClientRequest, validateClientResult } from '../protocol/client'
+import { CLIENT_METHODS, LOCAL_WORKSPACE_METHODS, canPreemptMacRuntimeOperation, validateMacLifecycleMutation, validateWorkspaceActivity, validateClientRequest, validateClientResult } from '../protocol/client'
 import { validateRequest, validateResult } from '../protocol/validation'
 import { READ_METHODS } from '../protocol/types'
 
@@ -53,7 +53,7 @@ describe('Windows client closed boundary', () => {
     expect(validateMacLifecycleMutation({ ...envelope, kind: 'channels_set', run_ref: 'run', channels })).toBe(true)
     expect(validateMacLifecycleMutation({ ...envelope, kind: 'auth_respond', auth: { challenge_id: 'c', sequence: 1 } })).toBe(false)
   })
-  it('scopes macOS company control and stop preemption to the live operation', () => {
+  it('scopes macOS channel control and stop preemption to the live operation', () => {
     const channel = { desired: true, state: 'unknown', route: 'unknown' }
     const snapshot = {
       protocol_version: 1 as const, service_state: 'local', takeover_state: 'applying_company', profile_id: envelope.profile_id,
@@ -65,14 +65,22 @@ describe('Windows client closed boundary', () => {
     expect(validateClientResult('service.snapshot', { ...snapshot, service_state: 'available', mac_company_control: true })).toBe(false)
     expect(validateClientResult('service.snapshot', { ...snapshot, run_ref: undefined, mac_company_control: true })).toBe(false)
     const active = { ...operation, kind: 'channels_set' as const, phase: 'applying_company', completed: false, run_ref: 'run' }
-    expect(canPreemptMacCompanyOperation(snapshot, active)).toBe(true)
-    expect(canPreemptMacCompanyOperation({ ...snapshot, takeover_state: 'ready_reported' }, active)).toBe(false)
-    expect(canPreemptMacCompanyOperation(snapshot, { ...active, run_ref: 'other-run' })).toBe(false)
-    expect(canPreemptMacCompanyOperation(snapshot, { ...active, completed: true })).toBe(false)
+    expect(canPreemptMacRuntimeOperation(snapshot, active)).toBe(true)
+    expect(canPreemptMacRuntimeOperation({ ...snapshot, takeover_state: 'ready_reported' }, active)).toBe(false)
+    expect(canPreemptMacRuntimeOperation(snapshot, { ...active, run_ref: 'other-run' })).toBe(false)
+    expect(canPreemptMacRuntimeOperation(snapshot, { ...active, completed: true })).toBe(false)
     const runtimeAuth = { ...active, kind: 'auth_begin' as const, phase: 'authenticating' }
     const authenticating = { ...snapshot, takeover_state: 'authenticating' }
-    expect(canPreemptMacCompanyOperation(authenticating, runtimeAuth)).toBe(true)
-    expect(canPreemptMacCompanyOperation(authenticating, { ...runtimeAuth, run_ref: undefined })).toBe(false)
+    expect(canPreemptMacRuntimeOperation(authenticating, runtimeAuth)).toBe(true)
+    expect(canPreemptMacRuntimeOperation(authenticating, { ...runtimeAuth, run_ref: undefined })).toBe(false)
+    const personal = { ...snapshot, takeover_state: 'applying_personal' }
+    expect(validateClientResult('service.snapshot', { ...personal, mac_company_control: false, mac_personal_control: false })).toBe(true)
+    expect(validateClientResult('service.snapshot', { ...snapshot, mac_company_control: true, mac_personal_control: true })).toBe(true)
+    expect(validateClientResult('service.snapshot', { ...snapshot, mac_personal_control: 1 })).toBe(false)
+    expect(validateClientResult('service.snapshot', { ...snapshot, run_ref: undefined, mac_personal_control: true })).toBe(false)
+    expect(validateClientResult('service.snapshot', { ...snapshot, service_state: 'available', mac_personal_control: true })).toBe(false)
+    expect(canPreemptMacRuntimeOperation(personal, { ...active, phase: 'applying_personal' })).toBe(true)
+    expect(canPreemptMacRuntimeOperation(personal, { ...active, phase: 'applying_company' })).toBe(false)
   })
   it('uses exactly one initialization source and source revision preconditions', () => {
     const base={profile_id:'profile',action:'initialize',request_id:'request'}

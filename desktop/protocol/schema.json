@@ -1718,6 +1718,9 @@
         "mac_company_control": {
           "type": "boolean"
         },
+        "mac_personal_control": {
+          "type": "boolean"
+        },
         "operation_id": {
           "type": "string",
           "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
