@@ -17,6 +17,8 @@ import (
 type clientMock struct {
 	profile     string
 	calls       int
+	reads       int
+	polls       int
 	last        p.Mutation
 	response    p.Operation
 	snapshot    *p.Snapshot
@@ -33,6 +35,14 @@ func scopedWorkspaceJSON(d *Desktop, raw string) json.RawMessage {
 }
 
 func (m *clientMock) Snapshot(context.Context, string) (p.Snapshot, error) {
+	m.polls++
+	return m.snapshotResult()
+}
+func (m *clientMock) ReadSnapshot(context.Context, string) (p.Snapshot, error) {
+	m.reads++
+	return m.snapshotResult()
+}
+func (m *clientMock) snapshotResult() (p.Snapshot, error) {
 	if m.snapshot != nil {
 		return *m.snapshot, m.failure
 	}
@@ -147,7 +157,8 @@ func TestServiceDiagnosticsIsBoundToTheSelectedRunAndOmitsPrivateFields(t *testi
 		Challenge: &p.Challenge{ID: "private-challenge"},
 		Settings:  &p.SettingsPayload{OfficeOverrides: []p.Override{{Value: "private-domain.test"}}},
 	}
-	d.Control = &clientMock{snapshot: &view}
+	service := &clientMock{snapshot: &view}
+	d.Control = service
 	read := func() (any, error) {
 		if runtime.GOOS == "windows" {
 			return d.ClientRequest(t.Context(), "workspace.read", scopedWorkspaceJSON(d, `{"action":"diagnostics"}`))
@@ -177,6 +188,9 @@ func TestServiceDiagnosticsIsBoundToTheSelectedRunAndOmitsPrivateFields(t *testi
 	view.ProfileID = "other"
 	if _, err = read(); err == nil {
 		t.Fatal("foreign service run was exported")
+	}
+	if service.reads != 2 || service.polls != 0 || service.calls != 0 {
+		t.Fatal("diagnostics used the enrollment-capable client path")
 	}
 }
 

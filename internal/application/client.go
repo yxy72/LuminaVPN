@@ -140,7 +140,7 @@ func (d *Desktop) ClientRequest(ctx context.Context, method string, raw json.Raw
 		if d.MacClientEnabled() {
 			return d.localWorkspace.networkSnapshot(ctx)
 		}
-		return d.clientSnapshot(ctx)
+		return d.clientSnapshot(ctx, d.Control.Snapshot)
 	case "service.operation":
 		var p struct {
 			ID string `json:"operation_id"`
@@ -197,9 +197,9 @@ func (d *Desktop) ClientRequest(ctx context.Context, method string, raw json.Raw
 	return nil, unavailable("METHOD_NOT_FOUND", "Client method is unavailable.")
 }
 
-func (d *Desktop) clientSnapshot(ctx context.Context) (serviceprotocol.Snapshot, error) {
+func (d *Desktop) clientSnapshot(ctx context.Context, read func(context.Context, string) (serviceprotocol.Snapshot, error)) (serviceprotocol.Snapshot, error) {
 	profile := d.ClientProfileID()
-	snapshot, err := d.Control.Snapshot(ctx, profile)
+	snapshot, err := read(ctx, profile)
 	if err != nil {
 		return serviceprotocol.Snapshot{}, clientFailure(err)
 	}
@@ -216,7 +216,7 @@ type diagnosticChannel struct {
 }
 
 func (d *Desktop) serviceDiagnostics(ctx context.Context) (any, error) {
-	snapshot, err := d.clientSnapshot(ctx)
+	snapshot, err := d.clientSnapshot(ctx, d.Control.ReadSnapshot)
 	if err != nil {
 		return nil, err
 	}

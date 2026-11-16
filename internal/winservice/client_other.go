@@ -13,6 +13,9 @@ func NewClient() p.Client { return unavailableClient{} }
 func (unavailableClient) Snapshot(context.Context, string) (p.Snapshot, error) {
 	return p.Snapshot{ProtocolVersion: p.Version, ServiceState: "unavailable", TakeoverState: "unknown", RecoveryRequired: true}, safeError("WINDOWS_SERVICE_REQUIRED")
 }
+func (c unavailableClient) ReadSnapshot(ctx context.Context, profile string) (p.Snapshot, error) {
+	return c.Snapshot(ctx, profile)
+}
 func (unavailableClient) Submit(context.Context, p.Mutation) (p.Operation, error) {
 	return p.Operation{}, safeError("WINDOWS_SERVICE_REQUIRED")
 }

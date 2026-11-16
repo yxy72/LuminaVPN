@@ -437,6 +437,17 @@ func (c *pipeClient) Snapshot(ctx context.Context, profile string) (p.Snapshot, 
 				err = attachErr
 			}
 		}
+	}
+	return readSnapshotResponse(profile, response, err)
+}
+
+func (c *pipeClient) ReadSnapshot(ctx context.Context, profile string) (p.Snapshot, error) {
+	response, err := c.call(ctx, p.Request{Version: p.Version, Method: "snapshot", ProfileID: profile})
+	return readSnapshotResponse(profile, response, err)
+}
+
+func readSnapshotResponse(profile string, response p.Response, err error) (p.Snapshot, error) {
+	if err != nil {
 		if local, proven := localAbsentSnapshot(profile); proven {
 			return local, nil
 		}

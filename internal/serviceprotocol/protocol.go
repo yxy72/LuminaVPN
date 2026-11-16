@@ -378,6 +378,8 @@ type Snapshot struct {
 
 type Client interface {
 	Snapshot(context.Context, string) (Snapshot, error)
+	// ReadSnapshot never submits an enrollment or recovery operation.
+	ReadSnapshot(context.Context, string) (Snapshot, error)
 	Submit(context.Context, Mutation) (Operation, error)
 	Operation(context.Context, string) (Operation, error)
 }
