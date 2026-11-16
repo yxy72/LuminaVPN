@@ -150,15 +150,7 @@ func (store darwinOwnershipStore) seal(owner darwinRunOwner) error {
 	if err != nil || current != owner {
 		return errors.New("global administrator run changed during recovery")
 	}
-	dir := filepath.Join(store.root, filepath.Base(owner.Run))
-	if err = checkDarwinAdminObject(dir, store.uid, true); err != nil {
-		return err
-	}
-	proof := darwinRecoveryProof{Version: 1, Owner: owner, RestoredAt: time.Now().UTC()}
-	if err = securefile.Write(filepath.Join(dir, darwinRecoveryFile), proof); err != nil {
-		return err
-	}
-	if err = syncDarwinDirectory(dir); err != nil {
+	if err = store.writeProof(owner); err != nil {
 		return err
 	}
 	// Keep the receipt when removing the owner. If the deletion does not survive
@@ -167,6 +159,18 @@ func (store darwinOwnershipStore) seal(owner darwinRunOwner) error {
 		return err
 	}
 	return syncDarwinDirectory(store.root)
+}
+
+func (store darwinOwnershipStore) writeProof(owner darwinRunOwner) error {
+	dir := filepath.Join(store.root, filepath.Base(owner.Run))
+	if err := checkDarwinAdminObject(dir, store.uid, true); err != nil {
+		return err
+	}
+	proof := darwinRecoveryProof{Version: 1, Owner: owner, RestoredAt: time.Now().UTC()}
+	if err := securefile.Write(filepath.Join(dir, darwinRecoveryFile), proof); err != nil {
+		return err
+	}
+	return syncDarwinDirectory(dir)
 }
 
 func darwinOwnerFor(run string, state State) (darwinRunOwner, error) {
@@ -363,18 +367,47 @@ func verifyDarwinRecovery(run string) error {
 	if err != nil {
 		return err
 	}
-	proof, err := store.proof(run)
-	if err != nil || proof.Owner != owner {
-		return errors.New("administrator restoration proof is unavailable for this run")
-	}
-	active, err := store.active()
-	if err == nil && filepath.Base(active.Run) == filepath.Base(run) {
+	active, activeErr := store.active()
+	if activeErr == nil && filepath.Base(active.Run) == filepath.Base(run) {
 		return errors.New("administrator run is still fenced for recovery")
 	}
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
+	if activeErr != nil && !errors.Is(activeErr, os.ErrNotExist) {
+		return activeErr
+	}
+	proof, err := store.proof(run)
+	if err == nil && proof.Owner == owner {
+		return nil
+	}
+	if !errors.Is(err, os.ErrNotExist) || !errors.Is(activeErr, os.ErrNotExist) {
+		return errors.New("administrator restoration proof is unavailable for this run")
+	}
+	return store.attestLegacyStop(state, owner, verifyDarwinRestoredResources)
+}
+
+// A completed legacy run did not write a receipt. Prove restoration from its
+// protected journal and fresh native observations while excluding startups.
+func (store darwinOwnershipStore) attestLegacyStop(state State, owner darwinRunOwner, verify func(State) error) error {
+	command := strings.Join([]string{owner.Runner.Executable, "_serve", "--run", owner.Run}, " ")
+	if state.Phase != "stopped" || owner.Runner.Command != command {
+		return errors.New("legacy restoration does not identify the original run")
+	}
+	// The caller holds ownership.lock. Try once so a coordinator that holds
+	// active.lock while waiting for ownership.lock cannot deadlock with us.
+	unlock, err := securefile.Lock(filepath.Join(store.root, "active.lock"), 0)
+	if err != nil {
+		return errors.New("a native coordinator is still active")
+	}
+	defer unlock()
+	if _, err := store.active(); !errors.Is(err, os.ErrNotExist) {
+		return errors.New("another native run still owns networking")
+	}
+	if err := store.requireLegacyIdle(); err != nil {
 		return err
 	}
-	return nil
+	if err := verify(state); err != nil {
+		return err
+	}
+	return store.writeProof(owner)
 }
 
 func darwinProcessGone(pid int, birth string) error {

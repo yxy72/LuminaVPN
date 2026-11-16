@@ -16,7 +16,7 @@ Windows 客户端默认配置位于系统原生 ProgramData 下的 `LuminaVPN-Us
 
 Windows 后台只管理已登记的配置目录，首版安装登记当前用户的默认目录。选择未登记目录会保留原偏好和连接；旧偏好指向未登记目录时，可显式恢复默认目录，接回服务确认的运行。切换其它已登记目录前须停止并确认恢复。诊断页可显示应用之外的独立恢复入口。
 
-Mac 桌面支持初始化配置、导入节点、同步订阅、编辑和回退策略，连接和认证仍使用 CLI。保存的策略在下次启动时生效。首次启动界面时保留现有配置，只有明确初始化才创建配置。Windows 离线构建提供只读桌面能力。
+Mac 桌面支持初始化配置、导入节点、同步订阅、编辑和回退策略。连接页可启动日用或限时运行，当前启动同时开启公司和个人通道。公司会话需要更新时在本机终端完成认证，启动网络接管时由 macOS 请求管理员授权。保存的策略在下次启动时生效。首次启动界面时保留现有配置，只有明确初始化才创建配置。Windows 离线构建提供只读桌面能力。
 
 开发需要 Node.js 22.12+ 与 Go 1.26+；运行打包应用不需要安装开发工具。在 `desktop/` 执行：
 
@@ -30,7 +30,7 @@ Go 不在 PATH 时，通过 `NETLAUNCH_GO` 指定构建工具。构建只读取�
 
 `npm run test:electron` 使用虚构配置检查桌面行为，并在本机实包存在时验证打包资源和窗口崩溃恢复。Windows 默认检查 `win-unpacked/LuminaVPN.exe`；验证已安装程序时，可将 `LUMINA_TEST_WINDOWS_EXE` 设为该程序的绝对路径。测试仅为新建的配置对象设置私有权限。
 
-Mac `.app` 输出到已忽略的 `.local/desktop-packages/mac-arm64/`。使用 `scripts/check-desktop-package.py APP_PATH` 检查 ASAR 内容、运行组件摘要和恢复资源。`npm run sign:preview:mac` 验证运行组件签名并对 Electron 包做本地 ad hoc 签名；不会改变已校验的 runtime 字节，也不提供正式发布签名、公证或系统信任保证。当前关闭窗口隐藏到菜单栏；退出界面保留由 CLI 建立的网络运行。
+Mac `.app` 输出到已忽略的 `.local/desktop-packages/mac-arm64/`。使用 `scripts/check-desktop-package.py APP_PATH` 检查 ASAR 内容、运行组件摘要和恢复资源。`npm run sign:preview:mac` 验证运行组件签名并对 Electron 包做本地 ad hoc 签名；正式分发需要另行签名和公证。关闭窗口隐藏到菜单栏。停止操作会通知本机看门狗并显示保存的状态。明确退出时，如果选中的配置仍需恢复确认，界面会等待本次运行的管理员恢复回执。
 
 ## 网络规则
 

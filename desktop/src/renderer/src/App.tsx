@@ -522,6 +522,7 @@ function Overview({
   go,
   loading,
   refresh,
+  macosClient,
 }: {
   data: Data;
   now: number;
@@ -529,6 +530,7 @@ function Overview({
   go: (page: Page) => void;
   loading: boolean;
   refresh: () => void;
+  macosClient: boolean;
 }) {
   const channels = currentChannels(data.state, now);
   const verified = Object.values(channels).filter(
@@ -578,9 +580,9 @@ function Overview({
               <i className={`dot ${allReady ? "" : "dim"}`} />
               {data.state?.run_ref
                 ? `${verified} / 3 通道具有新鲜成功证据`
-                : "读取本机状态，尚未开放桌面连接"}
+                : macosClient ? "尚无保存的运行报告" : "读取本机状态，当前可查看快照"}
             </div>
-            <div className="connection-actions">
+            {!macosClient && <div className="connection-actions">
               <button
                 className="btn primary"
                 disabled
@@ -589,7 +591,7 @@ function Overview({
                 <Power size={13} />
                 连接网络
               </button>
-            </div>
+            </div>}
           </div>
         </div>
         <div className="hero-meta">
@@ -615,7 +617,7 @@ function Overview({
           </div>
           <div className="meta-row">
             <span>桌面版本</span>
-            <strong>只读工程预览</strong>
+            <strong>{macosClient ? "macOS 客户端" : data.hello?.capabilities.config_write ? "本机配置工作空间" : "只读工程预览"}</strong>
           </div>
         </div>
       </section>
@@ -704,7 +706,7 @@ function Overview({
                 <div className="line-sub">
                   {data.profile?.transaction_pending
                     ? "存在未完成的配置事务"
-                    : "界面仅查询现有配置"}
+                    : data.hello?.capabilities.config_write ? "配置可在工作空间设置中管理" : "已读取本机配置"}
                 </div>
               </div>
               <Badge>{data.profile?.policy_valid ? "已校验" : "待配置"}</Badge>
@@ -1458,6 +1460,7 @@ export default function App() {
   const app = useData();
   const workspaceMode = app.data.hello?.capabilities.config_write === true && !!window.lumina?.client;
   const windowsClient = workspaceMode && app.data.hello?.capabilities.windows_client === true;
+  const macosClient = workspaceMode && app.data.hello?.capabilities.macos_client === true;
   const [page, setPage] = useState<Page>("overview");
   const [now, setNow] = useState(Date.now());
   const [environment, setEnvironment] = useState<Environment | null>(null);
@@ -1579,7 +1582,7 @@ export default function App() {
             <Settings2 size={15} strokeWidth={1.4} />
             工作空间设置
           </button>
-          <Badge>{windowsClient ? "Windows 客户端" : workspaceMode ? "本机配置工作空间" : "只读工程预览"}</Badge>
+          <Badge>{windowsClient ? "Windows 客户端" : macosClient ? "macOS 客户端" : workspaceMode ? "本机配置工作空间" : "只读工程预览"}</Badge>
           <div className="build">
             <i className={`dot ${app.control === "available" ? "" : "dim"}`} />
             {app.data.hello?.build.version ?? "LuminaVPN Desktop"}
@@ -1633,7 +1636,7 @@ export default function App() {
               )}
             </div>
           )}
-          {workspaceMode && window.lumina.client && app.data.profile?.profile_id && <ClientWorkspace key={app.data.profile.profile_id} profileID={app.data.profile.profile_id} page={page} windowsClient={windowsClient} validationOnly={app.data.hello?.capabilities.validation_only===true} api={window.lumina.client} refreshInventory={refresh} nodes={app.data.nodes} subscriptions={app.data.subscriptions} config={app.data.config} loadNodes={app.loadNodes} loadRules={app.loadRules} chooseProfile={()=>chooseProfile()} restoreDefaultProfile={()=>chooseProfile(true)} checking={checking} environmentCheck={environment} checkEnvironment={() => { void checkEnvironment() }} showRecovery={() => { void showRecovery() }} />}
+          {workspaceMode && window.lumina.client && app.data.profile?.profile_id && <ClientWorkspace key={app.data.profile.profile_id} profileID={app.data.profile.profile_id} page={page} windowsClient={windowsClient} macosClient={macosClient} configured={app.data.profile.configured && app.data.profile.policy_valid} validationOnly={app.data.hello?.capabilities.validation_only===true} api={window.lumina.client} refreshInventory={refresh} nodes={app.data.nodes} subscriptions={app.data.subscriptions} config={app.data.config} loadNodes={app.loadNodes} loadRules={app.loadRules} chooseProfile={()=>chooseProfile()} restoreDefaultProfile={()=>chooseProfile(true)} checking={checking} environmentCheck={environment} checkEnvironment={() => { void checkEnvironment() }} showRecovery={() => { void showRecovery() }} />}
           {!windowsClient && page === "overview" && (
             <Overview
               data={app.data}
@@ -1642,6 +1645,7 @@ export default function App() {
               go={go}
               loading={app.loading}
               refresh={refresh}
+              macosClient={macosClient}
             />
           )}
           {!workspaceMode && page === "nodes" && (

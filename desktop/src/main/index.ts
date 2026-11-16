@@ -7,8 +7,8 @@ import { deflateSync } from 'node:zlib'
 import { Bridge } from './bridge'
 import { isRecord, validateRequest } from '../../protocol/validation'
 import { READ_METHODS, type Hello, type ReadMethod, type Profile } from '../../protocol/types'
-import { CLIENT_METHODS, opaqueID, validateClientRequest, type ServiceSnapshot, type ServiceOperation, type ClientMethod } from '../../protocol/client'
-import { QuitController, confirmedUninstalledWithoutOwnedState } from './quit-controller'
+import { CLIENT_METHODS, opaqueID, validateClientRequest, validateMacLifecycleMutation, type ServiceSnapshot, type ServiceOperation, type ClientMethod } from '../../protocol/client'
+import { QuitController, checkMacExitOperation, classifyMacExit, confirmedUninstalledWithoutOwnedState, macExitSnapshotMatches } from './quit-controller'
 import {installedRecoveryScript} from './recovery-entry'
 import { assertLocalWorkspaceIdle, assertProfileMayLeave, commitProfileSelection, desktopHello, windowsClientProfile } from './profile-selection'
 
@@ -48,27 +48,67 @@ async function normalExit(): Promise<boolean> {
   try { return await attemptNormalExit() } finally { exitInProgress = false }
 }
 function showWorkspaceExitError(code: 'WORKSPACE_BUSY' | 'WORKSPACE_STATUS_UNAVAILABLE'): void {
-  const message = code === 'WORKSPACE_BUSY' ? '当前配置操作还在进行，请等待完成后退出。' : '无法确认配置操作已完成。请刷新工作空间后重试。'
+  const message = code === 'WORKSPACE_BUSY' ? '当前操作还在进行，请等待完成后退出。' : '无法确认配置操作已完成。请刷新工作空间后重试。'
   showWindow()
   window?.webContents.send('lumina:exit-error', 'EXIT_' + code)
   void dialog.showMessageBox({ type: 'warning', title: '工作空间尚未就绪', message, buttons: ['知道了'] })
 }
 
-async function attemptNormalExit(): Promise<boolean> {
-  if (process.platform !== 'win32') {
-    try {
-      if (process.platform === 'darwin' && bridge) {
-        const current = bridge
-        const hello = await desktopHello(current, app.getVersion())
-        if (hello.capabilities.config_write) await assertLocalWorkspaceIdle(current)
-      }
-      finishQuit()
-      return true
-    } catch (error) {
-      showWorkspaceExitError(error instanceof Error && error.message === 'WORKSPACE_BUSY' ? 'WORKSPACE_BUSY' : 'WORKSPACE_STATUS_UNAVAILABLE')
-      return false
-    }
+function showRecoveryExitError(code: string): void {
+  showWindow()
+  window?.webContents.send('lumina:exit-error', code)
+  void dialog.showMessageBox({
+    type: 'error', title: '恢复尚未确认', message: 'LuminaVPN 保持打开。',
+    detail: '请在诊断与恢复页面检查当前运行。macOS 的恢复可能需要管理员授权。', buttons: ['知道了'],
+  })
+}
+
+async function attemptMacExit(): Promise<boolean> {
+  const current = bridge
+  if (!current) { finishQuit(); return true }
+  let owner = false
+  try {
+    const hello = await desktopHello(current, app.getVersion())
+    owner = hello.capabilities.macos_client === true
+    if (hello.capabilities.config_write) await assertLocalWorkspaceIdle(current)
+    if (!owner) { finishQuit(); return true }
+
+    const snapshot = await current.request('service.snapshot') as ServiceSnapshot
+    const disposition = classifyMacExit(snapshot)
+    if (disposition === 'no_current_run' || disposition === 'restored') { finishQuit(); return true }
+    if (disposition !== 'needs_restore' || !snapshot.run_ref) throw new Error('EXIT_RESTORE_UNCONFIRMED')
+
+    const binding = { request: randomUUID(), profile: snapshot.profile_id, run: snapshot.run_ref }
+    const controller = new QuitController({
+      request: async () => {
+        const reply = await current.request('service.submit', {
+          kind: 'exit_restore', request_id: binding.request, profile_id: binding.profile,
+          run_ref: binding.run, expected_revision: snapshot.revision, stop: {},
+        }) as ServiceOperation
+        return checkMacExitOperation(reply, binding)
+      },
+      inspect: async id => {
+        const operation = await current.request('service.operation', { operation_id: id }) as ServiceOperation
+        const checked = checkMacExitOperation(operation, binding, id)
+        if (checked.completed && checked.restored && !checked.error_code) {
+          const latest = await current.request('service.snapshot') as ServiceSnapshot
+          if (!macExitSnapshotMatches(latest, binding)) throw new Error('EXIT_OPERATION_MISMATCH')
+        }
+        return checked
+      },
+    }, finishQuit, showRecoveryExitError, Date.now, undefined, 245000)
+    return controller.requestExit()
+  } catch (error) {
+    if (error instanceof Error && error.message === 'WORKSPACE_BUSY') showWorkspaceExitError('WORKSPACE_BUSY')
+    else if (owner) showRecoveryExitError('EXIT_RESTORE_UNAVAILABLE')
+    else showWorkspaceExitError('WORKSPACE_STATUS_UNAVAILABLE')
+    return false
   }
+}
+
+async function attemptNormalExit(): Promise<boolean> {
+  if (process.platform === 'darwin') return attemptMacExit()
+  if (process.platform !== 'win32') { finishQuit(); return true }
   try {
     const hello = await client().request('session.hello', { protocol_major: 1, app_version: app.getVersion() }) as Hello
     if (process.platform !== 'win32' || hello.capabilities.windows_client !== true) { finishQuit(); return true }
@@ -170,6 +210,7 @@ async function assertClientMethod(target: Bridge, method: ClientMethod, params: 
   const capabilities = hello.capabilities
   if (bridge !== target) throw new Error('PROFILE_CHANGED')
   if (capabilities.config_write !== true || !capabilities.methods.includes(method)) throw new Error('CLIENT_UNAVAILABLE')
+  if (method === 'service.submit' && capabilities.macos_client && !validateMacLifecycleMutation(params)) throw new Error('CLIENT_UNAVAILABLE')
   if (method === 'workspace.read' && (
     params.action === 'activity' && capabilities.windows_client === true ||
     params.action === 'recovery_entry' && capabilities.windows_client !== true
@@ -301,7 +342,7 @@ function createTray(): void {
       { label: '打开 LuminaVPN', click: showWindow },
       { label: '显示独立恢复入口', click: () => { void showRecoveryFromTray() } },
       { type: 'separator' },
-      { label: process.platform === 'win32' ? '停止并恢复后退出' : '退出界面（保留现有网络）', click: () => { void normalExit() } }
+      { label: process.platform === 'win32' ? '停止并恢复后退出' : '退出 LuminaVPN', click: () => { void normalExit() } }
     ]))
     tray.on('click', showWindow)
   } catch { tray = null }
@@ -355,7 +396,7 @@ else {
     } catch {}
     registerIPC(); createTray(); createWindow()
     Menu.setApplicationMenu(Menu.buildFromTemplate([
-      ...(process.platform === 'darwin' ? [{ label: 'LuminaVPN', submenu: [{ role: 'about' as const }, { type: 'separator' as const }, { label: '退出界面（保留现有网络）', click: () => { void normalExit() } }] }] : []),
+      ...(process.platform === 'darwin' ? [{ label: 'LuminaVPN', submenu: [{ role: 'about' as const }, { type: 'separator' as const }, { label: '退出 LuminaVPN', accelerator: 'Command+Q', click: () => { void normalExit() } }] }] : []),
       { role: 'editMenu' }, { role: 'viewMenu' }, { role: 'windowMenu' }
     ]))
     app.on('activate', showWindow)

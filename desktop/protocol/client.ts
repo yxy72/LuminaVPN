@@ -63,8 +63,18 @@ export function validateMutation(value: unknown): value is ServiceMutation {
     default: return false
   }
 }
+// The Darwin backend currently starts both tunnels and performs authorization
+// natively. The renderer cannot send credentials or change channels in flight.
+export function validateMacLifecycleMutation(value: unknown): boolean {
+  if (!validateMutation(value)) return false
+  switch (value.kind) {
+    case 'takeover_start': return value.start.channels.company && value.start.channels.personal
+    case 'takeover_stop': case 'exit_restore': return opaqueID(value.run_ref)
+    default: return false
+  }
+}
 export function validateWorkspaceRead(x: unknown): x is WorkspaceRead {
-  if (!isRecord(x)||!opaqueID(x.profile_id)) return false
+  if (!isRecord(x)||!opaqueID(x.profile_id)||typeof x.action !== 'string') return false
   if (['activity','document','history','diagnostics','cleanup_preview','runtime','version','recovery_entry'].includes(String(x.action))) return own(x,['action','profile_id'])
   if (x.action === 'validate' || x.action === 'diff') return own(x,['action','policy_json','profile_id']) && text(x.policy_json)
   return x.action === 'explain' && own(x,['action','target','profile_id']) && text(x.target,253) && !!x.target && !/[\s\x00-\x1f]/.test(x.target)

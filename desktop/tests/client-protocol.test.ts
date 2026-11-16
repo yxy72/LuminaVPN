@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
-import { CLIENT_METHODS, LOCAL_WORKSPACE_METHODS, validateWorkspaceActivity, validateClientRequest, validateClientResult } from '../protocol/client'
+import { CLIENT_METHODS, LOCAL_WORKSPACE_METHODS, validateMacLifecycleMutation, validateWorkspaceActivity, validateClientRequest, validateClientResult } from '../protocol/client'
 import { validateRequest, validateResult } from '../protocol/validation'
 import { READ_METHODS } from '../protocol/types'
 
@@ -29,6 +29,19 @@ describe('Windows client closed boundary', () => {
     {...envelope,profile_id:'C:\\private-canary',kind:'exit_restore',stop:{}}
   ])('rejects paths, arbitrary execution, extra payloads and company overrides', value => {
     expect(validateClientRequest('service.submit',value)).toBe(false)
+  })
+  it('admits only the safe Darwin lifecycle operations', () => {
+    const channels = { company: true, personal: true }
+    const daily = { ...envelope, kind: 'takeover_start', start: { channels, mode: 'daily' } }
+    expect(validateMacLifecycleMutation(daily)).toBe(true)
+    expect(validateMacLifecycleMutation({ ...daily, start: { ...daily.start, channels: { company: true, personal: false } } })).toBe(false)
+    expect(validateMacLifecycleMutation({ ...daily, start: { channels, mode: 'validation', validation_seconds: 2700 } })).toBe(true)
+    expect(validateMacLifecycleMutation({ ...daily, start: { channels, mode: 'validation', validation_seconds: 2701 } })).toBe(false)
+    expect(validateMacLifecycleMutation({ ...envelope, kind: 'takeover_stop', run_ref: 'run', stop: {} })).toBe(true)
+    expect(validateMacLifecycleMutation({ ...envelope, kind: 'exit_restore', run_ref: 'run', stop: {} })).toBe(true)
+    expect(validateMacLifecycleMutation({ ...envelope, kind: 'takeover_stop', stop: {} })).toBe(false)
+    expect(validateMacLifecycleMutation({ ...envelope, kind: 'channels_set', channels })).toBe(false)
+    expect(validateMacLifecycleMutation({ ...envelope, kind: 'auth_respond', auth: { challenge_id: 'c', sequence: 1 } })).toBe(false)
   })
   it('uses exactly one initialization source and source revision preconditions', () => {
     const base={profile_id:'profile',action:'initialize',request_id:'request'}
@@ -75,5 +88,11 @@ describe('Windows client closed boundary', () => {
     expect(validateResult('session.hello', { ...mac, capabilities: { ...mac.capabilities, connection_start: true } })).toBe(false)
     expect(validateResult('session.hello', { ...mac, capabilities: { ...mac.capabilities, methods: [...READ_METHODS, ...CLIENT_METHODS] } })).toBe(false)
     expect(validateResult('session.hello', { ...mac, build: hello.build })).toBe(false)
+    const native = { ...mac, capabilities: { ...mac.capabilities, macos_client: true,
+      connection_start: true, connection_stop: true, methods: [...READ_METHODS, ...CLIENT_METHODS] } }
+    expect(validateResult('session.hello', native)).toBe(true)
+    expect(validateResult('session.hello', { ...native, capabilities: { ...native.capabilities, windows_client: true } })).toBe(false)
+    expect(validateResult('session.hello', { ...native, capabilities: { ...native.capabilities, native_lifecycle: false } })).toBe(false)
+    expect(validateResult('session.hello', { ...native, build: hello.build })).toBe(false)
   })
 })

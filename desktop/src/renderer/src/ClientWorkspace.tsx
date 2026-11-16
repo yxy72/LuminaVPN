@@ -5,6 +5,7 @@ import type { Nodes, Subscriptions, Environment, Config } from '../../../protoco
 import { isRecord } from '../../../protocol/validation-base'
 import { healthLabels, verifiedHealthState, type NodeHealthRound } from './node-health'
 import {ProfileScope,scopedProfileImport} from './profile-scope'
+import { MacLifecycle, macOperationText } from './MacLifecycle'
 import {initialServiceEvidence,receivedServiceEvidence,lostServiceEvidence,expireServiceEvidence} from './service-evidence'
 
 type Page = 'overview' | 'nodes' | 'rules' | 'diagnostics' | 'settings'
@@ -13,7 +14,7 @@ const initialPolicy = (): PolicyDocument => ({ version: 1, company: { domains: [
 const pretty = (x: unknown) => JSON.stringify(x, null, 2)
 const listText = (x: unknown): string => Array.isArray(x) ? x.filter(x => typeof x === 'string').join('\n') : ''
 const lines = (x: string): string[] => x.split(/[\r\n,]+/).map(x => x.trim()).filter(Boolean)
-function safeError(error: unknown): string { const code = isRecord(error) && typeof error.code === 'string' && /^[A-Z_]{1,64}$/.test(error.code) ? error.code : 'CLIENT_OPERATION_FAILED'; return ({ SERVICE_UNAVAILABLE: '后台服务不可用。请检查安装状态；现有连接是否已恢复尚未确认。', PROFILE_NOT_ENROLLED:'此配置尚未登记到后台服务。配置标识不能代替系统登记，连接状态未确认。', PROFILE_UNAVAILABLE:'后台尚无此配置的可信登记。连接状态未确认。', REVISION_CONFLICT: '配置已被其他操作更新，请重新读取并检查差异。', AUTH_REQUIRED: '请完成新的认证挑战。', CLIENT_UNAVAILABLE: '当前平台未提供此操作。', PROFILE_BUSY: '已有配置操作或配置切换正在进行。', EXIT_WORKSPACE_BUSY: '当前配置操作还在进行，请等待完成后退出。', EXIT_WORKSPACE_STATUS_UNAVAILABLE: '无法确认配置操作已完成。请刷新工作空间后重试。', OPERATION_NOT_FOUND: '操作记录已失效，请重新读取已保存配置。' } as Record<string,string>)[code] ?? '操作未完成。请保留恢复入口，刷新状态后检查。' }
+function safeError(error: unknown): string { const code = isRecord(error) && typeof error.code === 'string' && /^[A-Z_]{1,64}$/.test(error.code) ? error.code : 'CLIENT_OPERATION_FAILED'; return ({ SERVICE_UNAVAILABLE: '后台服务不可用。请检查安装状态；现有连接是否已恢复尚未确认。', PROFILE_NOT_ENROLLED:'此配置尚未登记到后台服务。配置标识不能代替系统登记，连接状态未确认。', PROFILE_UNAVAILABLE:'后台尚无此配置的可信登记。连接状态未确认。', REVISION_CONFLICT: '配置已被其他操作更新，请重新读取并检查差异。', AUTH_REQUIRED: '请完成新的认证挑战。', CLIENT_UNAVAILABLE: '当前平台未提供此操作。', PROFILE_BUSY: '已有配置操作或配置切换正在进行。', EXIT_WORKSPACE_BUSY: '当前操作还在进行，请等待完成后退出。', EXIT_WORKSPACE_STATUS_UNAVAILABLE: '无法确认配置操作已完成。请刷新工作空间后重试。', OPERATION_NOT_FOUND: '操作记录已失效，请重新读取已保存配置。', MAC_START_FAILED: '连接未完成。请检查配置、公司会话和 macOS 授权。', MAC_OPERATION_INTERRUPTED: '网络操作已中断，请检查运行并按需使用恢复入口。', MAC_RECOVERY_UNCONFIRMED: '管理员恢复未确认。请检查诊断页后重试。', MAC_STOP_UNCONFIRMED: '停止报告尚未收到，请检查诊断页。', RECOVERY_REQUIRED: '上一运行需要先确认恢复。', RUN_UNCONFIRMED: '无法绑定当前运行，请刷新诊断页。', EXIT_RESTORE_UNAVAILABLE: '当前运行的管理员恢复未确认，窗口保持打开。', EXIT_RESTORE_FAILED: '恢复操作未完成，窗口保持打开。', EXIT_RESTORE_UNCONFIRMED: '管理员恢复未确认，窗口保持打开。', EXIT_OPERATION_MISMATCH: '当前运行与恢复操作不匹配，请刷新诊断。', EXIT_RESTORE_TIMEOUT: '等待管理员恢复超时，窗口保持打开。' } as Record<string,string>)[code] ?? '操作未完成。请保留恢复入口，刷新状态后检查。' }
 function healthState(channel?: ServiceChannel): keyof typeof healthLabels {
   if (!channel) return 'unknown'
   if (channel.state === 'off' || channel.state === 'config_empty') return channel.state
@@ -36,7 +37,7 @@ function ProbeEditor({rows,onChange}:{rows:Record<string,unknown>[];onChange:(ro
   const [url,setURL]=useState(''),[channel,setChannel]=useState('direct'),[purpose,setPurpose]=useState('path'),[statuses,setStatuses]=useState(''),[editing,setEditing]=useState<number|null>(null)
   return <section className="client-card"><h2>连接检查目标</h2><p>路径可达与服务响应分开判断。每个开启的通道需有对应检查目标。</p><label>HTTPS 检查地址<input type="url" value={url} onChange={e=>setURL(e.target.value)}/></label><div className="client-actions"><select aria-label="检查通道" value={channel} onChange={e=>setChannel(e.target.value)}><option value="direct">直连</option><option value="company">公司</option><option value="personal">个人</option></select><select aria-label="检查用途" value={purpose} onChange={e=>setPurpose(e.target.value)}><option value="path">路径可达</option><option value="service">服务状态</option></select>{purpose==='service'&&<input aria-label="接受的 HTTP 状态码" placeholder="状态码（逗号分隔，可留空）" value={statuses} onChange={e=>setStatuses(e.target.value)}/>}<button disabled={!url.trim()} onClick={()=>{const codes=lines(statuses).map(Number);const next={url:url.trim(),channel,purpose,...(purpose==='service'&&codes.length?{expected_status:codes}:{})};onChange(editing===null?[...rows,next]:rows.map((r,i)=>i===editing?next:r));setURL('');setStatuses('');setEditing(null)}}>{editing===null?'添加检查':'更新检查'}</button></div><ul>{rows.map((r,i)=><li key={i}>{String(r.channel)} · {String(r.purpose??'默认用途')} · {String(r.url)} <button onClick={()=>{setURL(String(r.url));setChannel(String(r.channel));setPurpose(String(r.purpose??(r.channel==='personal'?'service':'path')));setStatuses(Array.isArray(r.expected_status)?r.expected_status.join(','):'');setEditing(i)}}>编辑</button><button onClick={()=>{onChange(rows.filter((_,at)=>at!==i));setEditing(null)}}>删除</button></li>)}</ul></section>
 }
-export function ClientWorkspace({ page, api, refreshInventory, nodes, subscriptions, config, loadNodes, loadRules, chooseProfile, restoreDefaultProfile, checking, environmentCheck, checkEnvironment, showRecovery,validationOnly,profileID,windowsClient }: { profileID:string;validationOnly:boolean;windowsClient:boolean;page: Page; api: ClientAPI; refreshInventory: () => void; nodes:Nodes|null; subscriptions:Subscriptions|null;config:Config|null;loadNodes:(offset:number)=>void;loadRules:(offset:number)=>void;chooseProfile:()=>Promise<void>;restoreDefaultProfile:()=>Promise<void>;checking:boolean;environmentCheck:Environment|null;checkEnvironment:()=>void;showRecovery:()=>void }) {
+export function ClientWorkspace({ page, api, refreshInventory, nodes, subscriptions, config, loadNodes, loadRules, chooseProfile, restoreDefaultProfile, checking, environmentCheck, checkEnvironment, showRecovery,validationOnly,profileID,windowsClient,macosClient,configured }: { profileID:string;validationOnly:boolean;windowsClient:boolean;macosClient:boolean;configured:boolean;page: Page; api: ClientAPI; refreshInventory: () => void; nodes:Nodes|null; subscriptions:Subscriptions|null;config:Config|null;loadNodes:(offset:number)=>void;loadRules:(offset:number)=>void;chooseProfile:()=>Promise<void>;restoreDefaultProfile:()=>Promise<void>;checking:boolean;environmentCheck:Environment|null;checkEnvironment:()=>void;showRecovery:()=>void }) {
   const scope=useRef(new ProfileScope(profileID)).current
   const stale=()=>Object.assign(new Error('PROFILE_CHANGED'),{code:'PROFILE_CHANGED'})
   const scopedRead=async(request:WorkspaceReadBody)=>{const ticket=scope.capture();const value=await api.read({...request,profile_id:profileID});if(!scope.accepts(ticket,value.profile_id))throw stale();return value}
@@ -44,6 +45,7 @@ export function ClientWorkspace({ page, api, refreshInventory, nodes, subscripti
   const scopedOperation=async(id:string)=>{const ticket=scope.capture();const value=await api.operation(id);if(!scope.accepts(ticket,value.profile_id))throw stale();return value}
   const scopedCommand=async(request:WorkspaceWrite)=>{const ticket=scope.capture();const value=await api.command({...request,profile_id:profileID});if(!scope.accepts(ticket,value.profile_id))throw stale();return value}
   const scopedSubmit=async(request:ServiceMutation)=>{const ticket=scope.capture();const value=await api.submit(request);if(!scope.accepts(ticket,value.profile_id))throw stale();return value}
+  const connectionControl = windowsClient || macosClient
   const [evidence,setEvidence]=useState(initialServiceEvidence)
   const snapshot=evidence.snapshot
   const [desired, setDesired] = useState<DesiredChannels>({ company: false, personal: false })
@@ -81,12 +83,19 @@ export function ClientWorkspace({ page, api, refreshInventory, nodes, subscripti
     reading.current = true
     try {
       let localActive = false
-      if (windowsClient) {
+      if (!windowsClient) {
+        const activity = await scopedRead({ action: 'activity' })
+        if (!validateWorkspaceActivity(activity)) throw new Error('INVALID_PROTOCOL')
+        if (!mounted.current) return
+        localActive = activity.active
+        setWorkspaceActivity(activity.active)
+      }
+      if (connectionControl) {
         const current = await scopedSnapshot()
         if (!mounted.current) return
-        latest.current = current.service_state === 'available' ? current : null
+        latest.current = current.service_state === (windowsClient ? 'available' : 'local') ? current : null
         setEvidence(previous => receivedServiceEvidence(previous, current, Date.now()))
-        if (!loadedSettings.current && current.settings) {
+        if (windowsClient && !loadedSettings.current && current.settings) {
           loadedSettings.current = true
           setEnvironment(current.settings.environment)
           setOfficeRules(pretty(current.settings.office_overrides))
@@ -96,13 +105,7 @@ export function ClientWorkspace({ page, api, refreshInventory, nodes, subscripti
           pending.current = current.operation_id
           lastOperation.current = current.operation_id
         }
-        if (!editedChannels.current) setDesired(current.desired)
-      } else {
-        const activity = await scopedRead({ action: 'activity' })
-        if (!validateWorkspaceActivity(activity)) throw new Error('INVALID_PROTOCOL')
-        if (!mounted.current) return
-        localActive = activity.active
-        setWorkspaceActivity(activity.active)
+        if (windowsClient && !editedChannels.current) setDesired(current.desired)
       }
 
       const id = pending.current
@@ -131,9 +134,7 @@ export function ClientWorkspace({ page, api, refreshInventory, nodes, subscripti
           refreshInventory()
           if (next.error) setError(safeError(next.error))
           else {
-            setNotice(next.kind === 'workspace' || next.kind === 'settings_apply'
-              ? '配置操作已完成。现有草稿已保留；请重新读取已保存配置后继续编辑。'
-              : '操作已由后台服务完成。')
+            setNotice(operationNotice(next))
             if (next.kind === 'workspace') void refreshDocumentMetadata()
           }
         }
@@ -163,7 +164,7 @@ export function ClientWorkspace({ page, api, refreshInventory, nodes, subscripti
       }).catch(() => {})
     }
     const timer = window.setInterval(() => {
-      if (windowsClient) setEvidence(previous => {
+      if (connectionControl) setEvidence(previous => {
         const next = expireServiceEvidence(previous, Date.now())
         if (!next.snapshot) latest.current = null
         return next
@@ -174,10 +175,16 @@ export function ClientWorkspace({ page, api, refreshInventory, nodes, subscripti
       ? '停止或恢复尚未完成，界面保持打开。请检查后台操作并使用恢复入口。'
       : safeError({ code })))
     return () => { mounted.current = false;scope.close(); window.clearInterval(timer); remove(); setPassword(''); setOTP('') }
-  }, [api, windowsClient])
+  }, [api, windowsClient, macosClient])
   useEffect(()=>{setPassword('');setOTP('');setAuthFields({})},[snapshot?.challenge?.challenge_id,snapshot?.challenge?.sequence])
   const read = async (request: WorkspaceReadBody) => { setError(null); try { const value = await scopedRead(request); setResult(value); if (request.action === 'document') { if (typeof value.policy_json === 'string') setPolicyText(value.policy_json); else if (isRecord(value.policy)) setPolicyText(pretty(value.policy)); if (typeof value.revision === 'string') setRevision(value.revision) } } catch (e) { setError(safeError(e)) } }
-  const accepted = (next: ServiceOperation) => { lastOperation.current = next.operation_id; setOperation(next); pending.current = next.completed ? null : next.operation_id; setBusy(!next.completed); if (next.error) setError(safeError(next.error)); else {setNotice(next.completed ? (next.kind==='workspace'||next.kind==='settings_apply'?'配置操作已完成，请重新读取保存结果。':'操作完成。') : windowsClient ? '后台服务已接受操作。' : '配置操作进行中，请保持应用打开。');if(next.completed&&next.kind==='workspace')void refreshDocumentMetadata()}; editedChannels.current = false; void refresh() }
+  const operationNotice = (next: ServiceOperation): string => {
+    if (next.kind === 'workspace' || next.kind === 'settings_apply') return '配置操作已完成，请重新读取保存结果。'
+    if (macosClient && next.phase === 'ready_reported') return '已收到运行就绪报告，可在总览查看检查结果。'
+    if (macosClient && next.phase === 'stopped_reported') return '已收到停止报告。管理员恢复仍待确认。'
+    return '操作完成。'
+  }
+  const accepted = (next: ServiceOperation) => { lastOperation.current = next.operation_id; setOperation(next); pending.current = next.completed ? null : next.operation_id; setBusy(!next.completed); if (next.error) setError(safeError(next.error)); else {setNotice(next.completed ? operationNotice(next) : windowsClient ? '后台服务已接受操作。' : next.kind === 'workspace' ? '配置操作进行中，请保持应用打开。' : '网络操作进行中，请留意 macOS 授权提示。');if(next.completed&&next.kind==='workspace')void refreshDocumentMetadata()}; editedChannels.current = false; void refresh() }
   const command = async (request: WorkspaceCommand) => {
     if (!canControl) {setError(windowsClient ? '后台服务尚未确认可用。' : '请等待当前配置操作完成，或刷新工作空间。');return}
     setBusy(true); setError(null); setNotice(null)
@@ -185,7 +192,7 @@ export function ClientWorkspace({ page, api, refreshInventory, nodes, subscripti
     catch(e) { setBusy(false); setError(safeError(e)) }
   }
   const submit = async (request: Record<string, unknown>) => {
-    const current = windowsClient ? latest.current : null
+    const current = connectionControl ? latest.current : null
     if (!current) { setError('后台状态未确认，未发出变更。'); return }
     setBusy(true); setError(null); setNotice(null)
     try { accepted(await scopedSubmit({ request_id: crypto.randomUUID(), profile_id: current.profile_id, expected_revision: current.revision, ...(current.run_ref ? { run_ref: current.run_ref } : {}), ...request } as ServiceMutation)) }
@@ -203,14 +210,19 @@ export function ClientWorkspace({ page, api, refreshInventory, nodes, subscripti
   const applySettings = () => { try { const office:unknown=JSON.parse(officeRules),home:unknown=JSON.parse(homeRules); if(!Array.isArray(office)||!Array.isArray(home)) throw new Error(); const allowed=(rows:unknown[])=>rows.every(r=>isRecord(r)&&['personal','direct'].includes(String(r.target))&&typeof r.value==='string'); if(!allowed(office)||!allowed(home)) throw new Error(); void submit({kind:'settings_apply',settings:{auto_connect:false,environment,office_overrides:office,home_overrides:home}}) } catch {setError('环境覆盖必须是规则数组，target 只能是 personal 或 direct。')} }
   // macOS keeps its existing view of saved native connection evidence.
   // Leave the shared editor mounted so navigation does not discard its draft.
-  if (!windowsClient && page === 'overview') return null
+  if (!connectionControl && page === 'overview') return null
   return <section className="client-workspace">
     {windowsClient ? <div className="client-status" role="status"><strong>后台服务：{snapshot?.service_state ?? 'unknown'}</strong><span>状态读取：{evidence.control==='available'?'可用':evidence.control==='connecting'?'连接中':'中断，当前保护证据未确认'}</span><span>接管状态：{snapshot?.takeover_state ?? 'unknown'}</span><span>上次收到快照：{evidence.lastReceivedAt===null?'尚无记录':new Date(evidence.lastReceivedAt).toLocaleTimeString()}</span><span>首次配置默认双通道关闭、自动连接关闭</span></div> :
       <div className="client-status" role="status"><strong>本机配置：{workspaceActivity === null ? '正在确认' : workspaceActivity ? '操作进行中' : '可编辑'}</strong></div>}
     {error && <div className="control-banner" role="alert">{error}<button className="link-btn" onClick={() => { void refresh() }}>刷新工作空间</button></div>}
     {notice && <div className="client-notice" role="status">{notice}</div>}
-    {operation && <div className="client-operation" role="status">{windowsClient ? '后台操作记录' : '配置操作'} {operation.kind} · {operation.phase}{operation.restored ? ' · 此操作曾确认恢复' : ''}{windowsClient && !snapshot ? ' · 当前恢复状态 unknown' : busy ? ' · 执行中' : ''}</div>}
-    {page === 'overview' && <>
+    {operation && <div className="client-operation" role="status">{windowsClient
+      ? `后台操作记录 ${operation.kind} · ${operation.phase}${operation.restored ? ' · 此操作曾确认恢复' : ''}${!snapshot ? ' · 当前恢复状态 unknown' : busy ? ' · 执行中' : ''}`
+      : macOperationText(operation)}</div>}
+    {page === 'overview' && macosClient && <MacLifecycle snapshot={snapshot} configured={configured}
+      busy={busy || workspaceActivity !== false} start={start => { void submit({ kind: 'takeover_start', start }) }}
+      stop={() => { void submit({ kind: 'takeover_stop', stop: {} }) }} exit={() => { void api.exit() }} />}
+    {page === 'overview' && windowsClient && <>
       <h1>连接工作空间</h1><p>默认流量走直连，公司与个人通道独立控制。策略要求公司白名单目标在公司通道关闭时阻断；实际保护与个人回退状态以后台接管证据为准。</p>
       <div className="client-grid">{(['company','personal'] as const).map(channel => <article className="client-card" key={channel}><h2>{channel==='company'?'公司 VPN':'个人代理'}</h2><p>{snapshot?.[channel].state ?? 'unknown'} · {snapshot?.[channel].reason ?? '尚无后台证据'}</p><p>实际出口：{snapshot?.[channel].route ?? '未确认'}</p><label><input type="checkbox" checked={desired[channel]} onChange={e => { editedChannels.current=true;setDesired({...desired,[channel]:e.target.checked}) }} />请求开启{channel==='company'?'公司':'个人'}通道</label>{channel==='company' && <p>公司 IPv6 策略：阻断；实际状态：{snapshot?.company.ipv6_state === 'blocked'?'已由服务确认阻断':'未验证'}</p>}{channel==='personal' && <p>失败状态：{healthLabels[healthState(snapshot?.personal)] ?? '未确认'}。单节点、单目标失败或空候选不会被显示为全部失败。</p>}</article>)}</div>
       {validationOnly&&<label>本次验证时长（秒，1–2700；到期自动停止与恢复）<input type="number" min={1} max={2700} required value={validationSeconds} onChange={e=>setValidationSeconds(e.target.value)}/></label>}<div className="client-actions"><button disabled={busy||!canControl||snapshot?.recovery_required||validationOnly&&(!Number.isInteger(Number(validationSeconds))||Number(validationSeconds)<1||Number(validationSeconds)>2700)} onClick={() => {void submit({kind:'takeover_start',start:validationOnly?{channels:desired,mode:'validation',validation_seconds:Number(validationSeconds)}:{channels:desired,mode:'daily'}})}}>启动网络接管</button><button disabled={busy||!canControl} onClick={() => {void submit({kind:'channels_set',channels:desired})}}>应用通道开关</button><button disabled={!canControl||busy&&(operation?.kind==='takeover_stop'||operation?.kind==='exit_restore')} onClick={() => {void submit({kind:'takeover_stop',stop:{}})}}>停止并恢复</button><button onClick={() => {void api.exit()}}>停止、恢复并退出</button></div>

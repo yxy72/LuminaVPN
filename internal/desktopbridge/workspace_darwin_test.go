@@ -1,10 +1,12 @@
 package desktopbridge
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +14,86 @@ import (
 	"netlaunch/internal/policy"
 	p "netlaunch/internal/serviceprotocol"
 )
+
+func TestMacRunEnablesLocalNetworkProtocolWithoutStarting(t *testing.T) {
+	profile := filepath.Join(t.TempDir(), "unconfigured")
+	request := strings.NewReader("{\"id\":\"hello\",\"method\":\"session.hello\"}\n{\"id\":\"snapshot\",\"method\":\"service.snapshot\",\"params\":{}}\n")
+	var output bytes.Buffer
+	if err := Run([]string{"serve", "--profile", profile, "--runtime", t.TempDir()}, request, &output); err != nil {
+		t.Fatal(err)
+	}
+	decoder := json.NewDecoder(&output)
+	var hello struct {
+		Result struct {
+			Capabilities map[string]any `json:"capabilities"`
+		} `json:"result"`
+	}
+	if err := decoder.Decode(&hello); err != nil {
+		t.Fatal(err)
+	}
+	caps := hello.Result.Capabilities
+	if caps["macos_client"] != true || caps["connection_start"] != true || caps["connection_stop"] != true || caps["config_write"] != true || caps["windows_client"] != false || caps["requires_installed_service"] != false {
+		t.Fatal(caps)
+	}
+	var answer struct {
+		Result p.Snapshot `json:"result"`
+	}
+	if err := decoder.Decode(&answer); err != nil || answer.Result.ServiceState != "local" || answer.Result.TakeoverState != "idle" || answer.Result.Restored || answer.Result.LocalExitProof != nil {
+		t.Fatal(answer, err)
+	}
+	if _, err := os.Lstat(profile); !os.IsNotExist(err) {
+		t.Fatal("handshake or status read initialized a profile", err)
+	}
+}
+
+func TestMacNativeStartUsesLocalPreflight(t *testing.T) {
+	ctx := t.Context()
+	s := testServer(t)
+	s.Service.EnableLocalNetwork(ctx)
+	t.Cleanup(s.Service.CloseLocalWorkspace)
+	request := func(method, params string) Response {
+		return s.respond(ctx, Request{ID: "test", Method: method, Params: json.RawMessage(params)})
+	}
+	if response := request("session.hello", `{}`); response.Error != nil {
+		t.Fatal(response.Error)
+	}
+	answer := request("service.snapshot", `{}`)
+	if answer.Error != nil {
+		t.Fatal(answer.Error)
+	}
+	st := answer.Result.(p.Snapshot)
+	start, err := json.Marshal(p.Mutation{
+		RequestID: "preflight", ProfileID: st.ProfileID, ExpectedRevision: st.Revision, Kind: p.TakeoverStart,
+		Start: &p.StartPayload{Mode: "daily", Channels: p.DesiredChannels{Company: true, Personal: true}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ack := request("service.submit", string(start))
+	if ack.Error != nil || ack.Result.(p.Operation).Phase != "starting" {
+		t.Fatal(ack)
+	}
+	for deadline := time.Now().Add(2 * time.Second); ; {
+		answer = request("service.operation", `{"operation_id":"preflight"}`)
+		if answer.Error != nil {
+			t.Fatal(answer.Error)
+		}
+		op := answer.Result.(p.Operation)
+		if op.Completed {
+			if op.Error == nil || op.Error.Code != "MAC_START_FAILED" || op.Restored {
+				t.Fatal(op)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("start did not return from local preflight")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if _, err := os.Lstat(s.Service.Profile); !os.IsNotExist(err) {
+		t.Fatal("a start using an unconfigured profile created files", err)
+	}
+}
 
 func TestMacWorkspaceEditsThroughDesktopBridge(t *testing.T) {
 	ctx := context.Background()

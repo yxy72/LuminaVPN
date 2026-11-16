@@ -1,5 +1,5 @@
 import { test, expect, _electron as electron, type ElectronApplication, type Page } from '@playwright/test'
-import { chmod, lstat, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { chmod, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { existsSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
@@ -118,6 +118,7 @@ test('desktop reads real fixtures, protects IPC and ages evidence', async () => 
   await writeFile(join(userData, 'preferences.json'), JSON.stringify({ profile, closeNoticeSeen: true }))
   const env: Record<string, string> = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)); delete env.ELECTRON_RUN_AS_NODE; delete env.NODE_OPTIONS
   const application = await electron.launch({ args: [resolve('.'), '--user-data-dir=' + userData], cwd: resolve('.'), env })
+  let savedFixture = false
   try {
     await application.context().route(/^https?:\/\//, route => route.abort())
     const page = await application.firstWindow(), errors: string[] = []
@@ -126,15 +127,33 @@ test('desktop reads real fixtures, protects IPC and ages evidence', async () => 
     expect(await page.evaluate(() => typeof (window as any).require)).toBe('undefined')
     const { capabilities } = await page.evaluate(() => window.lumina.hello())
     const macWorkspace = process.platform === 'darwin'
+    const macClient = macWorkspace && capabilities.macos_client === true
     if (macWorkspace) {
-      expect(capabilities).toMatchObject({ read_only: false, config_write: true, connection_start: false, connection_stop: false, windows_client: false })
-      const result = await page.evaluate(async () => {
-        try { await window.lumina.client!.snapshot(); return 'unexpected' }
-        catch (error) { return error instanceof Error ? error.message : String(error) }
-      })
-      expect(result).toBe('CLIENT_UNAVAILABLE')
+      expect(capabilities).toMatchObject({ read_only: false, config_write: true, connection_start: macClient, connection_stop: macClient, windows_client: false })
     }
-    await expect(page.getByRole('button', { name: '连接网络', exact: true })).toBeDisabled()
+    const connect = page.getByRole('button', { name: '连接网络', exact: true })
+    if (macClient) {
+      await expect(connect).toBeEnabled()
+      const snapshot = await page.evaluate(() => window.lumina.client!.snapshot())
+      expect(snapshot).toMatchObject({ service_state: 'local', takeover_state: 'idle', restored: false })
+      const denied = await page.evaluate(async snap => {
+        try {
+          await window.lumina.client!.submit({ request_id: 'fixture-forbidden', profile_id: snap.profile_id,
+            expected_revision: snap.revision, kind: 'channels_set', channels: { company: true, personal: false } })
+          return 'unexpected'
+        } catch (error) { return error instanceof Error ? error.message : String(error) }
+      }, snapshot)
+      expect(denied).toBe('CLIENT_UNAVAILABLE')
+      await page.getByLabel('运行模式').selectOption('validation')
+      await page.getByLabel('验证时长（秒）').fill('2701')
+      await expect(connect).toBeDisabled()
+      await page.getByLabel('验证时长（秒）').fill('20')
+      await expect(connect).toBeEnabled()
+      await expect(page.getByRole('button', { name: '请求停止', exact: true })).toBeDisabled()
+      // The fixture deliberately never presses the real start button.
+    } else {
+      await expect(connect).toBeDisabled()
+    }
     await page.getByRole('button', { name: /代理节点/ }).click()
     await expect(page.getByText('P001', { exact: true }).first()).toBeVisible()
     expect(await page.evaluate(() => document.body.innerText)).not.toContain('desktop-secret-canary')
@@ -167,6 +186,7 @@ test('desktop reads real fixtures, protects IPC and ages evidence', async () => 
     const channel = { state: 'ready', reason: 'path_verified', checked_at: now, path_state: 'verified', service_state: 'not_checked' }
     await writeFile(join(run, 'status.json'), JSON.stringify({ phase: 'ready', lifecycle: 'running', updated: now, last_ready: now, personal: 'P001', channels: { company: channel, personal: { ...channel, service_state: 'healthy' }, direct: channel } }), { mode: 0o600 })
     await writeFile(join(profile, 'current.json'), JSON.stringify({ run }), { mode: 0o600 })
+    savedFixture = true
     await protectFixtureObjects(root, [run, join(run, 'status.json'), join(profile, 'current.json')])
     await page.getByRole('button', { name: /^总览/ }).click()
     await expect(page.getByRole('heading', { name: '最近检查已通过' })).toBeVisible()
@@ -178,8 +198,18 @@ test('desktop reads real fixtures, protects IPC and ages evidence', async () => 
     expect(await page.evaluate(() => document.body.scrollWidth > window.innerWidth)).toBe(false)
     await page.screenshot({ path: join(root, 'overview.png'), fullPage: true })
     expect(errors).toEqual([])
-    // The saved fixture run does not correspond to a live network process.
-  } finally { await application.close() }
+  } finally {
+    if (savedFixture && process.platform === 'darwin') {
+      // Closing this isolated process through app.quit() would send the
+      // fabricated current run through the real native authorization path.
+      const close = application.waitForEvent('close')
+      application.process().kill('SIGKILL')
+      await close
+    } else {
+      await application.close()
+    }
+    await rm(join(profile, 'current.json'), { force: true })
+  }
 })
 
 test('packaged preview uses fixed resources and reloads a crashed renderer', async () => {

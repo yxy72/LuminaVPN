@@ -119,6 +119,51 @@ func TestDarwinStartupFencesUnrestoredLegacyJournal(t *testing.T) {
 	}
 }
 
+func TestDarwinLegacyStopOnlyGetsReceiptAfterNewNativeEvidence(t *testing.T) {
+	store := testDarwinOwnershipStore(t)
+	run := filepath.Join(t.TempDir(), "netlaunch-legacy")
+	owner := testDarwinOwner(run)
+	owner.Runner.Command = strings.Join([]string{owner.Runner.Executable, "_serve", "--run", run}, " ")
+	dir := filepath.Join(store.root, filepath.Base(run))
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	status := State{Version: 1, Phase: "stopped"}
+	if err := securefile.Write(filepath.Join(dir, "state.json"), status); err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := store.lock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	evidence := errors.New("an old route is still present")
+	if err := store.attestLegacyStop(status, owner, func(State) error { return evidence }); !errors.Is(err, evidence) {
+		t.Fatalf("native evidence was not required: %v", err)
+	}
+	if _, err := store.proof(run); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("receipt was published despite a failed check: %v", err)
+	}
+	active, err := securefile.Lock(filepath.Join(store.root, "active.lock"), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	locked := store.attestLegacyStop(status, owner, func(State) error {
+		t.Fatal("resource check raced with another coordinator")
+		return nil
+	})
+	active()
+	if locked == nil {
+		t.Fatal("published legacy receipt while a coordinator was active")
+	}
+	if err := store.attestLegacyStop(status, owner, func(State) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if proof, err := store.proof(run); err != nil || proof.Owner != owner {
+		t.Fatalf("native proof did not bind the legacy run: %v", err)
+	}
+}
+
 func TestDarwinRecoveryProcessAbsenceUsesNativeEvidence(t *testing.T) {
 	child := exec.Command("/bin/sleep", "15")
 	if err := child.Start(); err != nil {

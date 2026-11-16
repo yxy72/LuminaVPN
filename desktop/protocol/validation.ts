@@ -27,14 +27,19 @@ function validateHello(v: Record<string, unknown>): boolean {
   if (v.protocol_major !== 1 || !string(v.session_id) || !string(v.mode) || !isRecord(v.build) || !isRecord(v.capabilities)) return false
   const build = v.build, caps = v.capabilities
   if (!['version', 'os', 'arch', 'go_version'].every(key => string(build[key])) || !bool(caps.native_lifecycle)) return false
-  if (caps.windows_client !== undefined && !bool(caps.windows_client)) return false
+  if (caps.windows_client !== undefined && !bool(caps.windows_client) ||
+      caps.macos_client !== undefined && !bool(caps.macos_client)) return false
 
   const windowsClient = caps.windows_client === true
+  const macosClient = caps.macos_client === true
+  const connectionControl = windowsClient || macosClient
   const localWorkspace = !windowsClient && caps.config_write === true
-  if (windowsClient && build.os !== 'windows' || localWorkspace && build.os !== 'darwin') return false
-  if (caps.connection_start !== windowsClient || caps.connection_stop !== windowsClient ||
-      caps.config_write !== (windowsClient || localWorkspace) || caps.read_only !== (!windowsClient && !localWorkspace)) return false
-  const additionalMethods = windowsClient ? CLIENT_METHODS : localWorkspace ? LOCAL_WORKSPACE_METHODS : []
+  if (windowsClient && (macosClient || build.os !== 'windows') ||
+      localWorkspace && build.os !== 'darwin' ||
+      macosClient && (!localWorkspace || caps.native_lifecycle !== true)) return false
+  if (caps.connection_start !== connectionControl || caps.connection_stop !== connectionControl ||
+      caps.config_write !== (connectionControl || localWorkspace) || caps.read_only !== (!connectionControl && !localWorkspace)) return false
+  const additionalMethods = connectionControl ? CLIENT_METHODS : localWorkspace ? LOCAL_WORKSPACE_METHODS : []
   const expected = [...READ_METHODS, ...additionalMethods]
   const methods = caps.methods
   return Array.isArray(methods) && methods.length === expected.length && methods.every((method, index) => method === expected[index])

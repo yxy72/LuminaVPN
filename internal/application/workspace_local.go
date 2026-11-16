@@ -14,8 +14,8 @@ import (
 	p "netlaunch/internal/serviceprotocol"
 )
 
-// localWorkspace runs user-context edits on macOS. Network operations have a
-// separate owner and are never authorized by workspace operations.
+// localWorkspace serializes local desktop operations on macOS. Workspace edits
+// and network controls share a queue, but have separate authorization paths.
 type localWorkspace struct {
 	mu       sync.Mutex
 	ctx      context.Context
@@ -24,8 +24,10 @@ type localWorkspace struct {
 	commands app.DesktopCommands
 	profile  string
 	active   chan struct{}
+	activeID string
 	order    []string
 	records  map[string]localWorkspaceRecord
+	network  *macNetwork
 }
 
 type localWorkspaceRecord struct {
@@ -84,30 +86,43 @@ func (w *localWorkspace) submit(id string, work p.WorkspacePayload) (p.Operation
 	digest := sha256.Sum256(raw)
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if previous, found, err := w.checkSubmitLocked(id, digest); found || err != nil {
+		return previous, err
+	}
+	op := w.enqueueLocked(id, digest, p.Workspace, "running", "", 0)
+	go w.execute(id, work)
+	return op, nil
+}
+
+func (w *localWorkspace) checkSubmitLocked(id string, digest [sha256.Size]byte) (p.Operation, bool, error) {
 	if previous, exists := w.records[id]; exists {
 		if previous.digest != digest {
-			return p.Operation{}, unavailable("REQUEST_CONFLICT", "The request identifier belongs to a different operation.")
+			return p.Operation{}, true, unavailable("REQUEST_CONFLICT", "The request identifier belongs to a different operation.")
 		}
-		return previous.operation, nil
+		return previous.operation, true, nil
 	}
 	if w.closed || w.ctx.Err() != nil {
-		return p.Operation{}, unavailable("CLIENT_UNAVAILABLE", "The workspace is closing.")
+		return p.Operation{}, false, unavailable("CLIENT_UNAVAILABLE", "The desktop connection is closing.")
 	}
 	if w.active != nil {
-		return p.Operation{}, &Error{Code: "PROFILE_BUSY", Message: "Another workspace operation is still running.", Retryable: true}
+		return p.Operation{}, false, &Error{Code: "PROFILE_BUSY", Message: "Another operation for this profile is still running.", Retryable: true}
 	}
+	return p.Operation{}, false, nil
+}
+
+func (w *localWorkspace) enqueueLocked(id string, digest [sha256.Size]byte, kind p.Kind, phase, runRef string, revision uint64) p.Operation {
 	const maxRetained = 64
 	if len(w.order) == maxRetained {
 		delete(w.records, w.order[0])
 		w.order = w.order[1:]
 	}
 	now := time.Now().UTC()
-	op := p.Operation{ID: id, RequestID: id, ProfileID: w.profile, Kind: p.Workspace, Phase: "running", Created: now, Updated: now}
+	op := p.Operation{ID: id, RequestID: id, ProfileID: w.profile, Kind: kind, Phase: phase, RunRef: runRef, Revision: revision, Created: now, Updated: now}
 	w.order = append(w.order, id)
 	w.records[id] = localWorkspaceRecord{operation: op, digest: digest}
 	w.active = make(chan struct{})
-	go w.execute(id, work)
-	return op, nil
+	w.activeID = id
+	return op
 }
 
 func (w *localWorkspace) execute(id string, work p.WorkspacePayload) {
@@ -127,7 +142,14 @@ func (w *localWorkspace) execute(id string, work p.WorkspacePayload) {
 			record.operation.Error.Code = "WORKSPACE_INTERRUPTED"
 		}
 	}
+	if w.network != nil {
+		w.network.revision++
+	}
+	w.completeLocked(id, record)
+}
+
+func (w *localWorkspace) completeLocked(id string, record localWorkspaceRecord) {
 	w.records[id] = record
 	close(w.active)
-	w.active = nil
+	w.active, w.activeID = nil, ""
 }

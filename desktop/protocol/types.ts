@@ -8,7 +8,7 @@ export interface Hello {
   protocol_major: 1; session_id: string
   build: { version: string; os: string; arch: string; go_version: string; revision?: string }
   mode: string
-  capabilities: { read_only: boolean; connection_start: boolean; connection_stop: boolean; config_write: boolean; native_lifecycle: boolean; windows_client?: boolean; validation_only?:boolean; validation_maximum_seconds?:number;requires_installed_service?:boolean; methods: string[] }
+  capabilities: { read_only: boolean; connection_start: boolean; connection_stop: boolean; config_write: boolean; native_lifecycle: boolean; windows_client?: boolean; macos_client?: boolean; validation_only?:boolean; validation_maximum_seconds?:number;requires_installed_service?:boolean; methods: string[] }
 }
 export interface State {
   profile_configured: boolean; run_ref: string | null

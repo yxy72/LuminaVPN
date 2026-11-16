@@ -129,13 +129,16 @@ func onlyClientKeys(raw json.RawMessage, allowed ...string) bool {
 	return true
 }
 func (d *Desktop) ClientRequest(ctx context.Context, method string, raw json.RawMessage) (any, error) {
-	if !d.ClientEnabled() && (d.localWorkspace == nil || method == "service.snapshot" || method == "service.submit") {
+	if !d.ClientEnabled() && !d.MacClientEnabled() && (d.localWorkspace == nil || method == "service.snapshot" || method == "service.submit") {
 		return nil, unavailable("CLIENT_UNAVAILABLE", "This desktop operation is unavailable in the current build.")
 	}
 	switch method {
 	case "service.snapshot":
 		if !onlyClientKeys(raw) {
 			return nil, unavailable("INVALID_PARAMS", "No parameters are accepted.")
+		}
+		if d.MacClientEnabled() {
+			return d.localWorkspace.networkSnapshot(ctx)
 		}
 		snapshot, err := d.Control.Snapshot(ctx, d.ClientProfileID())
 		if err != nil {
@@ -165,7 +168,13 @@ func (d *Desktop) ClientRequest(ctx context.Context, method string, raw json.Raw
 		return op, nil
 	case "service.submit":
 		var mutation serviceprotocol.Mutation
-		if clientDecode(raw, &mutation) != nil || mutation.Validate() != nil || mutation.ProfileID != d.ClientProfileID() || mutation.Kind == serviceprotocol.Workspace || !validDesktopStart(mutation.Start) {
+		if clientDecode(raw, &mutation) != nil || mutation.Validate() != nil || mutation.ProfileID != d.ClientProfileID() || mutation.Kind == serviceprotocol.Workspace {
+			return nil, unavailable("INVALID_PARAMS", "The typed service mutation is invalid.")
+		}
+		if d.MacClientEnabled() {
+			return d.localWorkspace.submitNetwork(ctx, mutation)
+		}
+		if !validDesktopStart(mutation.Start) {
 			return nil, unavailable("INVALID_PARAMS", "The typed service mutation is invalid.")
 		}
 		operation, err := d.Control.Submit(ctx, mutation)
@@ -243,7 +252,11 @@ func (d *Desktop) readWorkspace(ctx context.Context, raw json.RawMessage) (any, 
 		if !onlyClientKeys(raw, "profile_id", "action") {
 			break
 		}
-		result, err = desktopRecoveryEntry()
+		if d.MacClientEnabled() {
+			result = d.Recovery()
+		} else {
+			result, err = desktopRecoveryEntry()
+		}
 	case "runtime":
 		if !onlyClientKeys(raw, "profile_id", "action") {
 			break
