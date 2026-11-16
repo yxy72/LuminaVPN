@@ -48,14 +48,9 @@ func desktopConfig(s State, nodes []policy.Node, secret string, company *company
 			return nil, e
 		}
 	}
-	// A desktop transition can close all physical DNS/direct traffic while
-	// replacing resolver state. Legacy policy output keeps its direct proxy.
-	for _, raw := range c["proxies"].([]any) {
-		if p, ok := raw.(map[string]any); ok && p["name"] == "PHYSICAL" {
-			p["name"] = "PHYSICAL-BOUND"
-		}
+	if err := addDesktopPhysicalGate(c); err != nil {
+		return nil, err
 	}
-	c["proxy-groups"] = append(c["proxy-groups"].([]any), map[string]any{"name": "PHYSICAL", "type": "select", "proxies": []string{"REJECT", "PHYSICAL-BOUND"}})
 	tun := c["tun"].(map[string]any)
 	tun["enable"] = true
 	tun["auto-route"] = false

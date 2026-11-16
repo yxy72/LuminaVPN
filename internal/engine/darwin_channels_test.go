@@ -96,8 +96,10 @@ func TestDarwinStartupConfigProtectsCompanyAndSelectsPersonalDirect(t *testing.T
 	groups := config["proxy-groups"].([]any)
 	company := groups[0].(map[string]any)["proxies"].([]string)
 	personal := groups[1].(map[string]any)["proxies"].([]string)
+	physical := groups[2].(map[string]any)["proxies"].([]string)
 	if !slices.Equal(company, []string{selector.Reject}) ||
-		!slices.Equal(personal, []string{selector.Reject, "PHYSICAL"}) || config["listeners"] != nil {
+		!slices.Equal(personal, []string{selector.Reject, "PHYSICAL"}) ||
+		!slices.Equal(physical, []string{selector.Reject, "PHYSICAL-BOUND"}) || config["listeners"] != nil {
 		t.Fatal("disabled startup installed an unexpected egress or candidate listener")
 	}
 	t.Run("pinned core parses the actual startup configuration", func(t *testing.T) {

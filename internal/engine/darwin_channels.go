@@ -3,11 +3,9 @@
 package engine
 
 import (
-	"context"
 	"errors"
 	"os"
 	"path/filepath"
-	"time"
 
 	"netlaunch/internal/auth"
 	"netlaunch/internal/policy"
@@ -125,25 +123,12 @@ func darwinCoreConfig(m Manifest, nodes []policy.Node, secret string, company *c
 	if verification != nil {
 		verification.ingress.configure(config, m.Config, candidateNames(nodes))
 	}
+	if m.Mode != "" {
+		if err := addDesktopPhysicalGate(config); err != nil {
+			return nil, err
+		}
+	}
 	return config, nil
-}
-
-func setDarwinPersonalDirect(ctx context.Context, run string) error {
-	return update(run, func(s *State) error {
-		if err := guard(run, s); err != nil {
-			return err
-		}
-		if s.Manifest.Mode == "" || currentIntent(*s).Personal {
-			return errors.New("macOS personal direct requires an explicitly disabled personal channel")
-		}
-		work, cancel := context.WithTimeout(ctx, 2*time.Second)
-		defer cancel()
-		if err := selectPersonalContext(work, run, "PHYSICAL"); err != nil {
-			return err
-		}
-		s.Personal = "PHYSICAL"
-		return nil
-	})
 }
 
 func applyDarwinTakeover(run string, intent policy.ChannelIntent) error {

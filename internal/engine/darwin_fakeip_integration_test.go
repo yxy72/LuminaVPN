@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -87,12 +88,8 @@ func TestDarwinPinnedCorePreservesFakeIPAcrossReloadAndPersonalDirect(t *testing
 	if root == "" {
 		t.Skip("set NETLAUNCH_TEST_RUNTIME for the pinned core fixture")
 	}
-	manifest, err := runtimebundle.Verify(root)
-	if err != nil {
+	if err := requireDarwinReloadCore(root); err != nil {
 		t.Fatal(err)
-	}
-	if manifest.Mihomo != "v1.19.32-lumina.1" {
-		t.Fatalf("expected the pinned macOS Mihomo derivative, got %q", manifest.Mihomo)
 	}
 	testDarwinFakeIPContinuity(t, filepath.Join(root, "bin", "mihomo"), true)
 }
@@ -121,7 +118,7 @@ func TestDarwinRebuiltCorePreservesFakeIPAcrossReloadAndPersonalDirect(t *testin
 }
 
 func testDarwinFakeIPContinuity(t *testing.T, executable string, preservesPool bool) {
-	const alpha, beta, gamma, company = "old.personal.example", "new.personal.example", "later.personal.example", "blocked.company.example"
+	const alpha, beta, gamma, company, direct = "old.personal.example", "new.personal.example", "later.personal.example", "blocked.company.example", "direct.example"
 	const secret = "loopback-fixture-controller-secret"
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/check" {
@@ -207,8 +204,9 @@ func testDarwinFakeIPContinuity(t *testing.T, executable string, preservesPool b
 		}
 		dns := result["dns"].(map[string]any)
 		loopback := "udp://" + upstream.LocalAddr().String()
-		for _, key := range []string{"nameserver", "default-nameserver", "proxy-server-nameserver", "direct-nameserver"} {
-			dns[key] = []string{loopback}
+		dns["default-nameserver"] = []string{loopback}
+		for _, key := range []string{"nameserver", "proxy-server-nameserver", "direct-nameserver"} {
+			dns[key] = []string{loopback + "#PHYSICAL"}
 		}
 		dnsPolicy := dns["nameserver-policy"].(map[string]any)
 		for host, record := range dnsPolicy {
@@ -219,14 +217,15 @@ func testDarwinFakeIPContinuity(t *testing.T, executable string, preservesPool b
 				// must fail, even if it selects the direct data path.
 				dnsPolicy[host] = []string{"rcode://refused"}
 			default:
-				dnsPolicy[host] = []string{loopback}
+				dnsPolicy[host] = []string{loopback + "#PHYSICAL"}
 			}
 		}
 		return result
 	}
 	dir := testutil.PrivateTempDir(t)
 	file := filepath.Join(dir, "core.json")
-	if err := securefile.Write(file, config(true)); err != nil {
+	previous := config(true)
+	if err := securefile.Write(file, previous); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
@@ -260,16 +259,32 @@ func testDarwinFakeIPContinuity(t *testing.T, executable string, preservesPool b
 		}
 	}
 	assertNoTUN()
-	choose := func(name string) {
-		t.Helper()
-		if err := api(ctx, "PUT", "/proxies/PERSONAL", map[string]string{"name": name}, nil); err != nil {
-			t.Fatal(err)
+	selectGroup := func(group, name string) error {
+		if err := api(ctx, "PUT", "/proxies/"+group, map[string]string{"name": name}, nil); err != nil {
+			return err
 		}
 		var selected struct{ Now string }
-		if err := api(ctx, "GET", "/proxies/PERSONAL", nil, &selected); err != nil || selected.Now != name {
-			t.Fatalf("personal selection = %q, %v", selected.Now, err)
+		if err := api(ctx, "GET", "/proxies/"+group, nil, &selected); err != nil {
+			return err
+		}
+		if selected.Now != name {
+			return fmt.Errorf("%s = %q, want %q", group, selected.Now, name)
+		}
+		return nil
+	}
+	choose := func(name string) {
+		t.Helper()
+		if err := selectGroup("PERSONAL", name); err != nil {
+			t.Fatal(err)
 		}
 	}
+	open := func(direct bool) {
+		t.Helper()
+		if err := openDesktopConfig(selectGroup, direct); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	lookup := func(host string) netip.Addr {
 		t.Helper()
 		conn, err := net.DialUDP("udp4", nil, dnsAddress)
@@ -337,30 +352,36 @@ func testDarwinFakeIPContinuity(t *testing.T, executable string, preservesPool b
 			t.Fatal("request did not use the personal proxy")
 		}
 	}
-	reload := func(personal, flushResolver bool) {
+	reload := func(personal bool, failure error) error {
 		t.Helper()
-		choose("REJECT")
-		if err := securefile.Write(file, config(personal)); err != nil {
-			t.Fatal(err)
-		}
-		if err := api(ctx, "PUT", "/configs?force=true", map[string]string{"path": file}, nil); err != nil {
-			t.Fatal(err)
-		}
+		next := config(personal)
+		err := prepareDarwinPersonalConfig(next, previous, file, desktopReloadControl{
+			selectGroup: selectGroup,
+			request: func(method, path string, payload, out any) error {
+				if path == "/cache/dns/flush" && failure != nil {
+					return failure
+				}
+				return api(ctx, method, path, payload, out)
+			},
+			save: func(config map[string]any) error { return securefile.Write(file, config) },
+		})
 		assertNoTUN()
-		choose("REJECT")
-		if flushResolver {
-			if err := api(ctx, "POST", "/cache/dns/flush", nil, nil); err != nil {
-				t.Fatal(err)
-			}
+		if err == nil || errors.Is(err, failure) {
+			previous = next
 		}
+		return err
 	}
 
+	open(false)
 	choose("P001")
 	first, denied := lookup(alpha), lookup(company)
 	request(first, "personal")
 	seenProxy(alpha)
 	request(denied, "")
-	reload(true, false)
+	if err := reload(true, nil); err != nil {
+		t.Fatal(err)
+	}
+	open(false)
 	choose("P001")
 	second := lookup(beta)
 	if !preservesPool {
@@ -381,9 +402,21 @@ func testDarwinFakeIPContinuity(t *testing.T, executable string, preservesPool b
 	}
 	request(first, "personal")
 	seenProxy(alpha)
-	reload(false, true)
-	request(first, "") // The selected route stays closed until the caller opens PHYSICAL.
-	choose("PHYSICAL")
+	physicalAddress := lookup(direct)
+	request(physicalAddress, "physical")
+	flushUnavailable := errors.New("injected resolver flush failure")
+	if err := reload(false, flushUnavailable); !errors.Is(err, flushUnavailable) {
+		t.Fatal("expected resolver flush failure", err)
+	}
+	request(physicalAddress, "")
+	request(first, "")
+
+	if err := reload(false, nil); err != nil {
+		t.Fatal(err)
+	}
+	request(first, "")
+	request(physicalAddress, "")
+	open(true)
 	request(first, "physical") // Exercise the held address without issuing a new DNS lookup.
 	request(second, "physical")
 	request(denied, "")
@@ -397,4 +430,17 @@ func testDarwinFakeIPContinuity(t *testing.T, executable string, preservesPool b
 		t.Fatalf("direct mode unexpectedly used the personal proxy for %s", got)
 	default:
 	}
+
+	if err := reload(true, nil); err != nil {
+		t.Fatal(err)
+	}
+	request(first, "")
+	request(physicalAddress, "")
+	open(false)
+	request(physicalAddress, "physical")
+	request(first, "") // The coordinator must verify a candidate before selecting it.
+	choose("P001")
+	request(first, "personal")
+	seenProxy(alpha)
+	request(denied, "")
 }

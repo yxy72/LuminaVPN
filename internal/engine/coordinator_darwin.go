@@ -128,6 +128,12 @@ func serve(run string) (returned error) {
 		return e
 	}
 	intent := s.Manifest.InitialChannels()
+	managed := s.Manifest.Mode != ""
+	if managed {
+		if e = requireDarwinReloadCore(filepath.Join(private(run), "runtime")); e != nil {
+			return e
+		}
+	}
 	nodes, e := freezeDarwinChannelInputs(run, s.Manifest)
 	if e != nil {
 		return e
@@ -259,6 +265,11 @@ func serve(run string) (returned error) {
 	}); e != nil {
 		return e
 	}
+	if managed {
+		if e = openDarwinBasePaths(ctx, run, s, network, intent); e != nil {
+			return e
+		}
+	}
 	boundChecks, systemChecks := newCompanyProbeSchedule(), newProbeSchedule()
 	if intent.Company {
 		if e = wait(ctx, run, 45*time.Second, func(ctx context.Context) error {
@@ -283,8 +294,6 @@ func serve(run string) (returned error) {
 		}); e != nil {
 			return e
 		}
-	} else if e = setDarwinPersonalDirect(ctx, run); e != nil {
-		return e
 	}
 	if e = apiContext(ctx, run, "PATCH", "/configs", map[string]any{"tun": map[string]bool{"enable": true}}, nil); e != nil {
 		return e
@@ -304,7 +313,7 @@ func serve(run string) (returned error) {
 	if e = takeoverDNS(run); e != nil {
 		return e
 	}
-	if s.Manifest.Mode != "" {
+	if managed {
 		if e = applyDarwinTakeover(run, intent); e != nil {
 			return e
 		}
@@ -483,12 +492,28 @@ func serve(run string) (returned error) {
 			systemChecks.reset()
 			if company != nil {
 				company.revoke()
-				_ = gate(run)
+				if e = gate(run); managed && e != nil {
+					return e
+				}
 			}
-			if intent.Personal {
+			if managed {
+				if e = closeDarwinBasePaths(ctx, run); e != nil {
+					return e
+				}
+			} else if intent.Personal {
 				_ = selectPersonal(run, selector.Reject)
 			}
-			if e = update(run, func(s *State) error { s.VPN.Bootstrap = false; s.Leases = nil; return nil }); e != nil {
+			if e = update(run, func(s *State) error {
+				if err := guard(run, s); err != nil {
+					return err
+				}
+				s.VPN.Bootstrap, s.Leases = false, nil
+				if managed {
+					s.Channels = nil
+					s.Phase, s.Personal = "reconnecting", selector.Reject
+				}
+				return nil
+			}); e != nil {
 				return e
 			}
 			if intent.Company {
@@ -505,11 +530,17 @@ func serve(run string) (returned error) {
 				return e
 			}
 			config["tun"].(map[string]any)["enable"] = true
-			if e = saveCore(run, config); e != nil {
-				return e
-			}
-			if e = apiContext(ctx, run, "PUT", "/configs?force=true", map[string]string{"path": filepath.Join(private(run), "core.json")}, nil); e != nil {
-				return e
+			if managed {
+				if e = prepareDarwinPersonalReload(ctx, run, current, config); e != nil {
+					return e
+				}
+			} else {
+				if e = saveCore(run, config); e != nil {
+					return e
+				}
+				if e = apiContext(ctx, run, "PUT", "/configs?force=true", map[string]string{"path": filepath.Join(private(run), "core.json")}, nil); e != nil {
+					return e
+				}
 			}
 			if e = update(run, func(s *State) error {
 				if err := guard(run, s); err != nil {
@@ -526,8 +557,8 @@ func serve(run string) (returned error) {
 			if e = takeoverDNS(run); e != nil {
 				return e
 			}
-			if !intent.Personal {
-				if e = setDarwinPersonalDirect(ctx, run); e != nil {
+			if managed {
+				if e = openDarwinBasePaths(ctx, run, current, observed, intent); e != nil {
 					return e
 				}
 			}

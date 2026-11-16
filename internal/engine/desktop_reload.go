@@ -1,12 +1,13 @@
-//go:build windows
+//go:build darwin || windows
 
 package engine
 
 import (
 	"errors"
 	"net/url"
-	"netlaunch/internal/policy"
 	"strings"
+
+	"netlaunch/internal/policy"
 )
 
 type desktopReloadControl struct {
@@ -71,18 +72,47 @@ func closeDesktopEgress(config map[string]any, c desktopReloadControl) error {
 	return nil
 }
 
-// Existing personal/direct connections and every group stay closed until the new resolver
-// configuration and its DNS cache flush have succeeded. The pinned Windows core
-// retains the same fake-IP pool; flushing it would reuse addresses still held by
-// clients. Missing core
-// capabilities leave the transition closed and cause owned recovery.
-func applyDesktopConfig(config map[string]any, path string, direct bool, c desktopReloadControl) error {
+func addDesktopPhysicalGate(config map[string]any) error {
+	var physical map[string]any
+	for _, raw := range config["proxies"].([]any) {
+		if proxy, ok := raw.(map[string]any); ok && proxy["name"] == "PHYSICAL" {
+			if physical != nil || proxy["type"] != "direct" {
+				return errors.New("ambiguous physical egress")
+			}
+			physical = proxy
+		}
+	}
+	if physical == nil {
+		return errors.New("physical egress is missing")
+	}
+	physical["name"] = "PHYSICAL-BOUND"
+	config["proxy-groups"] = append(config["proxy-groups"].([]any), map[string]any{
+		"name": "PHYSICAL", "type": "select", "proxies": []string{"REJECT", "PHYSICAL-BOUND"},
+	})
+	return nil
+}
+
+func gateDesktopConfig(c desktopReloadControl) error {
 	for _, group := range []string{"PHYSICAL", "PERSONAL", "CORP"} {
 		if err := c.selectGroup(group, "REJECT"); err != nil {
 			return err
 		}
 	}
-	if err := closeDesktopEgress(config, c); err != nil {
+	return nil
+}
+
+// Keep the groups closed until the caller has confirmed the new resolver and
+// native networking state. Flush real DNS answers, leaving the patched fake-IP
+// allocator and the synthetic addresses already held by clients intact.
+func prepareDesktopConfig(config, previous map[string]any, path string, c desktopReloadControl) error {
+	if err := gateDesktopConfig(c); err != nil {
+		return err
+	}
+	return replaceGatedDesktopConfig(config, previous, path, c)
+}
+
+func replaceGatedDesktopConfig(config, previous map[string]any, path string, c desktopReloadControl) error {
+	if err := closeDesktopEgress(previous, c); err != nil {
 		return err
 	}
 	if err := c.save(config); err != nil {
@@ -91,19 +121,25 @@ func applyDesktopConfig(config map[string]any, path string, direct bool, c deskt
 	if err := c.request("PUT", "/configs?force=true", map[string]string{"path": path}, nil); err != nil {
 		return err
 	}
-	for _, group := range []string{"PHYSICAL", "PERSONAL", "CORP"} {
-		if err := c.selectGroup(group, "REJECT"); err != nil {
-			return err
-		}
-	}
-	if err := c.request("POST", "/cache/dns/flush", nil, nil); err != nil {
+	if err := gateDesktopConfig(c); err != nil {
 		return err
 	}
-	if err := c.selectGroup("PHYSICAL", "PHYSICAL-BOUND"); err != nil {
+	return c.request("POST", "/cache/dns/flush", nil, nil)
+}
+
+func openDesktopConfig(selectGroup func(group, target string) error, direct bool) error {
+	if err := selectGroup("PHYSICAL", "PHYSICAL-BOUND"); err != nil {
 		return err
 	}
 	if direct {
-		return c.selectGroup("PERSONAL", "PHYSICAL")
+		return selectGroup("PERSONAL", "PHYSICAL")
 	}
 	return nil
+}
+
+func applyDesktopConfig(config map[string]any, path string, direct bool, c desktopReloadControl) error {
+	if err := prepareDesktopConfig(config, config, path, c); err != nil {
+		return err
+	}
+	return openDesktopConfig(c.selectGroup, direct)
 }
