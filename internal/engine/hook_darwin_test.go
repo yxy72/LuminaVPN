@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -130,5 +131,32 @@ func TestDarwinGuardBlocksDanglingStopMarker(t *testing.T) {
 	}
 	if err := guard(run, &State{Phase: "ready"}); err == nil {
 		t.Fatal("invalid STOP marker authorized native mutation")
+	}
+}
+
+func TestDarwinVPNStopOnlyRetiresOwnedCompanyRoutes(t *testing.T) {
+	state := State{
+		Manifest: Manifest{Config: policy.Config{VPN: policy.VPN{EndpointIPv4: "203.0.113.2"}}},
+		Routes: []OwnedRoute{
+			{Route: platform.Route{Prefix: "203.0.113.2/32"}, State: "applied"},
+			{Route: platform.Route{Prefix: "203.0.113.3/32"}, State: "applied"},
+			{Route: platform.Route{Prefix: "192.0.2.53/32", Scoped: true}, State: "applied"},
+			{Route: platform.Route{Prefix: "192.0.2.54/32", Scoped: true}, State: "removed"},
+			{Route: platform.Route{Prefix: "192.0.2.55/32", Scoped: true}, State: "planned"},
+		},
+	}
+	var attempted []int
+	if err := retireDarwinCompanyRoutes(&state, func(index int) error {
+		attempted = append(attempted, index)
+		state.Routes[index].State = "removed"
+		return nil
+	}); err != nil || !slices.Equal(attempted, []int{4, 2, 0}) {
+		t.Fatalf("retired unexpected company routes: %v, %v", attempted, err)
+	}
+	if err := retireDarwinCompanyRoutes(&state, func(int) error {
+		t.Fatal("repeat stop attempted to retire routes again")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }

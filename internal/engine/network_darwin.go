@@ -113,7 +113,8 @@ func endpoint(run string, network platform.Network) error {
 		}
 		r := platform.Route{Prefix: s.Manifest.Config.VPN.EndpointIPv4 + "/32", Gateway: network.Gateway, Interface: network.Interface}
 		for i, old := range s.Routes {
-			if !old.Route.Scoped && old.State != "removed" && (old.Route.Interface != r.Interface || old.Route.Gateway != r.Gateway) {
+			if !old.Route.Scoped && old.Route.Prefix == r.Prefix && old.State != "removed" &&
+				(old.Route.Interface != r.Interface || old.Route.Gateway != r.Gateway) {
 				if e := removeRoute(run, s, i); e != nil {
 					return e
 				}
@@ -121,6 +122,32 @@ func endpoint(run string, network platform.Network) error {
 		}
 		return ensureRoute(run, s, r)
 	})
+}
+
+func rebindDarwinVPNEndpoint(run string, s State, network platform.Network) error {
+	child, found := latestVPN(s)
+	if !found || !child.Released || child.DarwinVPNRetired {
+		return nil
+	}
+	ok, err := alive(child)
+	if err != nil || !ok {
+		return err
+	}
+	return endpoint(run, network)
+}
+
+func retireDarwinCompanyRoutes(s *State, remove func(int) error) error {
+	endpoint := s.Manifest.Config.VPN.EndpointIPv4 + "/32"
+	for i := len(s.Routes) - 1; i >= 0; i-- {
+		route := s.Routes[i]
+		if route.State == "removed" || (!route.Route.Scoped && route.Route.Prefix != endpoint) {
+			continue
+		}
+		if err := remove(i); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func hook(run string) error {

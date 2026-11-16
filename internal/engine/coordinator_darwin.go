@@ -223,9 +223,6 @@ func serve(run string) (returned error) {
 	}()
 	exits := &childExitTracker{}
 	if intent.Company {
-		if e = endpoint(run, network); e != nil {
-			return e
-		}
 		vpnChild, e := startVPN(run, exits)
 		if e != nil {
 			return e
@@ -470,7 +467,7 @@ func serve(run string) (returned error) {
 				return e
 			}
 			if intent.Company {
-				if e = endpoint(run, observed); e != nil {
+				if e = rebindDarwinVPNEndpoint(run, current, observed); e != nil {
 					return e
 				}
 			}
@@ -654,6 +651,9 @@ func startVPN(run string, exits *childExitTracker) (Child, error) {
 	if e = requireVPNAuthentication(a, s.Manifest.Config.VPN, time.Now()); e != nil {
 		return Child{}, e
 	}
+	if e = endpoint(run, s.Manifest.Network); e != nil {
+		return Child{}, e
+	}
 	u, _ := url.Parse(s.Manifest.Config.VPN.Server)
 	hookPath := filepath.Join(private(run), "vpn-hook")
 	script := "#!/bin/sh\nexec " + shellQuote(s.Manifest.Executable) + " _hook --run " + shellQuote(run) + "\n"
@@ -697,14 +697,7 @@ func stopVPN(run string, company *companyRuntime) error {
 		if e := guard(run, s); e != nil {
 			return e
 		}
-		for i, route := range s.Routes {
-			if route.Route.Scoped && route.State != "removed" {
-				if e := removeRoute(run, s, i); e != nil {
-					return e
-				}
-			}
-		}
-		return nil
+		return retireDarwinCompanyRoutes(s, func(i int) error { return removeRoute(run, s, i) })
 	})
 }
 
