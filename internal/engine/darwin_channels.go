@@ -60,6 +60,25 @@ func darwinChannelInputs(run string, m Manifest) ([]policy.Node, auth.Session, e
 	return nodes, session, nil
 }
 
+func frozenDarwinPersonalPool(run string, m Manifest, nodes []policy.Node) []policy.Node {
+	intent := m.InitialChannels()
+	if m.Mode == "" || intent.Personal {
+		return nodes
+	}
+	if err := readJSON(filepath.Join(run, "nodes.json"), &nodes); err != nil {
+		return nil
+	}
+	nodes, err := policy.SanitizeNodes(nodes)
+	if err != nil || len(nodes) == 0 {
+		return nil
+	}
+	intent.Personal = true
+	if m.Config.ValidateForIntent(intent) != nil || policy.ValidateEndpointsForIntent(m.Config, nodes, intent) != nil {
+		return nil
+	}
+	return nodes
+}
+
 func freezeDarwinChannelInputs(run string, m Manifest) ([]policy.Node, error) {
 	nodes, session, err := darwinChannelInputs(run, m)
 	if err != nil {
@@ -72,7 +91,8 @@ func freezeDarwinChannelInputs(run string, m Manifest) ([]policy.Node, error) {
 		}
 		_ = os.Remove(filepath.Join(run, "auth.json"))
 	}
-	if intent.Personal {
+	nodes = frozenDarwinPersonalPool(run, m, nodes)
+	if len(nodes) != 0 {
 		if err := securefile.Write(filepath.Join(private(run), "nodes.json"), nodes); err != nil {
 			return nil, err
 		}

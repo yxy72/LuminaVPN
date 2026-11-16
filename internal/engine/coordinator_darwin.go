@@ -19,6 +19,7 @@ import (
 
 	"netlaunch/internal/auth"
 	"netlaunch/internal/platform"
+	"netlaunch/internal/policy"
 	"netlaunch/internal/runtimebundle"
 	"netlaunch/internal/securefile"
 	"netlaunch/internal/selector"
@@ -134,9 +135,13 @@ func serve(run string) (returned error) {
 			return e
 		}
 	}
-	nodes, e := freezeDarwinChannelInputs(run, s.Manifest)
+	frozenNodes, e := freezeDarwinChannelInputs(run, s.Manifest)
 	if e != nil {
 		return e
+	}
+	var nodes []policy.Node
+	if intent.Personal {
+		nodes = frozenNodes
 	}
 	network, e := platform.Discover()
 	if e != nil || network != s.Manifest.Network {
@@ -174,7 +179,7 @@ func serve(run string) (returned error) {
 		}
 	}
 	var company *companyRuntime
-	if darwinCanRetainCompany(s.Manifest, nodes) {
+	if darwinCanRetainCompany(s.Manifest, frozenNodes) {
 		company, e = startCompany(ctx, run)
 		if e != nil && intent.Company {
 			return e
@@ -349,12 +354,17 @@ func serve(run string) (returned error) {
 	}); e != nil {
 		return e
 	}
-	if s.Manifest.Mode != "" && company != nil {
+	if managed && (company != nil || len(frozenNodes) != 0) {
 		if e = update(run, func(s *State) error {
 			if err := checkDarwinCompanyOwner(run, *s); err != nil {
 				return err
 			}
-			s.DarwinCompany = &darwinCompanyControl{}
+			if company != nil {
+				s.DarwinCompany = &darwinCompanyControl{}
+			}
+			if len(frozenNodes) != 0 {
+				s.DarwinPersonal = &darwinPersonalControl{}
+			}
 			return nil
 		}); e != nil {
 			return e
@@ -405,6 +415,27 @@ func serve(run string) (returned error) {
 			if e != nil {
 				return e
 			}
+		}
+		if current.DarwinPersonal != nil && current.DarwinPersonal.Pending {
+			sampling.close()
+			updated, next, e := applyPendingDarwinPersonalChange(ctx, run, current, company, verification, frozenNodes, secret)
+			if errors.Is(e, errDarwinPersonalRequestCanceled) || errors.Is(e, errDarwinPersonalPreflight) {
+				continue
+			}
+			if e != nil {
+				return e
+			}
+			intent, verification = updated, next
+			nodes = nil
+			if intent.Personal {
+				nodes = frozenNodes
+			}
+			names = candidateNames(nodes)
+			selection = selector.New(names)
+			boundChecks.reset()
+			systemChecks.reset()
+			lastHealth = time.Time{}
+			continue
 		}
 		epoch, e := platform.WakeEpoch()
 		if e != nil {
@@ -525,13 +556,16 @@ func serve(run string) (returned error) {
 			binding.Physical = observed.Interface
 			manifest := current.Manifest
 			manifest.Binding = binding
+			if managed {
+				manifest.Channels = &intent
+			}
 			config, e = darwinCoreConfig(manifest, nodes, secret, company, verification)
 			if e != nil {
 				return e
 			}
 			config["tun"].(map[string]any)["enable"] = true
 			if managed {
-				if e = prepareDarwinPersonalReload(ctx, run, current, config); e != nil {
+				if e = prepareDarwinPersonalReload(ctx, run, current, config, nil); e != nil {
 					return e
 				}
 			} else {

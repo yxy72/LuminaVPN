@@ -264,7 +264,9 @@ func publicStatus(s State, now time.Time) Status {
 		}
 	}
 	return Status{Phase: phase, Updated: s.Updated, Company: channels["company"].State, Personal: s.Personal, LastReady: s.LastReady, Error: s.Error, RecoveryReason: s.RecoveryReason, Experimental: true, Channels: channels, Lifecycle: lifecycle, DesiredChannels: s.DesiredChannels, AppliedChannels: s.AppliedChannels, ChannelGeneration: s.ChannelGeneration, AppliedGeneration: s.AppliedGeneration, TakeoverActive: s.TakeoverActive, PersonalFallback: s.PersonalFallback,
-		DarwinCompanyControl: lifecycle == "running" && s.DarwinCompany != nil && !s.DarwinCompany.Pending}
+		DarwinCompanyControl: lifecycle == "running" && s.DarwinCompany != nil && !s.DarwinCompany.Pending && (s.DarwinPersonal == nil || !s.DarwinPersonal.Pending),
+		DarwinPersonalControl: lifecycle == "running" && s.TakeoverActive && s.DarwinPersonal != nil && !s.DarwinPersonal.Pending &&
+			s.ChannelGeneration != 0 && s.AppliedGeneration == s.ChannelGeneration && (s.DarwinCompany == nil || !s.DarwinCompany.Pending)}
 }
 
 func personalUnavailable(s *State, reason string) {

@@ -29,14 +29,15 @@ type DarwinDesktopCompanyRequest struct {
 func DarwinCompanyPermitName(id string) string { return "company-permit-" + id }
 
 func darwinCompanyPermit(run, id string) bool {
-	if !serviceprotocol.ValidID(id) {
-		return false
-	}
-	info, err := os.Lstat(filepath.Join(run, DarwinCompanyPermitName(id)))
+	return serviceprotocol.ValidID(id) && darwinLockedPermit(filepath.Join(run, DarwinCompanyPermitName(id)))
+}
+
+func darwinLockedPermit(path string) bool {
+	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || info.Size() != 0 {
 		return false
 	}
-	f, err := os.Open(filepath.Join(run, DarwinCompanyPermitName(id)))
+	f, err := os.Open(path)
 	if err != nil {
 		return false
 	}

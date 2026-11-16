@@ -109,7 +109,7 @@ func prepareDarwinPersonalConfig(config, previous map[string]any, path string, c
 	return closeDesktopEgress(previous, c)
 }
 
-func prepareDarwinPersonalReload(ctx context.Context, run string, before State, config map[string]any) error {
+func prepareDarwinPersonalReload(ctx context.Context, run string, before State, config map[string]any, authorize func(State) error) error {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	check := func() error {
@@ -129,6 +129,9 @@ func prepareDarwinPersonalReload(ctx context.Context, run string, before State, 
 			state.AppliedGeneration != state.ChannelGeneration || state.AppliedChannels == nil || *state.AppliedChannels != intent ||
 			intent != currentIntent(before) {
 			return errors.New("macOS resolver reload no longer belongs to the active run")
+		}
+		if authorize != nil {
+			return authorize(state)
 		}
 		return nil
 	}
