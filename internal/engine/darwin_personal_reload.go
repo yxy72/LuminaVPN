@@ -17,8 +17,8 @@ import (
 // This derivation keeps fake-IP mappings across reloads and owns fallback lease expiry.
 func requireDarwinReloadCore(root string) error {
 	const (
-		version = "v1.19.32-lumina.2"
-		digest  = "ee9a38c416bd18b73a6aee05268163463bc846ffbcc0631508a266c9f008ed03"
+		version = "v1.19.32-lumina.3"
+		digest  = "021ed3a3d46eee0433a42187d6c09fa5b51b1c20850e123fc5404310656d01df"
 	)
 	bundle, err := runtimebundle.Verify(root)
 	if err != nil {
