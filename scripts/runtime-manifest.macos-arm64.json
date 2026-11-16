@@ -2,7 +2,7 @@
   "version": 1,
   "os": "darwin",
   "arch": "arm64",
-  "mihomo_version": "v1.19.32",
+  "mihomo_version": "v1.19.32-lumina.1",
   "openconnect_version": "9.21",
   "files": [
     {
@@ -11,7 +11,7 @@
     },
     {
       "path": "bin/mihomo",
-      "sha256": "df88b4ca06a8d3611c23d924c15234de3df90d3603d0a98e7acfb9b7765b9e2a"
+      "sha256": "ee1bf200325a33655bb11bdb7a056ceead0ea2aca51755629659bd797fbdd9ac"
     },
     {
       "path": "lib/libcrypto.3.dylib",

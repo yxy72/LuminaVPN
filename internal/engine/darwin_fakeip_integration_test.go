@@ -82,13 +82,32 @@ func serveFakeIPFixtureDNS(t *testing.T, resolver *net.UDPConn) {
 	})
 }
 
-func TestDarwinPinnedCoreReusesAssignedFakeIPOnResolverReload(t *testing.T) {
+func TestDarwinPinnedCorePreservesFakeIPAcrossReloadAndPersonalDirect(t *testing.T) {
 	root := os.Getenv("NETLAUNCH_TEST_RUNTIME")
 	if root == "" {
 		t.Skip("set NETLAUNCH_TEST_RUNTIME for the pinned core fixture")
 	}
-	if _, err := runtimebundle.Verify(root); err != nil {
+	manifest, err := runtimebundle.Verify(root)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if manifest.Mihomo != "v1.19.32-lumina.1" {
+		t.Fatalf("expected the pinned macOS Mihomo derivative, got %q", manifest.Mihomo)
+	}
+	testDarwinFakeIPContinuity(t, filepath.Join(root, "bin", "mihomo"), true)
+}
+
+func TestDarwinLegacyCoreReusesAssignedFakeIPOnResolverReload(t *testing.T) {
+	root := os.Getenv("NETLAUNCH_TEST_MAC_LEGACY_RUNTIME")
+	if root == "" {
+		t.Skip("set NETLAUNCH_TEST_MAC_LEGACY_RUNTIME to reproduce the legacy allocator defect")
+	}
+	manifest, err := runtimebundle.Verify(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Mihomo != "v1.19.32" {
+		t.Fatalf("expected the original macOS Mihomo bundle, got %q", manifest.Mihomo)
 	}
 	testDarwinFakeIPContinuity(t, filepath.Join(root, "bin", "mihomo"), false)
 }

@@ -26,11 +26,11 @@ npm run dev
 npm run package:mac
 ```
 
-Go 不在 PATH 时，通过 `NETLAUNCH_GO` 指定构建工具。构建只读取固定 runtime；Windows 客户端须在 Windows x64 原生构建，以 `LUMINA_BUILD_RUNTIME` 指向符合 Windows 清单的 runtime，在 `desktop/` 执行 `npm run package:win` 或 `npm run package:win:validation`。输出位于已忽略的 `.local/windows-client-packages/`。两个模式都固定为全机安装，打包时校验三个 Go 程序、运行组件、后台安装接口与包内字节；当前为未签名开发包。本机安装预检未通过时，完整有效的接口观测仍可用于构建，但会明确告警，并在包外保存 `build-host-readiness.json`；构建成功不表示本机可安装。实际安装器会重新执行原生预检，失败时仍在续办和旧卸载之前退出。这些变量仅用于构建，发货应用不接受执行路径或页面 URL 覆盖。Windows 使用的规则核心补丁和重建输入见 `scripts/patches/`。
+Go 不在 PATH 时，通过 `NETLAUNCH_GO` 指定构建工具。Mac 构建读取仓库的 `runtime/`，也可通过 `LUMINA_BUILD_RUNTIME` 指向独立的已验证组件目录。两种方式都校验固定 Mac 清单。Windows 客户端须在 Windows x64 原生构建，以 `LUMINA_BUILD_RUNTIME` 指向符合 Windows 清单的 runtime，在 `desktop/` 执行 `npm run package:win` 或 `npm run package:win:validation`。输出位于已忽略的 `.local/windows-client-packages/`。两个模式都固定为全机安装，打包时校验三个 Go 程序、运行组件、后台安装接口与包内字节；当前为未签名开发包。本机安装预检未通过时，完整有效的接口观测仍可用于构建，但会明确告警，并在包外保存 `build-host-readiness.json`；构建成功不表示本机可安装。实际安装器会重新执行原生预检，失败时仍在续办和旧卸载之前退出。这些变量仅用于构建，发货应用不接受执行路径或页面 URL 覆盖。Mac 和 Windows 使用同一 Mihomo fake-IP 地址池补丁，重建脚本见 `scripts/patches/`。 组装独立的 Mac 组件目录时，从现有目录复制 OpenConnect、其动态库和许可证，将 `rebuild-mihomo-macos.py` 的产物放到 `bin/mihomo`，再将固定 Mac 清单复制为 `manifest.json`。
 
 `npm run test:electron` 使用虚构配置检查桌面行为，并在本机实包存在时验证打包资源和窗口崩溃恢复。Windows 默认检查 `win-unpacked/LuminaVPN.exe`；验证已安装程序时，可将 `LUMINA_TEST_WINDOWS_EXE` 设为该程序的绝对路径。测试仅为新建的配置对象设置私有权限。
 
-Mac `.app` 输出到已忽略的 `.local/desktop-packages/mac-arm64/`。使用 `scripts/check-desktop-package.py APP_PATH` 检查 ASAR 内容、运行组件摘要和恢复资源。`npm run sign:preview:mac` 验证运行组件签名并对 Electron 包做本地 ad hoc 签名；正式分发需要另行签名和公证。关闭窗口隐藏到菜单栏。停止操作会通知本机看门狗并显示保存的状态。明确退出时，如果选中的配置仍需恢复确认，界面会等待本次运行的管理员恢复回执。
+Mac `.app` 支持 macOS 13 及以上的 Apple Silicon，输出到已忽略的 `.local/desktop-packages/mac-arm64/`。使用 `scripts/check-desktop-package.py APP_PATH` 检查 ASAR 内容、运行组件摘要和恢复资源。`npm run sign:preview:mac` 验证运行组件签名并对 Electron 包做本地 ad hoc 签名；正式分发需要另行签名和公证。关闭窗口隐藏到菜单栏。停止操作会通知本机看门狗并显示保存的状态。明确退出时，如果选中的配置仍需恢复确认，界面会等待本次运行的管理员恢复回执。
 
 ## 网络规则
 
@@ -218,7 +218,7 @@ Mac 可用 `./netlaunch diagnostics export > diagnostics.public.json`。诊断�
 
 `exporter_build` 是执行导出命令的程序版本，可能不同于当前运行中冻结的程序；`scope: saved_status` 与 `runtime_liveness: not_checked` 表示它没有查询后台进程、主动探测网络或验证恢复是否完成。`snapshot_age_seconds` 仅表示快照年龄，不能作为卡住的判据。诊断导出不调用 doctor、读取配置/日志或尝试联网；原始 `status`、`plan`、`doctor` 输出与私有运行目录不享有相同的分享约束。
 
-Go 最低版本为 1.26；本机开发工具链可以放在已忽略的 `.tools/`。`scripts/package-macos.sh` 从本地 `runtime/` 打包已固定的 Mac arm64 组件，运行组件版本及校验值在 `scripts/runtime-manifest.macos-arm64.json`。归档只收录明确列出的程序、公共示例、许可与入口脚本。Windows 交叉打包脚本默认读取 `.local/windows-runtime/`，也可通过 `NETLAUNCH_WINDOWS_RUNTIME` 指定组件目录；对应固定清单为 `scripts/runtime-manifest.windows-amd64.json`。`NETLAUNCH_WINDOWS_MODE=offline|home|validation` 选择构建模式，默认 offline；包名包含模式。两端包名从同一版本常量生成，不再各自手改版本。
+Go 最低版本为 1.26；本机开发工具链可以放在已忽略的 `.tools/`。`scripts/package-macos.sh` 打包固定的 Mac arm64 组件。默认读取本地 `runtime/`，也可在构建时设置 `LUMINA_BUILD_RUNTIME` 指向另一套组件。该目录的清单必须与 `scripts/runtime-manifest.macos-arm64.json` 一致，打包先运行本地回环检查。归档只收录明确列出的程序、公共示例、许可与入口脚本。Windows 交叉打包脚本默认读取 `.local/windows-runtime/`，也可通过 `NETLAUNCH_WINDOWS_RUNTIME` 指定组件目录；对应固定清单为 `scripts/runtime-manifest.windows-amd64.json`。`NETLAUNCH_WINDOWS_MODE=offline|home|validation` 选择构建模式，默认 offline；包名包含模式。两端包名从同一版本常量生成，不再各自手改版本。
 
 Windows 底层 `platform.BoundDial` 使用 `IP_UNICAST_IF` 建立指定网卡的 TCP/IPv4 连接。它只接受数字 IPv4 地址，绑定失败不会退回默认网卡；创建路由、识别 VPN 连接代次和安装保护规则由上层生命周期负责。Windows `auth` 已接入本机控制台和会话缓存，运行包包含 OpenConnect、DLL、Wintun 以及 `certs/ca-bundle.crt` 的完整校验组件。普通构建的 `up/down` 保持关闭，home/validation 构建开放有限时长生命周期。
 
