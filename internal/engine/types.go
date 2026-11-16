@@ -82,6 +82,7 @@ type State struct {
 	DesiredChannels           *policy.ChannelIntent    `json:"desired_channels,omitempty"`
 	ChannelGeneration         uint64                   `json:"channel_generation,omitempty"`
 	PersonalFallback          bool                     `json:"personal_fallback,omitempty"`
+	PersonalFallbackUntil     *time.Time               `json:"personal_fallback_until,omitempty"`
 	AppliedChannels           *policy.ChannelIntent    `json:"applied_channels,omitempty"`
 	AppliedGeneration         uint64                   `json:"applied_generation,omitempty"`
 	TakeoverActive            bool                     `json:"takeover_active,omitempty"`
