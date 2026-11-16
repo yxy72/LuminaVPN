@@ -1,7 +1,5 @@
-//go:build windows
-
-// Package personalroute decides whether Windows may use the direct personal
-// exit. It does not change a selector, DNS, routes, or company authorization.
+// Package personalroute evaluates whether the personal channel may use a
+// direct exit. The caller applies the decision to its native routing state.
 package personalroute
 
 import (

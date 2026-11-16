@@ -5,7 +5,7 @@ package engine
 import (
 	"context"
 	"errors"
-	"net/url"
+	"netlaunch/internal/personalroute"
 	"netlaunch/internal/policy"
 	"netlaunch/internal/selector"
 	"time"
@@ -52,41 +52,16 @@ func measurePersonal(ctx context.Context, run string, names, probes []string) ma
 }
 
 func measurePersonalWith(ctx context.Context, names, probes []string, request func(context.Context, string, any) error) map[string]int {
-	return sampleNodes(ctx, names, 6*time.Second, 8, func(ctx context.Context, n string) (int, bool) {
-		unknown := len(probes) == 0
-		for _, u := range probes {
-			started := time.Now()
-			var d struct {
-				Delay *int `json:"delay"`
-			}
-			// Rank network paths only. Selected ingress verifies service expectations
-			// separately, so a business outage does not cause node cooldown/churn.
-			q := url.Values{"url": {u}, "timeout": {"3000"}, "expected": {"200-599"}}
-			if err := request(ctx, "/proxies/"+url.PathEscape(n)+"/delay?"+q.Encode(), &d); err != nil {
-				if ctx.Err() != nil {
-					return 0, false
-				}
-				if !delayTargetFailure(err) {
-					unknown = true
-				}
-				continue
-			}
-			var details struct {
-				Extra map[string]selector.ProbeState `json:"extra"`
-			}
-			if request(ctx, "/proxies/"+url.PathEscape(n), &details) != nil {
-				return 0, false
-			}
-			ms, known := selector.ObservedDelay(started, time.Now(), d.Delay, details.Extra[u])
-			if !known {
-				unknown = true
-				continue
-			}
-			if ms >= 0 {
-				return ms, true
-			}
+	return sampleNodes(ctx, names, 6*time.Second, 8, func(ctx context.Context, name string) (int, bool) {
+		sample := independentNode(ctx, name, "", "", personalroute.Generation{}, probes, request)
+		switch sample.Observation.Outcome {
+		case personalroute.Healthy:
+			return sample.Latency, true
+		case personalroute.PathFailed:
+			return -1, true
+		default:
+			return 0, false
 		}
-		return -1, ctx.Err() == nil && !unknown
 	})
 }
 
