@@ -11,7 +11,15 @@ import (
 	"netlaunch/internal/selector"
 )
 
-const personalVerificationSlices = 3
+const minimumPersonalVerificationSlices = 3
+
+func (s *probeSchedule) personalVerificationSliceLimit() int {
+	// Allow one complete pass even when the configured targets exceed the
+	// three-slice retry budget for small lists. The caller's deadline still
+	// bounds wall-clock time, and each slice retains its worker limit.
+	coverage := (len(s.probes) + s.parallel - 1) / s.parallel
+	return max(minimumPersonalVerificationSlices, coverage)
+}
 
 // Only the coordinator changes either group. The candidate may advance over
 // several ticks without changing the previously verified live selection.
@@ -128,7 +136,7 @@ func (v *personalVerification) advance(ctx context.Context, run string, before S
 	}
 	h, failure := v.candidate.aggregate("personal", candidateListener, time.Now())
 	if h.State != "ready" || err != nil {
-		if err == nil && failure == nil && v.slices < personalVerificationSlices {
+		if err == nil && failure == nil && v.slices < v.candidate.personalVerificationSliceLimit() {
 			return nil
 		}
 		notePersonalProbeFailure(p, node, failure)
@@ -217,7 +225,7 @@ func (v *personalVerification) confirmMixed(ctx context.Context, run string, bef
 	v.mixed.reset()
 	v.mixed.bind(scope, probes)
 	var failure error
-	for i := 0; i < personalVerificationSlices && work.Err() == nil; i++ {
+	for i := 0; i < v.mixed.personalVerificationSliceLimit() && work.Err() == nil; i++ {
 		if err := pulse(run); err != nil {
 			return err
 		}
