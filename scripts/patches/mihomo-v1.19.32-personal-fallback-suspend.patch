@@ -1,0 +1,578 @@
+diff --git a/adapter/outboundgroup/lumina_fallback_clock_darwin.go b/adapter/outboundgroup/lumina_fallback_clock_darwin.go
+new file mode 100644
+--- /dev/null
++++ b/adapter/outboundgroup/lumina_fallback_clock_darwin.go
+@@ -0,0 +1,16 @@
++package outboundgroup
++
++import (
++	"time"
++
++	"golang.org/x/sys/unix"
++)
++
++// Unlike Go's Darwin timer clock, CLOCK_MONOTONIC_RAW includes system sleep.
++func fallbackMonotonicNow() time.Duration {
++	var stamp unix.Timespec
++	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC_RAW, &stamp); err != nil {
++		return 0
++	}
++	return time.Duration(stamp.Nano())
++}
+diff --git a/adapter/outboundgroup/lumina_fallback_clock_other.go b/adapter/outboundgroup/lumina_fallback_clock_other.go
+new file mode 100644
+--- /dev/null
++++ b/adapter/outboundgroup/lumina_fallback_clock_other.go
+@@ -0,0 +1,11 @@
++//go:build !darwin
++
++package outboundgroup
++
++import "time"
++
++var fallbackClockEpoch = time.Now()
++
++func fallbackMonotonicNow() time.Duration {
++	return time.Since(fallbackClockEpoch) + 1
++}
+diff --git a/adapter/outboundgroup/lumina_fallback_control.go b/adapter/outboundgroup/lumina_fallback_control.go
+--- a/adapter/outboundgroup/lumina_fallback_control.go
++++ b/adapter/outboundgroup/lumina_fallback_control.go
+@@ -17,7 +17,12 @@
+ 	ErrLuminaFallbackUnsupported = errors.New("automatic fallback lease is not configured")
+ )
+ 
+-const maxLuminaFallback = 45 * time.Second
++const (
++	maxLuminaFallback = 45 * time.Second
++	// Use a short check for idle socket cleanup after suspend. The Go timer
++	// can stop during sleep; I/O and control always consult the native clock.
++	fallbackTimerInterval = 250 * time.Millisecond
++)
+ 
+ type LuminaFallbackRequest struct {
+ 	Revision   string `json:"revision"`
+@@ -37,10 +42,11 @@
+ type fallbackControl struct {
+ 	reject     C.Proxy
+ 	physical   C.Proxy
+-	epoch      time.Time
++	clock      func() time.Duration
++	epoch      time.Duration
+ 	instance   string
+ 	revision   uint64
+-	deadline   time.Time
++	deadline   time.Duration
+ 	deadlineMS int64
+ 	retired    bool
+ 	lease      *fallbackLease
+@@ -52,16 +58,24 @@
+ 	if _, err := rand.Read(identity[:]); err != nil {
+ 		return nil, err
+ 	}
+-	return &fallbackControl{epoch: time.Now(), instance: hex.EncodeToString(identity[:])}, nil
++	return newFallbackControlWithClock(fallbackMonotonicNow, hex.EncodeToString(identity[:]))
++}
++
++func newFallbackControlWithClock(clock func() time.Duration, instance string) (*fallbackControl, error) {
++	epoch := clock()
++	if epoch <= 0 {
++		return nil, ErrLuminaFallbackDeadline
++	}
++	return &fallbackControl{clock: clock, epoch: epoch, instance: instance}, nil
+ }
+ 
+ func (f *fallbackControl) token() string {
+ 	return f.instance + "-" + strconv.FormatUint(f.revision, 16)
+ }
+ 
+-func (f *fallbackControl) status(now time.Time) LuminaFallbackStatus {
++func (f *fallbackControl) status(now time.Duration) LuminaFallbackStatus {
+ 	return LuminaFallbackStatus{
+-		Revision: f.token(), NowMS: now.Sub(f.epoch).Milliseconds(), Active: f.lease != nil, DeadlineMS: f.deadlineMS,
++		Revision: f.token(), NowMS: (now - f.epoch).Milliseconds(), Active: f.lease != nil, DeadlineMS: f.deadlineMS,
+ 	}
+ }
+ 
+@@ -80,12 +94,12 @@
+ 		f.lease.revoke()
+ 		f.lease = nil
+ 	}
+-	f.deadline, f.deadlineMS = time.Time{}, 0
++	f.deadline, f.deadlineMS = 0, 0
+ 	s.selected = "REJECT"
+ }
+ 
+-func (s *Selector) applyFallbackExpiry(now time.Time) {
+-	if f := s.fallback; f != nil && f.lease != nil && !now.Before(f.deadline) {
++func (s *Selector) applyFallbackExpiry(now time.Duration) {
++	if f := s.fallback; f != nil && f.lease != nil && (now < f.epoch || now >= f.deadline) {
+ 		s.revokeFallback()
+ 	}
+ }
+@@ -97,11 +111,18 @@
+ 	if f.retired || f.revision != revision || f.lease == nil {
+ 		return
+ 	}
+-	if remaining := time.Until(f.deadline); remaining > 0 {
+-		f.timer = time.AfterFunc(remaining, func() { s.expireFallback(revision) })
++	if now := f.clock(); now >= f.epoch && now < f.deadline {
++		s.scheduleFallbackExpiry(f.deadline-now, revision)
+ 		return
+ 	}
+ 	s.revokeFallback()
++}
++
++func (s *Selector) scheduleFallbackExpiry(remaining time.Duration, revision uint64) {
++	if remaining > fallbackTimerInterval {
++		remaining = fallbackTimerInterval
++	}
++	s.fallback.timer = time.AfterFunc(remaining, func() { s.expireFallback(revision) })
+ }
+ 
+ func (s *Selector) RetireLuminaFallback() {
+@@ -124,8 +145,11 @@
+ 	if f.retired {
+ 		return LuminaFallbackStatus{}, ErrLuminaFallbackConflict
+ 	}
+-	now := time.Now()
++	now := f.clock()
+ 	s.applyFallbackExpiry(now)
++	if now < f.epoch {
++		return LuminaFallbackStatus{}, ErrLuminaFallbackDeadline
++	}
+ 	return f.status(now), nil
+ }
+ 
+@@ -136,18 +160,21 @@
+ 	if f == nil {
+ 		return LuminaFallbackStatus{}, ErrLuminaFallbackUnsupported
+ 	}
+-	now := time.Now()
++	now := f.clock()
+ 	s.applyFallbackExpiry(now)
++	if now < f.epoch {
++		return LuminaFallbackStatus{}, ErrLuminaFallbackDeadline
++	}
+ 	if f.retired || r.Revision != f.token() {
+ 		return LuminaFallbackStatus{}, ErrLuminaFallbackConflict
+ 	}
+ 	// Validate the offset before multiplication and compare the exact deadline
+ 	// in monotonic time. A large positive or signed offset cannot wrap.
+-	if r.DeadlineMS <= 0 || r.DeadlineMS > math.MaxInt64/int64(time.Millisecond) {
+-		return LuminaFallbackStatus{}, ErrLuminaFallbackDeadline
+-	}
+-	deadline := f.epoch.Add(time.Duration(r.DeadlineMS) * time.Millisecond)
+-	if remaining := deadline.Sub(now); remaining <= 0 || remaining > maxLuminaFallback {
++	if r.DeadlineMS <= 0 || r.DeadlineMS > (math.MaxInt64-int64(f.epoch))/int64(time.Millisecond) {
++		return LuminaFallbackStatus{}, ErrLuminaFallbackDeadline
++	}
++	deadline := f.epoch + time.Duration(r.DeadlineMS)*time.Millisecond
++	if deadline <= now || deadline-now > maxLuminaFallback {
+ 		return LuminaFallbackStatus{}, ErrLuminaFallbackDeadline
+ 	}
+ 
+@@ -156,13 +183,13 @@
+ 		if f.lease != nil {
+ 			return LuminaFallbackStatus{}, ErrLuminaFallbackConflict
+ 		}
+-		f.lease = newFallbackLease(deadline)
++		f.lease = newFallbackLease(f.clock, f.epoch, deadline)
+ 	case "renew":
+-		if f.lease == nil || !deadline.After(f.deadline) {
++		if f.lease == nil || deadline <= f.deadline {
+ 			return LuminaFallbackStatus{}, ErrLuminaFallbackConflict
+ 		}
+ 		if !f.lease.renew(deadline) {
+-			s.applyFallbackExpiry(time.Now())
++			s.applyFallbackExpiry(f.clock())
+ 			return LuminaFallbackStatus{}, ErrLuminaFallbackConflict
+ 		}
+ 		f.timer.Stop()
+@@ -172,9 +199,9 @@
+ 	f.revision++
+ 	revision := f.revision
+ 	f.deadline, f.deadlineMS = deadline, r.DeadlineMS
+-	f.timer = time.AfterFunc(time.Until(deadline), func() { s.expireFallback(revision) })
++	s.scheduleFallbackExpiry(deadline-now, revision)
+ 	s.selected = "PHYSICAL"
+-	now = time.Now()
++	now = f.clock()
+ 	s.applyFallbackExpiry(now)
+ 	if f.lease == nil {
+ 		return LuminaFallbackStatus{}, ErrLuminaFallbackDeadline
+diff --git a/adapter/outboundgroup/lumina_fallback_lease.go b/adapter/outboundgroup/lumina_fallback_lease.go
+--- a/adapter/outboundgroup/lumina_fallback_lease.go
++++ b/adapter/outboundgroup/lumina_fallback_lease.go
+@@ -8,6 +8,7 @@
+ 	"sync"
+ 	"time"
+ 
++	"github.com/metacubex/mihomo/component/dialer"
+ 	C "github.com/metacubex/mihomo/constant"
+ 	"github.com/metacubex/sing/common/buf"
+ )
+@@ -18,7 +19,9 @@
+ 	mu       sync.Mutex
+ 	live     map[*fallbackUse]io.Closer
+ 	closed   bool
+-	deadline time.Time
++	clock    func() time.Duration
++	epoch    time.Duration
++	deadline time.Duration
+ }
+ 
+ type fallbackUse struct {
+@@ -26,14 +29,22 @@
+ 	cancel context.CancelFunc
+ }
+ 
+-func newFallbackLease(deadline time.Time) *fallbackLease {
+-	return &fallbackLease{live: make(map[*fallbackUse]io.Closer), deadline: deadline}
+-}
+-
+-func (l *fallbackLease) renew(deadline time.Time) bool {
+-	l.mu.Lock()
+-	defer l.mu.Unlock()
+-	if l.closed || !time.Now().Before(l.deadline) {
++func newFallbackLease(clock func() time.Duration, epoch, deadline time.Duration) *fallbackLease {
++	return &fallbackLease{live: make(map[*fallbackUse]io.Closer), clock: clock, epoch: epoch, deadline: deadline}
++}
++
++func (l *fallbackLease) remaining() time.Duration {
++	now := l.clock()
++	if l.closed || now < l.epoch || now >= l.deadline {
++		return 0
++	}
++	return l.deadline - now
++}
++
++func (l *fallbackLease) renew(deadline time.Duration) bool {
++	l.mu.Lock()
++	defer l.mu.Unlock()
++	if l.remaining() == 0 {
+ 		return false
+ 	}
+ 	l.deadline = deadline
+@@ -43,7 +54,7 @@
+ func (l *fallbackLease) authorized() bool {
+ 	l.mu.Lock()
+ 	defer l.mu.Unlock()
+-	return !l.closed && time.Now().Before(l.deadline)
++	return l.remaining() != 0
+ }
+ 
+ func (l *fallbackLease) enter(parent context.Context) (context.Context, *fallbackUse, error) {
+@@ -52,12 +63,19 @@
+ 	}
+ 	l.mu.Lock()
+ 	defer l.mu.Unlock()
+-	if l.closed || !time.Now().Before(l.deadline) {
++	remaining := l.remaining()
++	if remaining == 0 {
+ 		return nil, nil, errFallbackRevoked
+ 	}
+-	ctx, cancel := context.WithDeadline(parent, l.deadline)
++	ctx, cancel := context.WithTimeout(parent, remaining)
+ 	use := &fallbackUse{lease: l, cancel: cancel}
+ 	l.live[use] = nil
++	ctx = dialer.WithFallbackGuard(ctx, func() error {
++		if !l.authorized() {
++			return errFallbackRevoked
++		}
++		return nil
++	})
+ 	return ctx, use, nil
+ }
+ 
+@@ -65,7 +83,7 @@
+ 	l := u.lease
+ 	l.mu.Lock()
+ 	defer l.mu.Unlock()
+-	if _, pending := l.live[u]; !pending || ctx.Err() != nil || !time.Now().Before(l.deadline) {
++	if _, pending := l.live[u]; !pending || ctx.Err() != nil || l.remaining() == 0 {
+ 		return false
+ 	}
+ 	l.live[u] = conn
+@@ -108,6 +126,30 @@
+ 
+ func (c *fallbackTCPConn) Close() error { return c.use.Close() }
+ 
++func (c *fallbackTCPConn) Read(data []byte) (int, error) {
++	if !c.use.lease.authorized() {
++		return 0, errFallbackRevoked
++	}
++	n, err := c.Conn.Read(data)
++	if n > 0 && !c.use.lease.authorized() {
++		return 0, errFallbackRevoked
++	}
++	return n, err
++}
++
++func (c *fallbackTCPConn) ReadBuffer(buffer *buf.Buffer) error {
++	if !c.use.lease.authorized() {
++		return errFallbackRevoked
++	}
++	before := buffer.Len()
++	err := c.Conn.ReadBuffer(buffer)
++	if buffer.Len() > before && !c.use.lease.authorized() {
++		buffer.Truncate(before)
++		return errFallbackRevoked
++	}
++	return err
++}
++
+ func (c *fallbackTCPConn) Write(data []byte) (int, error) {
+ 	if !c.use.lease.authorized() {
+ 		return 0, errFallbackRevoked
+@@ -129,6 +171,31 @@
+ }
+ 
+ func (c *fallbackPacketConn) Close() error { return c.use.Close() }
++
++func (c *fallbackPacketConn) ReadFrom(data []byte) (int, net.Addr, error) {
++	if !c.use.lease.authorized() {
++		return 0, nil, errFallbackRevoked
++	}
++	n, addr, err := c.PacketConn.ReadFrom(data)
++	if addr != nil && !c.use.lease.authorized() {
++		return 0, nil, errFallbackRevoked
++	}
++	return n, addr, err
++}
++
++func (c *fallbackPacketConn) WaitReadFrom() ([]byte, func(), net.Addr, error) {
++	if !c.use.lease.authorized() {
++		return nil, nil, nil, errFallbackRevoked
++	}
++	data, release, addr, err := c.PacketConn.WaitReadFrom()
++	if addr != nil && !c.use.lease.authorized() {
++		if release != nil {
++			release()
++		}
++		return nil, nil, nil, errFallbackRevoked
++	}
++	return data, release, addr, err
++}
+ 
+ func (c *fallbackPacketConn) WriteTo(data []byte, target net.Addr) (int, error) {
+ 	if !c.use.lease.authorized() {
+diff --git a/adapter/outboundgroup/lumina_fallback_lease_test.go b/adapter/outboundgroup/lumina_fallback_lease_test.go
+--- a/adapter/outboundgroup/lumina_fallback_lease_test.go
++++ b/adapter/outboundgroup/lumina_fallback_lease_test.go
+@@ -6,14 +6,17 @@
+ 	"io"
+ 	"net"
+ 	"os"
++	"sync/atomic"
+ 	"testing"
+ 	"time"
+ 
++	"github.com/metacubex/mihomo/component/dialer"
+ 	"github.com/metacubex/sing/common/buf"
+ )
+ 
+ func TestLuminaFallbackRevokesPendingAndEstablishedSockets(t *testing.T) {
+-	lease := newFallbackLease(time.Now().Add(time.Second))
++	now := fallbackMonotonicNow()
++	lease := newFallbackLease(fallbackMonotonicNow, now, now+time.Second)
+ 	pending, pendingUse, err := lease.enter(context.Background())
+ 	if err != nil {
+ 		t.Fatal(err)
+@@ -53,6 +56,7 @@
+ 	}
+ 	selector := &Selector{selected: "REJECT", fallback: control}
+ 	defer selector.RetireLuminaFallback()
++	started := time.Now()
+ 	initial, _ := selector.LuminaFallbackStatus()
+ 	if initial.Active || initial.NowMS < 0 {
+ 		t.Fatal("fallback started open", initial)
+@@ -89,11 +93,11 @@
+ 	}
+ 	// This waits past the initial lease but before the renewal, without
+ 	// contacting the selector. The earliest timer must not close the socket.
+-	_ = peer.SetReadDeadline(control.epoch.Add(300 * time.Millisecond))
++	_ = peer.SetReadDeadline(started.Add(300 * time.Millisecond))
+ 	if _, err := peer.Read(make([]byte, 1)); !errors.Is(err, os.ErrDeadlineExceeded) {
+ 		t.Fatalf("earlier timer closed a renewed socket: %v", err)
+ 	}
+-	_ = peer.SetReadDeadline(control.epoch.Add(3 * time.Second))
++	_ = peer.SetReadDeadline(started.Add(3 * time.Second))
+ 	if _, err := peer.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+ 		t.Fatalf("renewal expiry did not close the socket without controller activity: %v", err)
+ 	}
+@@ -142,7 +146,8 @@
+ 
+ func TestLuminaFallbackDeniesWritesBeforeDelayedTimer(t *testing.T) {
+ 	// A deadline can elapse while the scheduler has yet to deliver its timer.
+-	use := &fallbackUse{lease: newFallbackLease(time.Now().Add(-time.Millisecond))}
++	now := fallbackMonotonicNow()
++	use := &fallbackUse{lease: newFallbackLease(fallbackMonotonicNow, now, now-time.Millisecond)}
+ 	conn := &fallbackTCPConn{use: use}
+ 	packet := &fallbackPacketConn{use: use}
+ 	if _, err := conn.Write([]byte("late")); !errors.Is(err, errFallbackRevoked) {
+@@ -156,3 +161,64 @@
+ 		t.Fatal("a UDP write escaped its deadline", err)
+ 	}
+ }
++
++func TestLuminaFallbackExpiresOnSimulatedSystemSleep(t *testing.T) {
++	var clock atomic.Int64
++	clock.Store(int64(time.Second))
++	now := func() time.Duration { return time.Duration(clock.Load()) }
++	control, err := newFallbackControlWithClock(now, "simulated-sleep")
++	if err != nil {
++		t.Fatal(err)
++	}
++	selector := &Selector{selected: "REJECT", fallback: control}
++	defer selector.RetireLuminaFallback()
++	initial, _ := selector.LuminaFallbackStatus()
++	request := LuminaFallbackRequest{initial.Revision, "open", initial.NowMS + maxLuminaFallback.Milliseconds()}
++	active, err := selector.SetLuminaFallback(request)
++	if err != nil || !active.Active {
++		t.Fatal("could not establish lease", active, err)
++	}
++	selector.selectionMu.Lock()
++	lease := control.lease
++	// Pause the ordinary Go timer to simulate that it is awaiting more
++	// active time, even when the system's sleep-inclusive clock has moved.
++	control.timer.Stop()
++	selector.selectionMu.Unlock()
++	work, pending, err := lease.enter(t.Context())
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer pending.Close()
++	clock.Add(int64(maxLuminaFallback + time.Millisecond))
++	if work.Err() != nil {
++		t.Fatal("simulated sleep unexpectedly expired the Go context", work.Err())
++	}
++	if _, _, err := lease.enter(t.Context()); !errors.Is(err, errFallbackRevoked) {
++		t.Fatal("a new dial after wake retained authorization", err)
++	}
++	sentinel := errors.New("fallback called the physical dialer")
++	_, err = dialer.DialContext(work, "tcp4", "127.0.0.1:1", dialer.WithNetDialer(dialer.NetDialerFunc(
++		func(context.Context, string, string) (net.Conn, error) { return nil, sentinel })))
++	if !errors.Is(err, errFallbackRevoked) {
++		t.Fatal("a pending dial after wake retained authorization", err)
++	}
++	tcp := &fallbackTCPConn{use: pending}
++	udp := &fallbackPacketConn{use: pending}
++	if _, err := tcp.Read(nil); !errors.Is(err, errFallbackRevoked) {
++		t.Fatal("an existing TCP socket remained readable", err)
++	}
++	if _, err := udp.WriteTo(nil, nil); !errors.Is(err, errFallbackRevoked) {
++		t.Fatal("an existing UDP socket remained writable", err)
++	}
++	status, err := selector.LuminaFallbackStatus()
++	if err != nil || status.Active || status.Revision == active.Revision {
++		t.Fatal("old authority survived its elapsed deadline", status, err)
++	}
++	_, err = selector.SetLuminaFallback(LuminaFallbackRequest{active.Revision, "renew", status.NowMS + 1000})
++	if !errors.Is(err, ErrLuminaFallbackConflict) {
++		t.Fatal("a stale request survived wake", err)
++	}
++	if _, err := selector.SetLuminaFallback(LuminaFallbackRequest{status.Revision, "open", request.DeadlineMS}); !errors.Is(err, ErrLuminaFallbackDeadline) {
++		t.Fatal("a pre-sleep deadline was reopened", err)
++	}
++}
+diff --git a/adapter/outboundgroup/selector.go b/adapter/outboundgroup/selector.go
+--- a/adapter/outboundgroup/selector.go
++++ b/adapter/outboundgroup/selector.go
+@@ -5,7 +5,6 @@
+ 	"encoding/json"
+ 	"errors"
+ 	"sync"
+-	"time"
+ 
+ 	C "github.com/metacubex/mihomo/constant"
+ 	P "github.com/metacubex/mihomo/constant/provider"
+@@ -171,7 +170,7 @@
+ 	if f := s.fallback; f != nil {
+ 		s.selectionMu.Lock()
+ 		defer s.selectionMu.Unlock()
+-		s.applyFallbackExpiry(time.Now())
++		s.applyFallbackExpiry(f.clock())
+ 		if f.lease != nil {
+ 			return f.physical, f.lease
+ 		}
+diff --git a/component/dialer/dialer.go b/component/dialer/dialer.go
+--- a/component/dialer/dialer.go
++++ b/component/dialer/dialer.go
+@@ -83,6 +83,9 @@
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	if guard := fallbackSocketGuard(ctx); guard != nil {
++		addControlToListenConfig(lc, guard)
++	}
+ 	return lc.ListenPacket(ctx, network, address)
+ }
+ 
+@@ -138,6 +141,7 @@
+ }
+ 
+ func dialContext(ctx context.Context, network string, destination netip.Addr, port string, opt option) (net.Conn, error) {
++	guard := fallbackSocketGuard(ctx)
+ 	var address string
+ 	destination, port = resolver.LookupIP4P(destination, port)
+ 	address = net.JoinHostPort(destination.String(), port)
+@@ -150,6 +154,11 @@
+ 		_netDialer := *netDialer.(*net.Dialer)
+ 		netDialer = &_netDialer // make a copy
+ 	default:
++		if guard != nil {
++			if err := guard(ctx, network, address, nil); err != nil {
++				return nil, err
++			}
++		}
+ 		return netDialer.DialContext(ctx, network, address)
+ 	}
+ 
+@@ -159,6 +168,9 @@
+ 
+ 	if DefaultSocketHook != nil { // ignore interfaceName, routingMark and tfo when DefaultSocketHook not null (in CMFA)
+ 		socketHookToToDialer(dialer)
++		if guard != nil {
++			addControlToDialer(dialer, guard)
++		}
+ 	} else {
+ 		if opt.interfaceName == "" {
+ 			opt.interfaceName = DefaultInterface.Load()
+@@ -182,6 +194,9 @@
+ 		}
+ 		if opt.routingMark != 0 {
+ 			bindMarkToDialer(opt.routingMark, dialer, network, destination)
++		}
++		if guard != nil {
++			addControlToDialer(dialer, guard)
+ 		}
+ 		if opt.tfo && !DisableTFO {
+ 			return dialTFO(ctx, *dialer, network, address)
+diff --git a/component/dialer/lumina_fallback.go b/component/dialer/lumina_fallback.go
+new file mode 100644
+--- /dev/null
++++ b/component/dialer/lumina_fallback.go
+@@ -0,0 +1,22 @@
++package dialer
++
++import (
++	"context"
++	"syscall"
++)
++
++type fallbackGuardKey struct{}
++
++// WithFallbackGuard carries the selector's lease check through address
++// resolution to the point where a direct socket is opened.
++func WithFallbackGuard(ctx context.Context, guard func() error) context.Context {
++	return context.WithValue(ctx, fallbackGuardKey{}, guard)
++}
++
++func fallbackSocketGuard(ctx context.Context) controlFn {
++	guard, _ := ctx.Value(fallbackGuardKey{}).(func() error)
++	if guard == nil {
++		return nil
++	}
++	return func(context.Context, string, string, syscall.RawConn) error { return guard() }
++}

@@ -78,6 +78,7 @@ def allowed_path(name):
         'scripts/patches/mihomo-v1.19.32-fakeip-pool-reuse.patch',
         'scripts/patches/mihomo-v1.19.32-fakeip-pool-reuse.provenance.json',
         'scripts/patches/mihomo-v1.19.32-personal-fallback-lease.patch',
+        'scripts/patches/mihomo-v1.19.32-personal-fallback-suspend.patch',
         'scripts/patches/mihomo-v1.19.32-personal-fallback-lease.provenance.json',
         'scripts/patches/mihomo-v1.19.32.LICENSE',
     }:
