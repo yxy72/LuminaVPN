@@ -94,9 +94,9 @@ func serve(run string) (returned error) {
 		return errors.New("another native coordinator is active")
 	}
 	defer unlock()
-	s, e := initialize(run)
+	s, e := initializeDarwinOwner(run)
 	if e != nil {
-		if validateRoot(run) == nil {
+		if s.Runner.PID != 0 && validateRoot(run) == nil {
 			_ = recoverRun(run, "initialization_failed")
 		}
 		return e
@@ -176,6 +176,12 @@ func serve(run string) (returned error) {
 	if e != nil {
 		return e
 	}
+	names := candidateNames(nodes)
+	verification, e := newPersonalVerification(s.Manifest)
+	if e != nil {
+		return e
+	}
+	verification.ingress.configure(config, s.Manifest.Config, names)
 	company, e := startCompany(ctx, run)
 	if e != nil {
 		return e
@@ -272,13 +278,9 @@ func serve(run string) (returned error) {
 	}); e != nil {
 		return e
 	}
-	names := []string{}
-	for _, n := range nodes {
-		names = append(names, n["name"].(string))
-	}
 	selection := selector.New(names)
 	if e = wait(ctx, run, 45*time.Second, func(ctx context.Context) error {
-		if e := choose(ctx, run, selection); e != nil {
+		if e := choose(ctx, run, selection, verification); e != nil {
 			return e
 		}
 		if selection.Current == selector.Reject {
@@ -307,7 +309,7 @@ func serve(run string) (returned error) {
 		return e
 	}
 	if e = wait(ctx, run, 60*time.Second, func(ctx context.Context) error {
-		if e := ensurePersonalSelection(ctx, run, selection); e != nil {
+		if e := ensurePersonalSelection(ctx, run, selection, verification); e != nil {
 			return e
 		}
 		if _, e := openCompany(ctx, run, company, boundChecks); e != nil {
@@ -358,6 +360,9 @@ func serve(run string) (returned error) {
 			return e
 		}
 		if current.VPN.WakeEpoch != "" && current.VPN.WakeEpoch != epoch && lastResumeRequest != epoch {
+			if err := verification.close(run); err != nil {
+				return err
+			}
 			boundChecks.reset()
 			systemChecks.reset()
 			company.revoke()
@@ -396,6 +401,9 @@ func serve(run string) (returned error) {
 		}
 		observed, e := platform.Discover()
 		if e != nil {
+			if err := verification.close(run); err != nil {
+				return err
+			}
 			networkUnavailable = true
 			boundChecks.reset()
 			systemChecks.reset()
@@ -411,6 +419,9 @@ func serve(run string) (returned error) {
 			continue
 		}
 		if observed != network || networkUnavailable {
+			if err := verification.close(run); err != nil {
+				return err
+			}
 			boundChecks.reset()
 			systemChecks.reset()
 			company.revoke()
@@ -431,6 +442,7 @@ func serve(run string) (returned error) {
 			if e = company.configure(config); e != nil {
 				return e
 			}
+			verification.ingress.configure(config, current.Manifest.Config, names)
 			config["tun"].(map[string]any)["enable"] = true
 			if e = saveCore(run, config); e != nil {
 				return e
@@ -557,7 +569,7 @@ func serve(run string) (returned error) {
 			return err
 		}
 		if time.Since(lastHealth) > 15*time.Second {
-			done, err := sampling.refresh(ctx, run, selection)
+			done, err := sampling.refresh(ctx, run, selection, verification)
 			if err != nil {
 				return err
 			}
@@ -687,7 +699,7 @@ func watch(run string) error {
 		}
 		if leaseExpired(s) {
 			e = update(run, func(s *State) error {
-				if !leaseExpired(*s) {
+				if guard(run, s) != nil || !leaseExpired(*s) {
 					return nil
 				}
 				if e := gate(run); e != nil {
@@ -731,11 +743,14 @@ func recoverRun(run, reason string) error {
 	if e := ValidateRun(run); e != nil {
 		return e
 	}
-	if e := securefile.Bytes(filepath.Join(run, "STOP"), nil); e != nil {
-		return e
-	}
 	if _, err := os.Lstat(filepath.Join(private(run), "state.json")); errors.Is(err, os.ErrNotExist) {
 		// No networking is possible before the root journal has been created.
+		if e := rejectDarwinUnjournaledOwner(run); e != nil {
+			return e
+		}
+		if e := securefile.Bytes(filepath.Join(run, "STOP"), nil); e != nil {
+			return e
+		}
 		m, e := ReadManifest(run)
 		if e != nil {
 			return e
@@ -753,9 +768,6 @@ func recoverRun(run, reason string) error {
 	if e := validateRoot(run); e != nil {
 		return e
 	}
-	if e := securefile.Bytes(filepath.Join(run, "STOP"), nil); e != nil {
-		return e
-	}
 	unlock, e := securefile.Lock(filepath.Join(private(run), "recovery.lock"), 180*time.Second)
 	if e != nil {
 		return e
@@ -765,8 +777,21 @@ func recoverRun(run, reason string) error {
 	if e != nil {
 		return e
 	}
+	owner, fenced, e := bindDarwinRecovery(run, s)
+	if e != nil {
+		return e
+	}
 	if s.Phase == "stopped" {
-		return nil
+		if !fenced {
+			return nil
+		}
+		if e = verifyDarwinRestoredResources(s); e != nil {
+			return e
+		}
+		return sealDarwinRecovery(run, owner)
+	}
+	if e = securefile.Bytes(filepath.Join(run, "STOP"), nil); e != nil {
+		return e
 	}
 	// A stalled coordinator can hold state.lock. The durable STOP marker and
 	// exclusive recovery lock authorize only its recorded identity to be stopped.
@@ -800,12 +825,8 @@ func recoverRun(run, reason string) error {
 			}
 		}
 	}
-	interfaces, e := platform.Interfaces()
-	if e != nil {
+	if e = verifyDarwinRecoveredInterfaces(s); e != nil {
 		return fail(e)
-	}
-	if interfaces[s.Manifest.Binding.VPN] || interfaces[s.Manifest.Binding.TUN] {
-		return fail(errors.New("candidate interface remains; recovery stopped"))
 	}
 	e = update(run, func(s *State) error {
 		for i := len(s.Routes) - 1; i >= 0; i-- {
@@ -835,7 +856,13 @@ func recoverRun(run, reason string) error {
 			}
 		}
 		platform.FlushDNS()
+		if e := verifyDarwinRestoredResources(*s); e != nil {
+			return e
+		}
 		s.Phase = "stopped"
+		s.VPN.Bootstrap = false
+		s.Leases = nil
+		s.TakeoverActive = false
 		s.Personal = selector.Reject
 		s.Error = ""
 		return nil
@@ -847,7 +874,7 @@ func recoverRun(run, reason string) error {
 		_ = os.Remove(filepath.Join(private(run), name))
 		_ = os.Remove(filepath.Join(run, name))
 	}
-	return nil
+	return sealDarwinRecovery(run, owner)
 }
 
 // VerifyOwnedInterfaces is deliberately independent of the status file.

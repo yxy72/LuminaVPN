@@ -152,6 +152,9 @@ func hook(run string) error {
 	if reason == "disconnect" || reason == "attempt-reconnect" {
 		_ = gate(run)
 		return update(run, func(s *State) error {
+			if guard(run, s) != nil {
+				return nil
+			}
 			s.VPN.Bootstrap = false
 			s.Leases = nil
 			s.Phase = "reconnecting"

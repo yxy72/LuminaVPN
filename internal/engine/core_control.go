@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -111,40 +112,63 @@ func selectCoreGroupContext(ctx context.Context, run, group, node string) error 
 	return nil
 }
 
-func probe(ctx context.Context, run string, p policy.Probe, node string, companyDial companyproxy.Dial) (result error) {
+func probe(ctx context.Context, run string, p policy.Probe, node string, companyDial companyproxy.Dial) error {
+	s, err := load(run)
+	if err != nil {
+		return err
+	}
+	if err := guard(run, &s); err != nil {
+		return err
+	}
+	if companyDial != nil {
+		return probeHTTPS(ctx, p, func(ctx context.Context, host string, port int) (net.Conn, error) {
+			conn, err := companyDial(ctx, host, port)
+			if err != nil {
+				return nil, newProbeFailure("tcp_unavailable", "target TCP not ready")
+			}
+			return conn, nil
+		}, nil, nil)
+	}
+	return probeHTTPS(ctx, p, func(ctx context.Context, host string, port int) (net.Conn, error) {
+		d := net.Dialer{Timeout: 4 * time.Second}
+		conn, err := d.DialContext(ctx, "tcp4", net.JoinHostPort(host, strconv.Itoa(port)))
+		if err != nil {
+			return nil, newProbeFailure("tcp_unavailable", "target TCP not ready")
+		}
+		return conn, nil
+	}, func(ctx context.Context, c net.Conn) error {
+		group := map[string]string{"company": "CORP", "personal": "PERSONAL", "direct": "PHYSICAL"}[p.Channel]
+		selected := ""
+		if p.Channel == "personal" {
+			selected = node
+		}
+		return verifyProbeRoute(ctx, run, c, "Tun", "", group, selected)
+	}, nil)
+}
+
+func probeHTTPS(ctx context.Context, p policy.Probe, dial companyproxy.Dial, verifyRoute func(context.Context, net.Conn) error, roots *x509.CertPool) (result error) {
 	defer func() {
 		if result != nil {
 			result = describeProbeFailure(p, result)
 		}
 	}()
-	s, e := load(run)
-	if e != nil {
-		return e
+	u, err := url.Parse(p.URL)
+	if err != nil || u.Scheme != "https" || u.Host == "" {
+		return errors.New("invalid HTTPS probe")
 	}
-	if e := guard(run, &s); e != nil {
-		return e
+	port := 443
+	if u.Port() != "" {
+		port, err = strconv.Atoi(u.Port())
+		if err != nil {
+			return errors.New("invalid HTTPS probe port")
+		}
 	}
-	u, e := url.Parse(p.URL)
-	if e != nil {
-		return e
-	}
-	port := u.Port()
-	if port == "" {
-		port = "443"
-	}
-	host := u.Hostname()
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	var c net.Conn
-	if companyDial != nil {
-		number, _ := strconv.Atoi(port)
-		c, e = companyDial(ctx, host, number)
-	} else {
-		d := net.Dialer{Timeout: 4 * time.Second}
-		c, e = d.DialContext(ctx, "tcp4", net.JoinHostPort(host, port))
-	}
-	if e != nil {
-		return newProbeFailure("tcp_unavailable", "target TCP not ready")
+	host := u.Hostname()
+	c, err := dial(ctx, host, port)
+	if err != nil {
+		return err
 	}
 	defer c.Close()
 	deadline := time.Now().Add(4 * time.Second)
@@ -154,58 +178,71 @@ func probe(ctx context.Context, run string, p policy.Probe, node string, company
 	_ = c.SetDeadline(deadline)
 	stop := context.AfterFunc(ctx, func() { _ = c.Close() })
 	defer stop()
-	secure := tls.Client(c, &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12})
-	if e = secure.HandshakeContext(ctx); e != nil {
-		return tlsProbeFailure(e)
+	secure := tls.Client(c, &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12, RootCAs: roots})
+	if err := secure.HandshakeContext(ctx); err != nil {
+		return tlsProbeFailure(err)
 	}
-	if companyDial == nil {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(100 * time.Millisecond):
-		}
-		var data struct {
-			Connections []struct {
-				Metadata struct {
-					SourcePort json.RawMessage `json:"sourcePort"`
-					Type       string          `json:"type"`
-					Host       string          `json:"host"`
-				} `json:"metadata"`
-				Chains []string `json:"chains"`
-			} `json:"connections"`
-		}
-		if e = apiContext(ctx, run, "GET", "/connections", nil, &data); e != nil {
-			return e
-		}
-		source := strconv.Itoa(c.LocalAddr().(*net.TCPAddr).Port)
-		expected := map[string]string{"company": "CORP", "personal": "PERSONAL", "direct": "PHYSICAL"}[p.Channel]
-		found := false
-		for _, row := range data.Connections {
-			if strings.Trim(string(row.Metadata.SourcePort), "\"") == source && row.Metadata.Type == "Tun" {
-				for _, chain := range row.Chains {
-					if chain == expected {
-						found = p.Channel != "personal" || slices.Contains(row.Chains, node)
-					}
-				}
-			}
-		}
-		if !found {
-			return newProbeFailure("unexpected_system_path", "system probe did not use the expected TUN channel")
+	if verifyRoute != nil {
+		if err := verifyRoute(ctx, c); err != nil {
+			return err
 		}
 	}
 	path := u.EscapedPath()
 	if path == "" {
 		path = "/"
 	}
-	if _, e = fmt.Fprintf(secure, "HEAD %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", path, u.Host); e != nil {
+	if _, err := fmt.Fprintf(secure, "HEAD %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", path, u.Host); err != nil {
 		return newProbeFailure("http_write_failed", "HTTPS probe write failed")
 	}
-	response, e := http.ReadResponse(bufio.NewReader(io.LimitReader(secure, 32<<10)), &http.Request{Method: "HEAD"})
-	if e != nil {
+	response, err := http.ReadResponse(bufio.NewReader(io.LimitReader(secure, 32<<10)), &http.Request{Method: "HEAD"})
+	if err != nil {
 		return newProbeFailure("http_response_missing", "HTTPS probe response missing")
 	}
 	response.Body.Close()
 	return checkProbeStatus(p, response.StatusCode)
+}
+
+func verifyProbeRoute(ctx context.Context, run string, c net.Conn, kind, listener, group, node string) error {
+	return verifyProbeRouteWith(ctx, c, kind, listener, group, node, func(ctx context.Context, path string, out any) error {
+		return apiContext(ctx, run, "GET", path, nil, out)
+	})
+}
+
+func verifyProbeRouteWith(ctx context.Context, c net.Conn, kind, listener, group, node string, read func(context.Context, string, any) error) error {
+	source, ok := c.LocalAddr().(*net.TCPAddr)
+	if !ok {
+		return newCoreFailure("core_ingress_address_invalid", nil)
+	}
+	// The HTTPS handshake is already tracked when the pinned core makes the
+	// tunnel, but the current controller view may arrive a little later.
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(100 * time.Millisecond):
+	}
+	var data struct {
+		Connections []struct {
+			Metadata struct {
+				SourcePort  json.RawMessage `json:"sourcePort"`
+				Type        string          `json:"type"`
+				InboundName string          `json:"inboundName"`
+			} `json:"metadata"`
+			Chains []string `json:"chains"`
+		} `json:"connections"`
+	}
+	if err := read(ctx, "/connections", &data); err != nil {
+		return err
+	}
+	port := strconv.Itoa(source.Port)
+	for _, row := range data.Connections {
+		m := row.Metadata
+		if strings.Trim(string(m.SourcePort), "\"") == port && m.Type == kind &&
+			(listener == "" || m.InboundName == listener) &&
+			slices.Contains(row.Chains, group) && (node == "" || slices.Contains(row.Chains, node)) {
+			return nil
+		}
+	}
+	return newProbeFailure("unexpected_system_path", "HTTPS probe did not use the expected ingress and egress")
 }
 
 type companyProbeSchedule struct {

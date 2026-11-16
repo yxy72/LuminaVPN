@@ -107,6 +107,13 @@ func effectiveResult(cfg policy.Config, r subscription.Result) (policy.Config, [
 	return cfg, nodes, nil
 }
 func (c CLI) syncSubscriptions(o options, cfg policy.Config, force bool) error {
+	return c.syncSubscriptionsContext(context.Background(), o, cfg, force)
+}
+
+func (c CLI) syncSubscriptionsContext(parent context.Context, o options, cfg policy.Config, force bool) error {
+	if e := parent.Err(); e != nil {
+		return e
+	}
 	sources, present, e := sourceConfig(o.profile)
 	if e != nil {
 		return e
@@ -126,11 +133,14 @@ func (c CLI) syncSubscriptions(o options, cfg policy.Config, force bool) error {
 	if !force && cacheErr == nil && time.Since(previous.Updated) >= 0 && time.Since(previous.Updated) < time.Duration(sources.IntervalMinutes)*time.Minute {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	ctx, cancel := context.WithTimeout(parent, time.Minute)
 	defer cancel()
 	snapshot, result, e := subscription.FetchSnapshot(ctx, sources)
 	if e == nil {
 		_, _, e = effectiveResult(cfg, result)
+	}
+	if err := parent.Err(); err != nil {
+		return err
 	}
 	if e != nil {
 		if !force && cacheErr == nil {

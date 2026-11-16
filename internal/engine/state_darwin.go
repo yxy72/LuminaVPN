@@ -162,10 +162,17 @@ func verifyPulseProcesses(s State) error {
 
 func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
 func Launch(action, run string) error {
+	return LaunchContext(context.Background(), action, run)
+}
+
+func LaunchContext(ctx context.Context, action, run string) error {
+	if e := ctx.Err(); e != nil {
+		return e
+	}
 	if e := ValidateRun(run); e != nil {
 		return e
 	}
-	if action != "serve" && action != "recover" {
+	if action != "serve" && action != "recover" && action != "recover-verified" {
 		return errors.New("invalid privileged action")
 	}
 	self, e := os.Executable()
@@ -173,6 +180,9 @@ func Launch(action, run string) error {
 		return e
 	}
 	if action == "serve" {
+		if _, err := os.Lstat(filepath.Join(run, "STOP")); !errors.Is(err, os.ErrNotExist) {
+			return errors.New("run was cancelled or its stop request cannot be checked")
+		}
 		m, e := ReadManifest(run)
 		if e != nil {
 			return e
@@ -191,8 +201,11 @@ func Launch(action, run string) error {
 		line += " >/dev/null 2>&1 </dev/null &"
 	}
 	script := "do shell script " + strconv.Quote(line) + " with administrator privileges"
-	cmd := exec.Command("/usr/bin/osascript", "-e", script)
+	cmd := exec.CommandContext(ctx, "/usr/bin/osascript", "-e", script)
 	if e = cmd.Run(); e != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return errors.New("native authorization or launch did not complete")
 	}
 	return nil
@@ -397,6 +410,11 @@ func Internal(action, run string) error {
 		return watch(run)
 	case "recover":
 		return recoverRun(run, "local_stop")
+	case "recover-verified":
+		if err := recoverRun(run, "local_stop"); err != nil {
+			return err
+		}
+		return verifyDarwinRecovery(run)
 	case "hook":
 		return hook(run)
 	}

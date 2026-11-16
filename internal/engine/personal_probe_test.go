@@ -1,3 +1,5 @@
+//go:build darwin || windows
+
 package engine
 
 import (
@@ -11,11 +13,12 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"netlaunch/internal/policy"
 )
 
-func TestPersonalSelectionUsesMixedIngressAndVerifiesTLS(t *testing.T) {
+func TestPersonalSelectionUsesAuthenticatedLoopbackAndVerifiesTLS(t *testing.T) {
 	var requests, connects atomic.Int32
 	var status atomic.Int32
 	status.Store(http.StatusNoContent)
@@ -32,6 +35,9 @@ func TestPersonalSelectionUsesMixedIngressAndVerifiesTLS(t *testing.T) {
 	host := certificate.DNSNames[0]
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		connects.Add(1)
+		if r.Header.Get("Proxy-Authorization") != "Basic bHVtaW5hLXByb2JlOmZpeHR1cmUtcGFzcw==" {
+			t.Error("probe did not authenticate to its loopback listener")
+		}
 		if r.Method != http.MethodConnect || r.Host != host+":443" {
 			t.Error("probe escaped expected CONNECT target", r.Method, r.Host)
 			w.WriteHeader(http.StatusBadRequest)
@@ -57,14 +63,14 @@ func TestPersonalSelectionUsesMixedIngressAndVerifiesTLS(t *testing.T) {
 		<-done
 	}))
 	defer proxy.Close()
-	client := personalProbeClient(proxy.Listener.Addr().String())
-	defer client.CloseIdleConnections()
-	probes := []policy.Probe{
-		{URL: "https://company.must-not-contact.invalid/", Channel: "company"},
-		{URL: "https://" + host + "/probe", Channel: "personal"},
-		{URL: "https://direct.must-not-contact.invalid/", Channel: "direct"},
+	probe := policy.Probe{URL: "https://" + host + "/probe", Channel: "personal"}
+	port := proxy.Listener.Addr().(*net.TCPAddr).Port
+	dial := func(ctx context.Context, host string, targetPort int) (net.Conn, error) {
+		return connectProbeIngress(ctx, port, host, targetPort, candidateUser, "fixture-pass")
 	}
-	if e := verifyPersonalSelection(context.Background(), client, probes); e == nil || !strings.Contains(e.Error(), "certificate verification failed") {
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	if e := probeHTTPS(ctx, probe, dial, nil, nil); e == nil || !strings.Contains(e.Error(), "certificate verification failed") {
 		t.Fatal("untrusted target certificate accepted", e)
 	}
 	if requests.Load() != 0 || connects.Load() != 1 {
@@ -72,7 +78,6 @@ func TestPersonalSelectionUsesMixedIngressAndVerifiesTLS(t *testing.T) {
 	}
 	roots := x509.NewCertPool()
 	roots.AddCert(certificate)
-	client.Transport.(*http.Transport).TLSClientConfig.RootCAs = roots
 	cases := []struct {
 		code     int
 		purpose  string
@@ -85,8 +90,8 @@ func TestPersonalSelectionUsesMixedIngressAndVerifiesTLS(t *testing.T) {
 	}
 	for _, tc := range cases {
 		status.Store(int32(tc.code))
-		probes[1].Purpose, probes[1].ExpectedStatus = tc.purpose, tc.expected
-		e := verifyPersonalSelection(context.Background(), client, probes)
+		probe.Purpose, probe.ExpectedStatus = tc.purpose, tc.expected
+		e := probeHTTPS(ctx, probe, dial, nil, roots)
 		if (e == nil) != tc.pass {
 			t.Fatal("wrong personal status result", tc, e)
 		}

@@ -15,11 +15,12 @@ type Options struct {
 func Defaults() Options { return Options{150, 3, 60 * time.Second, 10 * time.Second, 2} }
 
 type health struct {
-	Successes         int
-	FailedAt          time.Time
-	Observed          time.Time
-	Latency           int
-	ServiceRejectedAt time.Time
+	Successes                 int
+	FailedAt                  time.Time
+	Observed                  time.Time
+	Latency                   int
+	ServiceRejectedAt         time.Time
+	VerificationDeferredUntil time.Time
 }
 type Policy struct {
 	Nodes         []string
@@ -42,7 +43,8 @@ func New(nodes []string) *Policy {
 func (p *Policy) ReportFailure(node string, now time.Time) {
 	for _, n := range p.Nodes {
 		if n == node {
-			p.health[node] = health{FailedAt: now, ServiceRejectedAt: p.health[node].ServiceRejectedAt}
+			previous := p.health[node]
+			p.health[node] = health{FailedAt: now, ServiceRejectedAt: previous.ServiceRejectedAt, VerificationDeferredUntil: previous.VerificationDeferredUntil}
 			return
 		}
 	}
@@ -58,8 +60,18 @@ func (p *Policy) ReportServiceRejection(node string, now time.Time) {
 }
 
 func (p *Policy) ConfirmService(node string) {
-	if h, ok := p.health[node]; ok && !h.ServiceRejectedAt.IsZero() {
+	if h, ok := p.health[node]; ok {
 		h.ServiceRejectedAt = time.Time{}
+		h.VerificationDeferredUntil = time.Time{}
+		p.health[node] = h
+	}
+}
+
+// An incomplete verification yields time to other candidates without
+// changing this node's measured reachability or HTTP service outcome.
+func (p *Policy) DeferVerification(node string, now time.Time) {
+	if h, ok := p.health[node]; ok {
+		h.VerificationDeferredUntil = now.Add(30 * time.Second)
 		p.health[node] = h
 	}
 }
@@ -143,7 +155,7 @@ func (p *Policy) decideSamples(now time.Time, latency map[string]int, finished m
 		ms = h.Latency
 		fresh := !h.Observed.IsZero() && !now.Before(h.Observed) && now.Sub(h.Observed) < 45*time.Second
 		eligible := fresh && ms >= 0 && (h.FailedAt.IsZero() || (h.Successes >= p.Options.RecoverySuccesses && now.Sub(h.FailedAt) >= p.Options.RecoveryHold))
-		if !eligible {
+		if !eligible || now.Before(h.VerificationDeferredUntil) {
 			continue
 		}
 		if !h.ServiceRejectedAt.IsZero() {

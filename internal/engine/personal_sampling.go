@@ -31,10 +31,14 @@ func (s *personalSampling) close() {
 	s.cancel = nil
 }
 
-func (s *personalSampling) refresh(ctx context.Context, run string, policy *selector.Policy) (bool, error) {
+func (s *personalSampling) refresh(ctx context.Context, run string, policy *selector.Policy, verification *personalVerification) (bool, error) {
 	if s.policy != policy {
 		s.close()
 		s.policy = policy
+	}
+	if verification.pending() {
+		err := applyPersonalSamples(ctx, run, policy, verification, time.Now(), nil)
+		return !verification.pending(), err
 	}
 	if s.done == nil {
 		probes, err := personalProbeURLs(run)
@@ -58,7 +62,8 @@ func (s *personalSampling) refresh(ctx context.Context, run string, policy *sele
 		if time.Since(measured.finished) > 10*time.Second {
 			return false, nil
 		}
-		return true, applyPersonalSamples(ctx, run, policy, measured.started, measured.values)
+		err := applyPersonalSamples(ctx, run, policy, verification, measured.started, measured.values)
+		return !verification.pending(), err
 	default:
 		return false, nil
 	}

@@ -66,11 +66,15 @@ func desktopConfig(s State, nodes []policy.Node, secret string, company *company
 	dns["fake-ip-ttl"] = 1
 	return c, nil
 }
-func reloadDesktop(ctx context.Context, run string, s State, nodes []policy.Node, secret string, company *companyRuntime, direct bool) error {
+func reloadDesktop(ctx context.Context, run string, s State, nodes []policy.Node, secret string, company *companyRuntime, direct bool, verification *personalVerification) error {
+	if err := verification.close(run); err != nil {
+		return err
+	}
 	c, e := desktopConfig(s, nodes, secret, company, direct)
 	if e != nil {
 		return e
 	}
+	verification.ingress.configure(c, s.Manifest.Config, candidateNames(nodes))
 	return applyDesktopConfig(c, filepath.Join(private(run), "core.json"), direct, desktopReloadControl{
 		selectGroup: func(group, target string) error { return selectCoreGroupContext(ctx, run, group, target) },
 		request: func(method, path string, payload, out any) error {
@@ -166,6 +170,12 @@ func runDesktopWindows(ctx context.Context, run string, children *windowsChildre
 	if e != nil {
 		return e
 	}
+	names := candidateNames(nodes)
+	verification, e := newPersonalVerification(s.Manifest)
+	if e != nil {
+		return e
+	}
+	verification.ingress.configure(c, s.Manifest.Config, names)
 	if e = saveCore(run, c); e != nil {
 		return e
 	}
@@ -222,10 +232,6 @@ func runDesktopWindows(ctx context.Context, run string, children *windowsChildre
 	}
 	if e = publishDesktopApplied(run, intent, s.ChannelGeneration, direct); e != nil {
 		return e
-	}
-	names := []string{}
-	for _, node := range nodes {
-		names = append(names, node["name"].(string))
 	}
 	selection := selector.New(names)
 	retry := &vpnRetry{}
@@ -344,7 +350,7 @@ func runDesktopWindows(ctx context.Context, run string, children *windowsChildre
 			intent = wanted
 			if personalChanged {
 				direct = !intent.Personal
-				if e = reloadDesktop(ctx, run, s, nodes, secret, company, direct); e != nil {
+				if e = reloadDesktop(ctx, run, s, nodes, secret, company, direct, verification); e != nil {
 					return e
 				}
 				selection = selector.New(names)
@@ -381,6 +387,9 @@ func runDesktopWindows(ctx context.Context, run string, children *windowsChildre
 		changed := networkErr == nil && (!winnet.SameAdapter(observed.Adapter, s.Windows.Physical.Adapter) || observed.Address != s.Windows.Physical.Address || observed.Gateway != s.Windows.Physical.Gateway)
 		resumed := !awake || epoch != s.Windows.Epoch
 		if networkErr != nil || changed || resumed {
+			if err := verification.close(run); err != nil {
+				return err
+			}
 			resetProbes()
 			company.revoke()
 			_ = gate(run)
@@ -418,7 +427,7 @@ func runDesktopWindows(ctx context.Context, run string, children *windowsChildre
 				return e
 			}
 			direct = !intent.Personal
-			if e = reloadDesktop(ctx, run, s, nodes, secret, company, direct); e != nil {
+			if e = reloadDesktop(ctx, run, s, nodes, secret, company, direct, verification); e != nil {
 				return e
 			}
 			if e = capture(run); e != nil {
@@ -512,6 +521,7 @@ func runDesktopWindows(ctx context.Context, run string, children *windowsChildre
 			cancelSweep = cancel
 			pending = health.start(work, func(c context.Context, path string, out any) error { return apiContext(c, run, "GET", path, nil, out) })
 		}
+		advancedVerification := false
 		if pending != nil {
 			select {
 			case result, open := <-pending:
@@ -531,9 +541,10 @@ func runDesktopWindows(ctx context.Context, run string, children *windowsChildre
 						resetProbes()
 						companyOpen = false
 						direct = decision.DirectAllowed
-						if e = reloadDesktop(ctx, run, s, nodes, secret, company, direct); e != nil {
+						if e = reloadDesktop(ctx, run, s, nodes, secret, company, direct, verification); e != nil {
 							return e
 						}
+						selection.Commit(selector.Reject, time.Now())
 					}
 					if !direct {
 						values := map[string]selector.TimedSample{}
@@ -548,9 +559,10 @@ func runDesktopWindows(ctx context.Context, run string, children *windowsChildre
 								values[sample.Name] = selector.TimedSample{Latency: -1, StartedAt: sample.Observation.StartedAt, FinishedAt: sample.Observation.FinishedAt}
 							}
 						}
-						if e = applyPersonalTimedSamples(ctx, run, selection, values); e != nil {
+						if e = applyPersonalTimedSamples(ctx, run, selection, verification, values); e != nil {
 							return e
 						}
+						advancedVerification = true
 						for name, sample := range values {
 							sampledAt[name] = sample.FinishedAt
 						}
@@ -563,13 +575,19 @@ func runDesktopWindows(ctx context.Context, run string, children *windowsChildre
 			default:
 			}
 		}
+		if !direct && intent.Personal && verification.pending() && !advancedVerification {
+			if e = applyPersonalTimedSamples(ctx, run, selection, verification, nil); e != nil {
+				return e
+			}
+		}
 		if direct && intent.Personal && !fallbackDecisionWithCoverage(intent, nodes, gen, latest, time.Now(), coverageReason).DirectAllowed {
 			resetProbes()
 			companyOpen = false
 			direct = false
-			if e = reloadDesktop(ctx, run, s, nodes, secret, company, false); e != nil {
+			if e = reloadDesktop(ctx, run, s, nodes, secret, company, false, verification); e != nil {
 				return e
 			}
+			selection.Commit(selector.Reject, time.Now())
 			if e = publishDesktopApplied(run, intent, applied, false); e != nil {
 				return e
 			}

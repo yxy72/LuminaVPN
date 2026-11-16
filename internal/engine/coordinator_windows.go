@@ -746,6 +746,12 @@ func runFrozen(run string) (returned error) {
 	if e != nil {
 		return e
 	}
+	names := candidateNames(nodes)
+	verification, e := newPersonalVerification(s.Manifest)
+	if e != nil {
+		return e
+	}
+	verification.ingress.configure(config, s.Manifest.Config, names)
 	if e = saveCore(run, config); e != nil {
 		return e
 	}
@@ -816,13 +822,9 @@ func runFrozen(run string) (returned error) {
 		company.diagnostic("bootstrap_bound", e)
 		return e
 	}
-	names := []string{}
-	for _, n := range nodes {
-		names = append(names, n["name"].(string))
-	}
 	selection := selector.New(names)
 	if e = wait(ctx, run, 45*time.Second, func(ctx context.Context) error {
-		if e := choose(ctx, run, selection); e != nil {
+		if e := choose(ctx, run, selection, verification); e != nil {
 			return e
 		}
 		if selection.Current == selector.Reject {
@@ -839,7 +841,7 @@ func runFrozen(run string) (returned error) {
 		return e
 	}
 	if e = wait(ctx, run, 60*time.Second, func(ctx context.Context) error {
-		if e := ensurePersonalSelection(ctx, run, selection); e != nil {
+		if e := ensurePersonalSelection(ctx, run, selection, verification); e != nil {
 			return e
 		}
 		if _, e := openCompany(ctx, run, company, boundChecks); e != nil {
@@ -856,9 +858,9 @@ func runFrozen(run string) (returned error) {
 	}); e != nil {
 		return e
 	}
-	return windowsLoop(ctx, run, children, company, coreChild, nodes, secret, selection, names, boundChecks, systemChecks)
+	return windowsLoop(ctx, run, children, company, coreChild, nodes, secret, selection, names, boundChecks, systemChecks, verification)
 }
-func windowsLoop(ctx context.Context, run string, g *windowsChildren, company *companyRuntime, core Child, nodes []policy.Node, secret string, selection *selector.Policy, names []string, boundChecks *companyProbeSchedule, systemChecks *probeSchedule) error {
+func windowsLoop(ctx context.Context, run string, g *windowsChildren, company *companyRuntime, core Child, nodes []policy.Node, secret string, selection *selector.Policy, names []string, boundChecks *companyProbeSchedule, systemChecks *probeSchedule, verification *personalVerification) error {
 	sampling := &personalSampling{}
 	defer sampling.close()
 	lastHealth := time.Now()
@@ -888,6 +890,9 @@ func windowsLoop(ctx context.Context, run string, g *windowsChildren, company *c
 		changed := networkErr == nil && (!winnet.SameAdapter(observed.Adapter, s.Windows.Physical.Adapter) || observed.Address != s.Windows.Physical.Address || observed.Gateway != s.Windows.Physical.Gateway)
 		resume := !awake || epoch != s.Windows.Epoch
 		if networkErr != nil || resume || changed {
+			if err := verification.close(run); err != nil {
+				return err
+			}
 			boundChecks.reset()
 			systemChecks.reset()
 			company.revoke()
@@ -935,6 +940,7 @@ func windowsLoop(ctx context.Context, run string, g *windowsChildren, company *c
 				if e != nil {
 					return e
 				}
+				verification.ingress.configure(config, s.Manifest.Config, names)
 				if e = saveCore(run, config); e != nil {
 					return e
 				}
@@ -1042,7 +1048,7 @@ func windowsLoop(ctx context.Context, run string, g *windowsChildren, company *c
 			return err
 		}
 		if time.Since(lastHealth) > 15*time.Second {
-			done, err := sampling.refresh(ctx, run, selection)
+			done, err := sampling.refresh(ctx, run, selection, verification)
 			if err != nil {
 				return err
 			}

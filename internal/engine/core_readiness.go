@@ -5,11 +5,9 @@ package engine
 import (
 	"context"
 	"errors"
-	"net"
 	"net/url"
 	"netlaunch/internal/policy"
 	"netlaunch/internal/selector"
-	"strconv"
 	"time"
 )
 
@@ -17,7 +15,10 @@ func wait(ctx context.Context, run string, limit time.Duration, check func(conte
 	return waitReady(ctx, limit, func() error { return pulse(run) }, check)
 }
 
-func choose(ctx context.Context, run string, p *selector.Policy) error {
+func choose(ctx context.Context, run string, p *selector.Policy, verification *personalVerification) error {
+	if verification.pending() {
+		return applyPersonalSamples(ctx, run, p, verification, time.Now(), nil)
+	}
 	probes, err := personalProbeURLs(run)
 	if err != nil {
 		return err
@@ -27,7 +28,7 @@ func choose(ctx context.Context, run string, p *selector.Policy) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	return applyPersonalSamples(ctx, run, p, started, values)
+	return applyPersonalSamples(ctx, run, p, verification, started, values)
 }
 
 func personalProbeURLs(run string) ([]string, error) {
@@ -89,79 +90,20 @@ func measurePersonalWith(ctx context.Context, names, probes []string, request fu
 	})
 }
 
-func applyPersonalSamples(parent context.Context, run string, p *selector.Policy, started time.Time, values map[string]int) error {
-	return applyPersonalSamplesWith(parent, run, p, func(now time.Time) (string, string) { return p.DecideSamplesSince(now, started, values) })
+func applyPersonalSamples(parent context.Context, run string, p *selector.Policy, verification *personalVerification, started time.Time, values map[string]int) error {
+	return applyPersonalSamplesWith(parent, run, p, verification, func(now time.Time) (string, string) { return p.DecideSamplesSince(now, started, values) })
 }
 
-func applyPersonalTimedSamples(parent context.Context, run string, p *selector.Policy, samples map[string]selector.TimedSample) error {
-	return applyPersonalSamplesWith(parent, run, p, func(now time.Time) (string, string) { return p.DecideTimedSamples(now, samples) })
+func applyPersonalTimedSamples(parent context.Context, run string, p *selector.Policy, verification *personalVerification, samples map[string]selector.TimedSample) error {
+	return applyPersonalSamplesWith(parent, run, p, verification, func(now time.Time) (string, string) { return p.DecideTimedSamples(now, samples) })
 }
 
-func applyPersonalSamplesWith(parent context.Context, run string, p *selector.Policy, decide func(time.Time) (string, string)) error {
-	if parent.Err() != nil {
-		return parent.Err()
+func applyPersonalSamplesWith(parent context.Context, run string, p *selector.Policy, verification *personalVerification, decide func(time.Time) (string, string)) error {
+	s, err := load(run)
+	if err != nil {
+		return err
 	}
-	s, e := load(run)
-	if e != nil {
-		return e
-	}
-	return applyPersonalChoice(parent, p, decide,
-		func(ctx context.Context, node string) error { return selectPersonalContext(ctx, run, node) },
-		func(ctx context.Context) error {
-			client := personalProbeClient(net.JoinHostPort("127.0.0.1", strconv.Itoa(s.Manifest.Config.Ports.Proxy)))
-			defer client.CloseIdleConnections()
-			return verifyPersonalSelection(ctx, client, s.Manifest.Config.Probes)
-		},
-		func(fn func(*State) error) error { return update(run, fn) },
-	)
-}
-
-func applyPersonalChoice(parent context.Context, p *selector.Policy, decide func(time.Time) (string, string), selectNode func(context.Context, string) error, verify func(context.Context) error, updateState func(func(*State) error) error) error {
-	ctx, cancel := context.WithTimeout(parent, 6*time.Second)
-	defer cancel()
-	node, _ := decide(time.Now())
-	if e := selectNode(ctx, node); e != nil {
-		return e
-	}
-	if node != selector.Reject {
-		if probeErr := verify(ctx); probeErr != nil {
-			if parent.Err() != nil {
-				return parent.Err()
-			}
-			expired := ctx.Err() != nil
-			// An unverified selection must be closed even if its probe budget expired.
-			if err := selectNode(context.Background(), selector.Reject); err != nil {
-				return err
-			}
-			if expired {
-				// The selected ingress is unverified. Close it without inventing a
-				// failed node observation or putting that node into recovery cooldown.
-				p.Commit(selector.Reject, time.Now())
-				return updateState(func(s *State) error {
-					s.Personal = selector.Reject
-					s.Error = "personal_verification_timeout"
-					personalUnavailable(s, "verification_budget_expired")
-					if s.Phase == "ready" {
-						s.Phase = "degraded"
-					}
-					return nil
-				})
-			}
-			return recordPersonalRejection(p, node, probeErr, "mixed_ingress", updateState)
-		}
-		p.ConfirmService(node)
-	}
-	p.Commit(node, time.Now())
-	return updateState(func(s *State) error {
-		s.Personal = node
-		if node == selector.Reject {
-			personalUnavailable(s, "no_verified_node")
-		}
-		if node == selector.Reject && s.Phase == "ready" {
-			s.Phase = "degraded"
-		}
-		return nil
-	})
+	return verification.advance(parent, run, s, p, decide)
 }
 
 func rejectPersonal(run string, p *selector.Policy, node string, failure error, scope string) error {
@@ -194,11 +136,11 @@ func recordPersonalRejection(p *selector.Policy, node string, failure error, sco
 	})
 }
 
-func ensurePersonalSelection(ctx context.Context, run string, p *selector.Policy) error {
+func ensurePersonalSelection(ctx context.Context, run string, p *selector.Policy, verification *personalVerification) error {
 	if p.Current != selector.Reject {
 		return nil
 	}
-	if e := choose(ctx, run, p); e != nil {
+	if e := choose(ctx, run, p, verification); e != nil {
 		return e
 	}
 	if p.Current == selector.Reject {

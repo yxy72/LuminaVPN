@@ -52,6 +52,7 @@ type options struct {
 	index                       int
 	force                       bool
 	prepareOnly                 bool
+	verifyRecovery              bool
 	validationTimeout           time.Duration
 	sessionTimeout              time.Duration
 	// Explicit desktop intents are never inferred from an omitted CLI option.
@@ -61,6 +62,13 @@ type options struct {
 
 func DefaultProfile() (string, error) { return defaultProfilePath() }
 func (c CLI) Run(args []string) error {
+	return c.RunContext(context.Background(), args)
+}
+
+func (c CLI) RunContext(ctx context.Context, args []string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if c.Out == nil {
 		c.Out = io.Discard
 	}
@@ -104,6 +112,7 @@ func (c CLI) Run(args []string) error {
 	fs.IntVar(&opts.index, "index", -1, "internal child journal index")
 	fs.BoolVar(&opts.force, "force", false, "refresh the local VPN session")
 	fs.BoolVar(&opts.prepareOnly, "prepare-only", false, "up: stage a private run without administrator authorization or network changes")
+	fs.BoolVar(&opts.verifyRecovery, "verify-restored", false, "macOS down: require administrator confirmation of restoration")
 	fs.DurationVar(&opts.validationTimeout, "validation-timeout", 0, "up: hard deadline on macOS or in Windows validation builds (1s through 45m)")
 	fs.DurationVar(&opts.sessionTimeout, "session-timeout", 0, "up: Windows home preview session limit (default 8h, maximum 12h)")
 	if e = fs.Parse(args[1:]); e != nil {
@@ -136,7 +145,7 @@ func (c CLI) Run(args []string) error {
 			return e
 		}
 		return checkErr
-	case "_serve", "_run", "_watch", "_recover", "_hook":
+	case "_serve", "_run", "_watch", "_recover", "_recover-verified", "_hook":
 		return engine.Internal(args[0][1:], opts.run)
 	case "_child":
 		return engine.ChildMain(opts.run, opts.index)
@@ -182,9 +191,9 @@ func (c CLI) Run(args []string) error {
 	case "status":
 		return c.status(opts)
 	case "down":
-		return c.down(opts)
+		return c.downContext(ctx, opts)
 	case "up":
-		return c.startProfile(opts)
+		return c.startProfileContext(ctx, opts)
 	}
 	if args[0] == "sync" || args[0] == "import" {
 		unlock, err := securefile.Lock(filepath.Join(opts.profile, "launch.lock"), time.Second)
@@ -378,15 +387,25 @@ func (c CLI) status(o options) error {
 	return c.json(savedStatus(run, s, time.Now()))
 }
 func (c CLI) down(o options) error {
+	return c.downContext(context.Background(), o)
+}
+
+func (c CLI) downContext(ctx context.Context, o options) error {
 	if !platform.Supported() {
 		return errors.New("native lifecycle unavailable on this platform")
 	}
-	ctx := context.Background()
 	run, e := bindRunStop(ctx, o)
 	if e != nil {
 		return e
 	}
 	defer run.Close()
+	if o.verifyRecovery {
+		if e := run.RecoverVerified(ctx); e != nil {
+			return e
+		}
+		fmt.Fprintln(c.Out, "Administrator verified restoration of this run.")
+		return nil
+	}
 	report, e := run.Observe(ctx)
 	if e != nil {
 		return e
@@ -416,7 +435,10 @@ func (c CLI) down(o options) error {
 	fmt.Fprintln(c.Out, "Recovery complete.")
 	return nil
 }
-func (c CLI) startProfile(o options) error {
+func (c CLI) startProfileContext(ctx context.Context, o options) error {
+	if e := ctx.Err(); e != nil {
+		return e
+	}
 	if e := securefile.Dir(o.profile); e != nil {
 		return e
 	}
@@ -434,11 +456,11 @@ func (c CLI) startProfile(o options) error {
 		return e
 	}
 	if o.mode == "" {
-		if e = c.syncSubscriptions(o, cfg, false); e != nil {
+		if e = c.syncSubscriptionsContext(ctx, o, cfg, false); e != nil {
 			return e
 		}
 	} else if intent.Personal {
-		if e = syncSubscriptionsForIntent(context.Background(), o.profile, cfg, intent, false); e != nil {
+		if e = syncSubscriptionsForIntent(ctx, o.profile, cfg, intent, false); e != nil {
 			return e
 		}
 	}
@@ -446,11 +468,18 @@ func (c CLI) startProfile(o options) error {
 	if e != nil {
 		return e
 	}
-	return c.upLocked(o, cfg, nodes)
+	return c.upLockedContext(ctx, o, cfg, nodes)
 }
 
 // The caller holds launch.lock from configuration read through readiness.
 func (c CLI) upLocked(o options, cfg policy.Config, nodes []policy.Node) error {
+	return c.upLockedContext(context.Background(), o, cfg, nodes)
+}
+
+func (c CLI) upLockedContext(ctx context.Context, o options, cfg policy.Config, nodes []policy.Node) error {
+	if e := ctx.Err(); e != nil {
+		return e
+	}
 	if !platform.Supported() {
 		return errors.New("native lifecycle unavailable on this platform")
 	}
@@ -476,7 +505,7 @@ func (c CLI) upLocked(o options, cfg policy.Config, nodes []policy.Node) error {
 	haveSession := false
 	if intent.Company {
 		if o.mode == "" {
-			if e = c.obtainAuth(o, cfg); e != nil {
+			if e = c.obtainAuthContext(ctx, o, cfg); e != nil {
 				return e
 			}
 		}
@@ -552,6 +581,14 @@ func (c CLI) upLocked(o options, cfg policy.Config, nodes []policy.Node) error {
 	if e != nil {
 		return e
 	}
+	stop, e := bindRunStop(ctx, options{run: run})
+	if e != nil {
+		return e
+	}
+	defer stop.Close()
+	if e = ctx.Err(); e != nil {
+		return e
+	}
 	if e = securefile.Write(filepath.Join(o.profile, "current.json"), map[string]string{"run": run}); e != nil {
 		return e
 	}
@@ -562,25 +599,11 @@ func (c CLI) upLocked(o options, cfg policy.Config, nodes []policy.Node) error {
 		return c.prepared(run)
 	}
 	fmt.Fprintln(c.Out, "Administrator authorization will now appear.")
-	if e = engine.Launch("serve", run); e != nil {
+	s, e := launchPreparedRun(ctx, stop, engine.LaunchContext, statusFor, startupReadinessWindow, time.Second)
+	if e != nil {
 		return e
 	}
-	for i := 0; i < 150; i++ {
-		s, e := statusFor(run)
-		if e == nil {
-			if s.Phase == "ready" {
-				return c.json(s)
-			}
-			if s.Phase == "stopped" || s.Phase == "recovery_failed" {
-				if engine.NeedsAuthentication(s) {
-					return errors.New("VPN authentication was rejected or expired; run auth, then up")
-				}
-				return errors.New("startup did not complete; inspect status and use the recovery entry")
-			}
-		}
-		time.Sleep(time.Second)
-	}
-	return errors.New("startup readiness deadline exceeded; use status or the recovery entry")
+	return c.json(s)
 }
 
 func requiresFreshAuthentication(profile string, cfg policy.Config, status engine.Status) bool {
@@ -626,6 +649,9 @@ func copyBinary(from, to string) error {
 }
 
 func validateLaunchOptions(o *options, command string) error {
+	if o.verifyRecovery && (command != "down" || runtime.GOOS != "darwin") {
+		return errors.New("--verify-restored is available only for macOS down")
+	}
 	if o.mode != "" {
 		if command != "up" || !platform.WindowsClientBuild || o.channels == nil {
 			return errors.New("explicit desktop mode requires the Windows client service and channel intent")

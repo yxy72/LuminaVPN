@@ -35,9 +35,25 @@ func cleanupProcessGone(pid int) error {
 	return errors.New("recorded process id is still in use or cannot be checked")
 }
 
-func cleanupRecovered(_ string, s State) error {
+func cleanupRecovered(run string, s State) error {
 	if os.Geteuid() != 0 {
 		return errors.New("administrator terminal required")
+	}
+	store, err := openDarwinOwnershipStore(run)
+	if err != nil {
+		return err
+	}
+	unlock, err := store.lock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	active, err := store.active()
+	if err == nil && filepath.Base(active.Run) == filepath.Base(run) {
+		return errors.New("native ownership has not been released; retain recovery artifacts")
+	}
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
 	}
 	for _, r := range s.Routes {
 		if r.State != "removed" {

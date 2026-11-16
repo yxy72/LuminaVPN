@@ -136,6 +136,8 @@ macOS 的 `doctor` 会在 `port_checks` 中区分当前用户可绑定的端口�
 
 Mac 上可用 `up --validation-timeout=5m` 启动限时验证。期限从准备运行清单时起算，可设置 1 秒至 45 分钟。到期后协调器停止，独立看门狗也会执行恢复；已过期的准备目录需要重新生成。
 
+启动时按 Ctrl+C 取消。若程序已发布本次运行，取消会把停止请求写入该运行的目录，供独立看门狗处理。等待启动就绪超时也会请求停止。Mac 上显式执行 `down --verify-restored` 会请求管理员核验本次运行的恢复回执。旧版本已结束的运行继续使用原有恢复入口。
+
 `status` 的 `channels.company`、`channels.personal`、`channels.direct` 分别包含 `state`、`reason`、`checked_at` 和需要时的 `next_action`；个人通道失败不再直接表示公司不可用。新探测证据还分别给出 `path_state`（verified/failed/unknown）和 `service_state`（healthy/failed/not_checked/unknown）。服务返回不符时可以同时显示路径 verified、服务 failed；healthy 只代表配置的 HTTP 状态符合预期。`lifecycle` 表示启动、运行或停止阶段，`phase` 保留总体状态。网络/VPN 代次/节点变化会使旧健康证据失效，超过 90 秒未复核的 ready 和细分证据显示为 unknown；旧格式状态文件继续兼容读取。
 
 输入的密码与动态码不保存；私有配置目录中仅缓存已认证 VPN 会话，最长复用两小时。服务器可提前使其失效。需要重新认证时执行：

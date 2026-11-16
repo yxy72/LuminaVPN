@@ -102,6 +102,10 @@ func bindRunStop(ctx context.Context, o options) (*RunStop, error) {
 
 func (r *RunStop) Close() error { return r.dir.Close() }
 
+func (r *RunStop) Matches(run string, identity os.FileInfo) bool {
+	return identity != nil && r.path == run && os.SameFile(r.identity, identity)
+}
+
 func (r *RunStop) check(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -198,7 +202,25 @@ func (r *RunStop) waitForStoppedReport(ctx context.Context, interval time.Durati
 // Recover explicitly delegates to the existing native recovery entry. Once
 // submitted, the OS may continue recovery even if the caller is cancelled.
 func (r *RunStop) Recover(ctx context.Context) error {
-	return r.recover(ctx, func(run string) error { return engine.Launch("recover", run) })
+	return r.recover(ctx, func(run string) error { return engine.LaunchContext(ctx, "recover", run) })
+}
+
+// RecoverVerified requests native recovery and requires an administrator-owned
+// receipt for this run even if the user-readable status already says stopped.
+func (r *RunStop) RecoverVerified(ctx context.Context) error {
+	if runtime.GOOS != "darwin" {
+		return errors.New("native verified recovery is unavailable on this platform")
+	}
+	if err := r.Request(ctx); err != nil {
+		return err
+	}
+	if err := r.check(ctx); err != nil {
+		return err
+	}
+	if err := engine.LaunchContext(ctx, "recover-verified", r.path); err != nil {
+		return err
+	}
+	return r.check(ctx)
 }
 
 func (r *RunStop) recover(ctx context.Context, launch func(string) error) error {
