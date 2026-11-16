@@ -14,6 +14,7 @@ import (
 	"netlaunch/internal/engine"
 	"netlaunch/internal/platform"
 	"netlaunch/internal/policy"
+	"netlaunch/internal/selector"
 	p "netlaunch/internal/serviceprotocol"
 	"netlaunch/internal/winservice"
 )
@@ -307,7 +308,11 @@ func projectServiceChannel(result engine.ServiceStatusResult, name string, desir
 	if !ok {
 		return channel
 	}
-	if result.Status.TakeoverActive && !health.CheckedAt.IsZero() {
+	// A failed personal service probe can be kept as a reason after the
+	// live selector has closed. Its former path is no longer current.
+	node := result.Status.Personal
+	currentPath := name != "personal" || (node != "" && node != selector.Reject && node != "PHYSICAL")
+	if result.Status.TakeoverActive && currentPath && !health.CheckedAt.IsZero() {
 		scope := publicCode(health.ProbeScope, "system_tun mixed_ingress company_binding")
 		path := publicCode(health.PathState, "verified failed unknown")
 		service := publicCode(health.ServiceState, "healthy failed not_checked unknown")

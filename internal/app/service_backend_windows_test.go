@@ -107,6 +107,14 @@ func TestServiceSnapshotProjectsOnlySafeActualEvidence(t *testing.T) {
 	if got := projectServiceChannel(result, "direct", true); got.Route != "direct" || got.State != "unavailable" || got.Probe == nil || got.Probe.PathState != "verified" || got.Probe.ServiceState != "failed" {
 		t.Fatal("service failure discarded the verified path or was shown as ready")
 	}
+	result.Status.Channels["personal"] = health
+	result.Status.PersonalFallback = false
+	for _, gated := range []string{"REJECT", "PHYSICAL", ""} {
+		result.Status.Personal = gated
+		if got := projectServiceChannel(result, "personal", true); got.Route != "unknown" || got.Probe != nil {
+			t.Fatalf("former personal probe published after the selector changed to %q", gated)
+		}
+	}
 	health.ProbeScope = "private-canary"
 	result.Status.Channels["direct"] = health
 	if got := projectServiceChannel(result, "direct", true); got.Route != "unknown" || got.Probe != nil {
