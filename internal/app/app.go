@@ -381,33 +381,37 @@ func (c CLI) down(o options) error {
 	if !platform.Supported() {
 		return errors.New("native lifecycle unavailable on this platform")
 	}
-	run, e := currentRun(o)
+	ctx := context.Background()
+	run, e := bindRunStop(ctx, o)
 	if e != nil {
 		return e
 	}
-	if s, e := statusFor(run); e == nil && s.Phase == "stopped" {
+	defer run.Close()
+	report, e := run.Observe(ctx)
+	if e != nil {
+		return e
+	}
+	if report.SavedPhase == "stopped" {
 		fmt.Fprintln(c.Out, "Already stopped.")
 		return nil
 	}
-	if e = securefile.Bytes(filepath.Join(run, "STOP"), nil); e != nil {
+	if e = run.Request(ctx); e != nil {
 		return e
 	}
 	fmt.Fprintln(c.Out, "Stop requested. Waiting for the independent recovery process…")
-	for i := 0; i < 20; i++ {
-		s, e := statusFor(run)
-		if e == nil && s.Phase == "stopped" {
-			fmt.Fprintln(c.Out, "Owned processes and routes stopped; DNS restored.")
-			return nil
-		}
-		time.Sleep(time.Second)
+	waitCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	e = run.WaitForStoppedReport(waitCtx)
+	cancel()
+	if e == nil {
+		fmt.Fprintln(c.Out, "Owned processes and routes stopped; DNS restored.")
+		return nil
 	}
-	fmt.Fprintln(c.Out, "Requesting administrator authorization to finish recovery…")
-	if e = engine.Launch("recover", run); e != nil {
+	if !errors.Is(e, context.DeadlineExceeded) {
 		return e
 	}
-	s, e := statusFor(run)
-	if e != nil || s.Phase != "stopped" {
-		return errors.New("recovery is incomplete; preserve this run directory and retry down")
+	fmt.Fprintln(c.Out, "Requesting administrator authorization to finish recovery…")
+	if e = run.Recover(ctx); e != nil {
+		return e
 	}
 	fmt.Fprintln(c.Out, "Recovery complete.")
 	return nil
