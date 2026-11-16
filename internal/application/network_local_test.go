@@ -518,7 +518,7 @@ func TestMacSavedRunPresentsNoPrivateFileValues(t *testing.T) {
 	running := makeMacReport(t, "ready")
 	running.status.Error = filepath.Join(d.Profile, "private-file")
 	running.status.Channels = map[string]engine.ChannelStatus{
-		"personal": {State: "ready", Reason: running.status.Error},
+		"personal": {State: "ready", Reason: running.status.Error, CheckedAt: time.Now()},
 	}
 	current.Store(&running)
 	got := macSnapshot(t, d)
@@ -685,9 +685,10 @@ func TestMacSnapshotDistinguishesDesiredFromAppliedChannels(t *testing.T) {
 	run.status.AppliedChannels = &policy.ChannelIntent{}
 	run.status.TakeoverActive = true
 	run.status.ChannelGeneration, run.status.AppliedGeneration = 2, 1
+	now := time.Now()
 	run.status.Channels = map[string]engine.ChannelStatus{
-		"company":  {State: "ready", Reason: "disabled_blocked", PathState: "blocked"},
-		"personal": {State: "ready", Reason: "disabled_direct", PathState: "physical_direct"},
+		"company":  {State: "ready", Reason: "disabled_blocked", PathState: "blocked", CheckedAt: now},
+		"personal": {State: "ready", Reason: "disabled_direct", PathState: "physical_direct", CheckedAt: now},
 	}
 	current.Store(&run)
 	if s := macSnapshot(t, d); s.Desired.Company || s.Desired.Personal || s.Company.Route != "unknown" || s.Personal.Route != "unknown" {
@@ -703,6 +704,44 @@ func TestMacSnapshotDistinguishesDesiredFromAppliedChannels(t *testing.T) {
 	stopped.stop = true
 	current.Store(&stopped)
 	if s := macSnapshot(t, d); s.Company.Route != "unknown" || s.Personal.Route != "unknown" {
+		t.Fatal(s)
+	}
+}
+
+func TestMacSnapshotProjectsOnlyCurrentSystemRoutes(t *testing.T) {
+	d, current := macBackendFixture(t)
+	run := makeMacReport(t, "managed")
+	intent := policy.ChannelIntent{Company: true, Personal: true}
+	run.status.DesiredChannels, run.status.AppliedChannels = &intent, &intent
+	run.status.TakeoverActive = true
+	run.status.ChannelGeneration, run.status.AppliedGeneration = 1, 1
+	run.status.Personal = "P001"
+	path := engine.ChannelStatus{State: "ready", Reason: "path_verified", CheckedAt: time.Now(), PathState: "verified", ServiceState: "not_checked", ProbeScope: "system_tun"}
+	failedService := path
+	failedService.State, failedService.ServiceState = "unavailable", "failed"
+	run.status.Channels = map[string]engine.ChannelStatus{"direct": path, "company": failedService, "personal": path}
+	current.Store(&run)
+	s := macSnapshot(t, d)
+	if s.Direct == nil || s.Direct.Route != "direct_reported" || s.Direct.Probe == nil ||
+		s.Personal.Route != "personal_reported" || s.Personal.Probe == nil ||
+		s.Company.Route != "vpn_reported" || s.Company.Probe == nil || s.Company.Probe.ServiceState != "failed" {
+		t.Fatal(s)
+	}
+	stale := path
+	stale.CheckedAt = stale.CheckedAt.Add(-time.Minute * 5)
+	companyBound := path
+	companyBound.ProbeScope = "company_binding"
+	run.status.Channels = map[string]engine.ChannelStatus{"direct": stale, "company": companyBound, "personal": path}
+	run.status.Personal = "REJECT"
+	current.Store(&run)
+	s = macSnapshot(t, d)
+	if s.Direct.Route != "unknown" || s.Direct.Probe == nil || s.Direct.Probe.PathState != "unknown" ||
+		s.Company.Route != "unknown" || s.Company.Probe != nil || s.Personal.Route != "unknown" || s.Personal.Probe != nil {
+		t.Fatal(s)
+	}
+	run.stop = true
+	current.Store(&run)
+	if s = macSnapshot(t, d); s.Direct.Route != "unknown" || s.Direct.Probe != nil {
 		t.Fatal(s)
 	}
 }

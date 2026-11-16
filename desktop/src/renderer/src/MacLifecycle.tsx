@@ -1,11 +1,24 @@
 import { useState } from 'react'
 import { isMacStartEnvironment } from '../../../protocol/client'
-import type { DesiredChannels, MacStartEnvironment, ServiceMutation, ServiceOperation, ServiceSnapshot } from '../../../protocol/client'
+import type { DesiredChannels, MacStartEnvironment, ServiceChannel, ServiceMutation, ServiceOperation, ServiceSnapshot } from '../../../protocol/client'
+import { ChannelProbeStatus } from './ChannelProbeStatus'
 
 type MacStart = Extract<ServiceMutation, { kind: 'takeover_start' }>['start']
 
 const environmentLabels: Record<MacStartEnvironment, string> = {
   shared: '共享基础规则', office: '办公', home: '家庭',
+}
+
+function reportedRoute(channel?: ServiceChannel): string {
+  switch (channel?.route) {
+    case 'blocked_reported': return '报告已阻断'
+    case 'vpn_reported': return '公司 VPN'
+    case 'personal_reported': return '个人代理节点'
+    case 'direct_reported':
+      if (channel.reason === 'all_candidates_failed') return '候选全部失败，临时直连'
+      return channel.reason === 'disabled_direct' ? '个人通道已关闭，走直连' : '物理网卡'
+    default: return '出口未确认'
+  }
 }
 
 const states: Record<string, string> = {
@@ -96,9 +109,14 @@ export function MacLifecycle({ snapshot, configured, busy, preemptible, desired,
           else setDesired({ ...desired, personal: event.target.checked })
         }} />开启个人代理</label>
     </div>
-    {showRun && <p>公司：{snapshot.company.route === 'blocked_reported' ? '报告已阻断' : snapshot.company.desired ? '已请求 VPN' : '等待阻断报告'} ·
-      个人：{state === 'applying_personal' ? '等待本次切换报告' : snapshot.personal.route === 'direct_reported'
-        ? '报告走直连' : snapshot.personal.desired ? '已请求代理' : '等待直连报告'}</p>}
+    {showRun && <section aria-labelledby="mac-channel-evidence">
+      <h3 id="mac-channel-evidence">最近保存的系统检查</h3>
+      <ul>
+        <li>直连 · {reportedRoute(snapshot.direct)}<ChannelProbeStatus channel={snapshot.direct} /></li>
+        <li>公司 VPN · {reportedRoute(snapshot.company)}<ChannelProbeStatus channel={snapshot.company} /></li>
+        <li>个人代理 · {reportedRoute(snapshot.personal)}<ChannelProbeStatus channel={snapshot.personal} /></li>
+      </ul>
+    </section>}
     {showRun && !busy && !canEditPersonal && <p>当前运行无法切换个人代理，可在下次连接时调整。</p>}
     {!configured && <p>请先在工作空间设置中保存有效策略。</p>}
     <div className="client-actions">

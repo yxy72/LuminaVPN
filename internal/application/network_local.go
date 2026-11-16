@@ -14,6 +14,7 @@ import (
 	"netlaunch/internal/app"
 	"netlaunch/internal/engine"
 	"netlaunch/internal/policy"
+	"netlaunch/internal/selector"
 	p "netlaunch/internal/serviceprotocol"
 )
 
@@ -195,7 +196,7 @@ func savedMacEnvironment(r macRunReport) p.MacEnvironment {
 	return view
 }
 
-func savedMacChannel(r macRunReport, channel string, desired bool) p.Channel {
+func savedMacChannel(r macRunReport, channel string, desired bool, now time.Time) p.Channel {
 	view := p.Channel{Desired: desired, State: "unknown", Route: "unknown"}
 	h, ok := r.status.Channels[channel]
 	if !r.reported || !ok {
@@ -205,9 +206,8 @@ func savedMacChannel(r macRunReport, channel string, desired bool) p.Channel {
 		view.State = state + "_reported"
 	}
 	view.Reason = oneOf(h.Reason, "", reasonCodes...)
-	applied := r.status.AppliedChannels
-	if !r.stop && r.status.TakeoverActive && applied != nil &&
-		r.status.ChannelGeneration != 0 && r.status.ChannelGeneration == r.status.AppliedGeneration {
+	if macChannelsSettled(r) {
+		applied := r.status.AppliedChannels
 		switch {
 		case channel == "company" && !desired && !applied.Company && h.State == "ready" && h.Reason == "disabled_blocked" && h.PathState == "blocked":
 			view.Route, view.Reason = "blocked_reported", h.Reason
@@ -215,6 +215,25 @@ func savedMacChannel(r macRunReport, channel string, desired bool) p.Channel {
 			view.Route, view.Reason = "direct_reported", h.Reason
 		case channel == "personal" && desired && applied.Personal && r.status.PersonalFallback && h.State == "degraded" && h.Reason == "all_candidates_failed" && h.PathState == "physical_direct":
 			view.Route, view.Reason = "direct_reported", h.Reason
+		}
+		node := r.status.Personal
+		currentPath := channel != "personal" || (node != "" && node != selector.Reject && node != "PHYSICAL")
+		if desired && currentPath && h.ProbeScope == "system_tun" && !h.CheckedAt.IsZero() && !now.Before(h.CheckedAt) {
+			view.Probe = &p.RouteProbe{
+				Scope: "system_tun", CheckedAt: h.CheckedAt,
+				PathState:    oneOf(h.PathState, "unknown", "verified", "failed"),
+				ServiceState: oneOf(h.ServiceState, "unknown", "healthy", "failed", "not_checked"),
+			}
+			if view.Probe.PathState == "verified" {
+				switch channel {
+				case "direct":
+					view.Route = "direct_reported"
+				case "company":
+					view.Route = "vpn_reported"
+				case "personal":
+					view.Route = "personal_reported"
+				}
+			}
 		}
 	}
 	if view.Route == "unknown" && (view.Reason == "disabled_blocked" || view.Reason == "disabled_direct" || view.Reason == "all_candidates_failed") {
@@ -232,13 +251,16 @@ func (w *localWorkspace) networkSnapshot(ctx context.Context) (p.Snapshot, error
 	n := w.network
 	n.observe(w.commands.Profile)
 	r := n.current
+	now := time.Now()
+	r.status = engine.RefreshStatus(r.status, now)
 	desired := savedMacDesired(r)
 	environment := savedMacEnvironment(r)
+	direct := savedMacChannel(r, "direct", true, now)
 	s := p.Snapshot{
 		ProtocolVersion: 1, ServiceState: "local", TakeoverState: "idle", ProfileID: w.profile,
 		Revision: n.revision, RunRef: n.runRef, OperationID: w.activeID,
 		Desired: desired,
-		Company: savedMacChannel(r, "company", desired.Company), Personal: savedMacChannel(r, "personal", desired.Personal),
+		Company: savedMacChannel(r, "company", desired.Company, now), Personal: savedMacChannel(r, "personal", desired.Personal, now), Direct: &direct,
 		RecoveryRequired:   n.lost.present || r.present && !n.restored() && !n.stoppedReport(),
 		Restored:           n.restored(),
 		MacCompanyControl:  w.activeID == "" && macCompanyEligible(r),

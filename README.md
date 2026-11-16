@@ -26,7 +26,7 @@ npm run dev
 npm run package:mac
 ```
 
-Go 不在 PATH 时，通过 `NETLAUNCH_GO` 指定构建工具。Mac 构建读取仓库的 `runtime/`，也可通过 `LUMINA_BUILD_RUNTIME` 指向独立的已验证组件目录。两种方式都校验固定 Mac 清单。Windows 客户端须在 Windows x64 原生构建，以 `LUMINA_BUILD_RUNTIME` 指向符合 Windows 清单的 runtime，在 `desktop/` 执行 `npm run package:win` 或 `npm run package:win:validation`。输出位于已忽略的 `.local/windows-client-packages/`。两个模式都固定为全机安装，打包时校验三个 Go 程序、运行组件、后台安装接口与包内字节；当前为未签名开发包。本机安装预检未通过时，完整有效的接口观测仍可用于构建，但会明确告警，并在包外保存 `build-host-readiness.json`；构建成功不表示本机可安装。实际安装器会重新执行原生预检，失败时仍在续办和旧卸载之前退出。这些变量仅用于构建，发货应用不接受执行路径或页面 URL 覆盖。Mac 和 Windows 使用同一 Mihomo fake-IP 地址池补丁，重建脚本见 `scripts/patches/`。 组装独立的 Mac 组件目录时，从现有目录复制 OpenConnect、其动态库和许可证，将 `rebuild-mihomo-macos.py` 的产物放到 `bin/mihomo`，再将固定 Mac 清单复制为 `manifest.json`。
+Go 不在 PATH 时，通过 `NETLAUNCH_GO` 指定构建工具。Mac 构建读取仓库的 `runtime/`，也可通过 `LUMINA_BUILD_RUNTIME` 指向独立的已验证组件目录。两种方式都校验固定 Mac 清单。Windows 客户端须在 Windows x64 原生构建，以 `LUMINA_BUILD_RUNTIME` 指向符合 Windows 清单的 runtime，在 `desktop/` 执行 `npm run package:win` 或 `npm run package:win:validation`。输出位于已忽略的 `.local/windows-client-packages/`。两个模式都固定为全机安装，打包时校验三个 Go 程序、运行组件、后台安装接口与包内字节；当前为未签名开发包。本机安装预检未通过时，完整有效的接口观测仍可用于构建，但会明确告警，并在包外保存 `build-host-readiness.json`；构建成功不表示本机可安装。实际安装器会重新执行原生预检，失败时仍在续办和旧卸载之前退出。这些变量仅用于构建，发货应用不接受执行路径或页面 URL 覆盖。Mac 和 Windows 的固定 Mihomo 运行时包含 fake-IP 地址池和个人回退租约补丁。用 `scripts/patches/rebuild-mihomo-fallback-lease.py` 按目标 `darwin/arm64` 或 `windows/amd64` 重建并校验。组装独立组件目录时保留现有 OpenConnect、动态库和许可证，将新内核放到对应的 `bin/mihomo` 或 `bin/mihomo.exe`，再将对应的固定清单复制为 `manifest.json`。
 
 `npm run test:electron` 使用虚构配置检查桌面行为，并在本机实包存在时验证打包资源和窗口崩溃恢复。Windows 默认检查 `win-unpacked/LuminaVPN.exe`；验证已安装程序时，可将 `LUMINA_TEST_WINDOWS_EXE` 设为该程序的绝对路径。测试仅为新建的配置对象设置私有权限。
 

@@ -41,3 +41,27 @@ describe('macOS startup environment view', () => {
     expect(applied).toContain('运行报告就绪')
   })
 })
+
+describe('macOS saved route evidence', () => {
+  it('labels all three routes and keeps path validation separate from service response', () => {
+    const checked_at = '2026-11-16T12:00:00Z'
+    const html = view({
+      ...running,
+      direct: { desired: true, route: 'direct_reported', state: 'ready_reported' },
+      company: {
+        desired: true, route: 'vpn_reported', state: 'unavailable_reported',
+        probe: { scope: 'system_tun', path_state: 'verified', service_state: 'failed', checked_at },
+      },
+      personal: { desired: true, route: 'direct_reported', state: 'degraded_reported', reason: 'all_candidates_failed' },
+    })
+    expect(html).toContain('最近保存的系统检查')
+    expect(html).toContain('直连 · 物理网卡')
+    expect(html).toContain('路径已验证 · 服务响应异常')
+    expect(html).toContain(checked_at)
+    expect(html).toContain('候选全部失败，临时直连')
+    expect(view({
+      ...running,
+      personal: { desired: false, route: 'direct_reported', state: 'ready_reported', reason: 'disabled_direct' },
+    })).toContain('个人通道已关闭，走直连')
+  })
+})

@@ -162,6 +162,7 @@ func oneOf(value, fallback string, choices ...string) string {
 
 var reasonCodes = []string{
 	"not_checked", "stopped", "stopping", "recovery_failed", "authentication_required", "physical_network_unavailable", "company_check_failed", "generation_changed", "vpn_not_ready", "lease_unavailable", "no_verified_node", "selection_changed", "network_changed", "check_expired", "probe_budget_expired", "path_verified", "service_healthy", "http_status_rejected", "core_ingress_unavailable", "tcp_unavailable", "tls_certificate_invalid", "tls_failed", "tls_timeout", "http_response_missing", "http_write_failed", "path_probe_failed", "company_authorization_unavailable", "verification_budget_expired", "personal_verification_timeout", "pending_or_unclassified", "core_control_unavailable", "disabled_blocked", "disabled_direct", "intent_pending", "all_candidates_failed",
+	"company_ingress_unavailable", "probe_incomplete", "probe_missing", "system_path_not_checked",
 }
 var nodeID = regexp.MustCompile(`^P[0-9]{3}$`)
 var subscriptionRuleSource = regexp.MustCompile(`^subscriptions\.(nodes|rules\[[0-7]\])$`)

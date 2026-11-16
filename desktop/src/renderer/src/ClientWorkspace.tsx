@@ -6,6 +6,7 @@ import { isRecord } from '../../../protocol/validation-base'
 import { healthLabels, verifiedHealthState, type NodeHealthRound } from './node-health'
 import {ProfileScope,scopedProfileImport} from './profile-scope'
 import { MacLifecycle, macOperationText } from './MacLifecycle'
+import { ChannelProbeStatus } from './ChannelProbeStatus'
 import {initialServiceEvidence,receivedServiceEvidence,lostServiceEvidence,expireServiceEvidence} from './service-evidence'
 
 type Page = 'overview' | 'nodes' | 'rules' | 'diagnostics' | 'settings'
@@ -15,13 +16,6 @@ const pretty = (x: unknown) => JSON.stringify(x, null, 2)
 const listText = (x: unknown): string => Array.isArray(x) ? x.filter(x => typeof x === 'string').join('\n') : ''
 const lines = (x: string): string[] => x.split(/[\r\n,]+/).map(x => x.trim()).filter(Boolean)
 function safeError(error: unknown): string { const code = isRecord(error) && typeof error.code === 'string' && /^[A-Z_]{1,64}$/.test(error.code) ? error.code : 'CLIENT_OPERATION_FAILED'; return ({ SERVICE_UNAVAILABLE: '后台服务不可用。请检查安装状态；现有连接是否已恢复尚未确认。', PROFILE_NOT_ENROLLED:'此配置尚未登记到后台服务。配置标识不能代替系统登记，连接状态未确认。', PROFILE_UNAVAILABLE:'后台尚无此配置的可信登记。连接状态未确认。', REVISION_CONFLICT: '配置已被其他操作更新，请重新读取并检查差异。', AUTH_REQUIRED: '请完成新的认证挑战。', CLIENT_UNAVAILABLE: '当前平台未提供此操作。', PROFILE_BUSY: '已有配置操作或配置切换正在进行。', EXIT_WORKSPACE_BUSY: '当前操作还在进行，请等待完成后退出。', EXIT_WORKSPACE_STATUS_UNAVAILABLE: '无法确认配置操作已完成。请刷新工作空间后重试。', OPERATION_NOT_FOUND: '操作记录已失效，请重新读取已保存配置。', MAC_START_FAILED: '连接未完成。请检查所选通道的配置及 macOS 授权。', MAC_AUTH_REQUIRED: '公司 VPN 需要有效会话，请在终端完成公司认证后再连接。', MAC_AUTH_FAILED: '公司认证未完成。请检查公司配置或终端提示。', MAC_OPERATION_INTERRUPTED: '网络操作已中断，请检查运行并按需使用恢复入口。', MAC_RECOVERY_UNCONFIRMED: '管理员恢复未确认。请检查诊断页后重试。', MAC_STOP_UNCONFIRMED: '停止报告尚未收到，请检查诊断页。', MAC_PERSONAL_UNAVAILABLE: '当前运行不支持切换个人代理，可在下次连接时调整。', MAC_PERSONAL_UNCONFIRMED: '个人代理设置尚未确认，请刷新当前运行状态。', RECOVERY_REQUIRED: '上一运行需要先确认恢复。', RUN_UNCONFIRMED: '无法绑定当前运行，请刷新诊断页。', EXIT_RESTORE_UNAVAILABLE: '当前运行的管理员恢复未确认，窗口保持打开。', EXIT_RESTORE_FAILED: '恢复操作未完成，窗口保持打开。', EXIT_RESTORE_UNCONFIRMED: '管理员恢复未确认，窗口保持打开。', EXIT_OPERATION_MISMATCH: '当前运行与恢复操作不匹配，请刷新诊断。', EXIT_RESTORE_TIMEOUT: '等待管理员恢复超时，窗口保持打开。' } as Record<string,string>)[code] ?? '操作未完成。请保留恢复入口，刷新状态后检查。' }
-function ChannelProbeStatus({ channel }: { channel?: ServiceChannel }) {
-  const probe = channel?.probe
-  if (!probe || probe.scope !== 'system_tun') return <p>系统路径未确认</p>
-  const path = { verified: '路径已验证', failed: '路径失败', unknown: '路径未确认' }
-  const service = { healthy: '服务响应正常', failed: '服务响应异常', not_checked: '仅检查路径', unknown: '服务响应未确认' }
-  return <p>{path[probe.path_state]} · {service[probe.service_state]} · <time dateTime={probe.checked_at}>{new Date(probe.checked_at).toLocaleTimeString()}</time></p>
-}
 function healthState(channel?: ServiceChannel): keyof typeof healthLabels {
   if (!channel) return 'unknown'
   if (channel.state === 'off' || channel.state === 'config_empty') return channel.state
