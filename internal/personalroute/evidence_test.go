@@ -86,6 +86,9 @@ func TestEvaluateRequiresCompleteCurrentIndependentFailures(t *testing.T) {
 			if got.DirectAllowed != tc.allow || got.Reason != tc.reason {
 				t.Fatalf("Evaluate = %+v, want allowed=%v reason=%s", got, tc.allow, tc.reason)
 			}
+			if got.ExpiresAt.IsZero() != (tc.reason != ReasonAllFailed) {
+				t.Fatalf("only complete automatic fallback can publish an evidence deadline, got %+v", got)
+			}
 		})
 	}
 }
@@ -121,7 +124,7 @@ func TestEvaluateIsStatelessAndDoesNotMutateEvidence(t *testing.T) {
 	before := in
 	before.Candidates = append([]string(nil), in.Candidates...)
 	before.Observations = append([]Observation(nil), in.Observations...)
-	want := Decision{DirectAllowed: true, Reason: ReasonAllFailed}
+	want := Decision{DirectAllowed: true, Reason: ReasonAllFailed, ExpiresAt: in.Observations[0].StartedAt.Add(DefaultMaxAge)}
 	if got := Evaluate(in); got != want {
 		t.Fatal(got)
 	}
@@ -138,5 +141,19 @@ func TestEvaluateIsStatelessAndDoesNotMutateEvidence(t *testing.T) {
 	}
 	if got := Evaluate(before); got != want {
 		t.Fatal(got)
+	}
+}
+
+func TestFallbackDeadlineUsesOldestEvidence(t *testing.T) {
+	in := failedPool(t)
+	in.MaxAge = 12 * time.Second
+	in.Observations[1].StartedAt = in.Now.Add(-8 * time.Second)
+	expiresAt := in.Now.Add(4 * time.Second)
+	if got := Evaluate(in); !got.DirectAllowed || !got.ExpiresAt.Equal(expiresAt) {
+		t.Fatalf("fallback may use only the remaining lifetime of the oldest check, got %+v", got)
+	}
+	in.Now = expiresAt
+	if got := Evaluate(in); got.DirectAllowed || got.Reason != ReasonStale || !got.ExpiresAt.IsZero() {
+		t.Fatalf("proof expires exactly at its published deadline, got %+v", got)
 	}
 }

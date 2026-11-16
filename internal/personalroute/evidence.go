@@ -71,6 +71,8 @@ type Input struct {
 type Decision struct {
 	DirectAllowed bool
 	Reason        string
+	// ExpiresAt bounds automatic fallback. Manual off has no evidence deadline.
+	ExpiresAt time.Time `json:"expires_at,omitzero"`
 }
 
 const (
@@ -155,6 +157,7 @@ func Evaluate(in Input) Decision {
 		}
 		observed[o.CandidateID] = o
 	}
+	var expiresAt time.Time
 	for _, id := range in.Candidates {
 		o, exists := observed[id]
 		if !exists {
@@ -172,7 +175,8 @@ func Evaluate(in Input) Decision {
 		if o.StartedAt.IsZero() || o.FinishedAt.IsZero() || o.FinishedAt.Before(o.StartedAt) || o.StartedAt.After(in.Now) || o.FinishedAt.After(in.Now) {
 			return deny(ReasonInvalidTime)
 		}
-		if in.Now.Sub(o.StartedAt) >= age || in.Now.Sub(o.FinishedAt) >= age {
+		expires := o.StartedAt.Add(age)
+		if !in.Now.Before(expires) {
 			return deny(ReasonStale)
 		}
 		if o.Outcome == Healthy {
@@ -181,6 +185,9 @@ func Evaluate(in Input) Decision {
 		if o.Outcome != PathFailed {
 			return deny(ReasonUnconfirmed)
 		}
+		if expiresAt.IsZero() || expires.Before(expiresAt) {
+			expiresAt = expires
+		}
 	}
-	return Decision{DirectAllowed: true, Reason: ReasonAllFailed}
+	return Decision{DirectAllowed: true, Reason: ReasonAllFailed, ExpiresAt: expiresAt}
 }

@@ -98,17 +98,7 @@ func (h *darwinPersonalHealth) directDeadline(s State, wake string, nodes []poli
 	if !currentIntent(s).Personal || h.binding != darwinHealthScope(s, wake) || h.latest.Generation != h.gen {
 		return time.Time{}
 	}
-	if !fallbackDecisionWithCoverage(currentIntent(s), nodes, h.gen, h.latest.Samples, now, h.latest.CoverageReason).DirectAllowed {
-		return time.Time{}
-	}
-	var until time.Time
-	for _, sample := range h.latest.Samples {
-		deadline := sample.Observation.StartedAt.Add(personalroute.DefaultMaxAge)
-		if until.IsZero() || deadline.Before(until) {
-			until = deadline
-		}
-	}
-	return until
+	return fallbackDecisionWithCoverage(currentIntent(s), nodes, h.gen, h.latest.Samples, now, h.latest.CoverageReason).ExpiresAt
 }
 
 func (h *darwinPersonalHealth) ranking() map[string]selector.TimedSample {
