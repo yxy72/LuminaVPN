@@ -22,6 +22,9 @@ class SourceBoundaryTests(unittest.TestCase):
             'desktop/tests/windows-release-stage.test.mjs',
             'scripts/patches/mihomo-v1.19.32-fakeip-pool-reuse.patch',
             'scripts/patches/mihomo-v1.19.32-fakeip-pool-reuse.provenance.json',
+            'scripts/patches/mihomo-v1.19.32-personal-fallback-lease.patch',
+            'scripts/patches/mihomo-v1.19.32-personal-fallback-lease.provenance.json',
+            'scripts/patches/test-mihomo-personal-fallback-loopback.py',
             'scripts/patches/mihomo-v1.19.32.LICENSE',
         ]
         for name in allowed:
@@ -35,6 +38,8 @@ class SourceBoundaryTests(unittest.TestCase):
             'scripts/patches/local.patch',
             'scripts/patches/mihomo-v1.19.32-fakeip-pool-reuse.report.json',
             'scripts/patches/mihomo-v1.19.32-fakeip-pool-reuse.provenance.private.json',
+            'scripts/patches/mihomo-v1.19.32-personal-fallback-lease.report.json',
+            'scripts/patches/mihomo-v1.19.32-personal-fallback-lease.provenance.private.json',
             'scripts/patches/acceptance-report.md',
             '.local/.gitattributes',
         ]:
