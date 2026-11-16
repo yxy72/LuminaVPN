@@ -92,7 +92,7 @@ func TestDarwinPinnedCorePreservesFakeIPAcrossReloadAndPersonalDirect(t *testing
 	if err := requireDarwinReloadCore(root); err != nil {
 		t.Fatal(err)
 	}
-	testDarwinFakeIPContinuity(t, filepath.Join(root, "bin", "mihomo"), true)
+	testDarwinFakeIPContinuity(t, filepath.Join(root, "bin", "mihomo"), true, false)
 }
 
 func TestDarwinLegacyCoreReusesAssignedFakeIPOnResolverReload(t *testing.T) {
@@ -107,7 +107,7 @@ func TestDarwinLegacyCoreReusesAssignedFakeIPOnResolverReload(t *testing.T) {
 	if manifest.Mihomo != "v1.19.32" {
 		t.Fatalf("expected the original macOS Mihomo bundle, got %q", manifest.Mihomo)
 	}
-	testDarwinFakeIPContinuity(t, filepath.Join(root, "bin", "mihomo"), false)
+	testDarwinFakeIPContinuity(t, filepath.Join(root, "bin", "mihomo"), false, false)
 }
 
 func TestDarwinRebuiltCorePreservesFakeIPAcrossReloadAndPersonalDirect(t *testing.T) {
@@ -115,10 +115,18 @@ func TestDarwinRebuiltCorePreservesFakeIPAcrossReloadAndPersonalDirect(t *testin
 	if executable == "" {
 		t.Skip("set NETLAUNCH_TEST_MIHOMO_REBUILD to the reviewed source rebuild")
 	}
-	testDarwinFakeIPContinuity(t, executable, true)
+	testDarwinFakeIPContinuity(t, executable, true, false)
 }
 
-func testDarwinFakeIPContinuity(t *testing.T, executable string, preservesPool bool) {
+func TestDarwinRebuiltCoreGatesAutomaticPersonalFallback(t *testing.T) {
+	executable := os.Getenv("NETLAUNCH_TEST_MIHOMO_FALLBACK_REBUILD")
+	if executable == "" {
+		t.Skip("set NETLAUNCH_TEST_MIHOMO_FALLBACK_REBUILD to the lease-enabled source rebuild")
+	}
+	testDarwinFakeIPContinuity(t, executable, true, true)
+}
+
+func testDarwinFakeIPContinuity(t *testing.T, executable string, preservesPool, leasedFallback bool) {
 	const alpha, beta, gamma, company, direct = "old.personal.example", "new.personal.example", "later.personal.example", "blocked.company.example", "direct.example"
 	const secret = "loopback-fixture-controller-secret"
 	held := make(chan struct{}, 1)
@@ -188,14 +196,15 @@ func testDarwinFakeIPContinuity(t *testing.T, executable string, preservesPool b
 	}
 	config := func(personal bool) map[string]any {
 		t.Helper()
+		automatic := !personal && leasedFallback
 		nodes := []policy.Node{{"name": "P001", "type": "hysteria2", "server": "192.0.2.77", "port": 443, "password": "fixture-only"}}
-		manifest := Manifest{Mode: Daily, Channels: &policy.ChannelIntent{Personal: personal}, Config: cfg,
+		manifest := Manifest{Mode: Daily, Channels: &policy.ChannelIntent{Personal: personal || automatic}, Config: cfg,
 			Binding: policy.Binding{Physical: "lo0", VPN: "utun50", TUN: "utun51", ControllerPort: controllerPort}}
 		var verification *personalVerification
 		if personal {
 			verification = &personalVerification{}
 		}
-		result, err := darwinCoreConfig(manifest, nodes, secret, nil, verification, false)
+		result, err := darwinCoreConfig(manifest, nodes, secret, nil, verification, automatic)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -220,6 +229,8 @@ func testDarwinFakeIPContinuity(t *testing.T, executable string, preservesPool b
 		for host, record := range dnsPolicy {
 			switch server := record.([]string)[0]; {
 			case server == "rcode://refused":
+			case automatic && strings.HasPrefix(server, "udp://") && strings.HasSuffix(server, "#PERSONAL"):
+				dnsPolicy[host] = []string{loopback + "#PERSONAL"}
 			case strings.HasSuffix(server, "#PERSONAL"):
 				// Explicit Personal Off uses the separate direct DNS policy.
 				dnsPolicy[host] = []string{"rcode://refused"}
@@ -287,8 +298,18 @@ func testDarwinFakeIPContinuity(t *testing.T, executable string, preservesPool b
 	}
 	open := func(direct bool) {
 		t.Helper()
-		if err := openDesktopConfig(selectGroup, direct); err != nil {
+		if err := openDesktopConfig(selectGroup, direct && !leasedFallback); err != nil {
 			t.Fatal(err)
+		}
+		if direct && leasedFallback {
+			if err := selectGroup("PERSONAL", "PHYSICAL"); err == nil {
+				t.Fatal("the temporary fallback opened without a lease")
+			}
+			if _, err := setFallbackLease(ctx, openFallbackLease, time.Now().Add(8*time.Second), func(work context.Context, method string, payload, out any) error {
+				return api(work, method, personalFallbackLeasePath, payload, out)
+			}); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
 
@@ -475,10 +496,12 @@ func testDarwinFakeIPContinuity(t *testing.T, executable string, preservesPool b
 		t.Fatal("fixture did not establish the physical fallback connection")
 	}
 	choose("REJECT")
-	if err := drainDarwinFallbackConnections(func(method, path string, payload, out any) error {
-		return api(ctx, method, path, payload, out)
-	}); err != nil {
-		t.Fatal(err)
+	if !leasedFallback {
+		if err := drainDarwinFallbackConnections(func(method, path string, payload, out any) error {
+			return api(ctx, method, path, payload, out)
+		}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	_, err = reader.ReadByte()
 	var timedOut net.Error
