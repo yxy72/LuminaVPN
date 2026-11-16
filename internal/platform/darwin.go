@@ -279,14 +279,14 @@ func CheckConflicts(network Network) error {
 		return e
 	}
 	if EnabledProxy(out) {
-		return errors.New("another system proxy or PAC is enabled; prepare a network handover before starting")
+		return ErrSystemProxyConflict
 	}
 	out, e = Command(context.Background(), "/usr/sbin/netstat", "-rn", "-f", "inet")
 	if e != nil {
 		return e
 	}
 	if HasTunnelDefault(out) {
-		return errors.New("another tunnel owns a default route; prepare a network handover before starting")
+		return ErrTunnelDefaultConflict
 	}
 	return nil
 }

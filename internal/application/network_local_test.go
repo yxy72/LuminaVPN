@@ -15,6 +15,7 @@ import (
 	"netlaunch/internal/engine"
 	"netlaunch/internal/policy"
 	p "netlaunch/internal/serviceprotocol"
+	"netlaunch/internal/testutil"
 )
 
 type macStopFixture struct {
@@ -56,7 +57,7 @@ func makeMacReport(t *testing.T, phase string) macRunReport {
 
 func macBackendFixture(t *testing.T) (*Desktop, *atomic.Pointer[macRunReport]) {
 	t.Helper()
-	d := &Desktop{Profile: t.TempDir(), Runtime: t.TempDir()}
+	d := &Desktop{Profile: testutil.PrivateTempDir(t), Runtime: t.TempDir()}
 	ctx, cancel := context.WithCancel(t.Context())
 	current := &atomic.Pointer[macRunReport]{}
 	current.Store(&macRunReport{})

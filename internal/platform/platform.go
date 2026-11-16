@@ -31,6 +31,11 @@ type Route struct {
 	Flags     string `json:"flags"`
 }
 
+var (
+	ErrSystemProxyConflict   = errors.New("another system proxy or PAC is enabled; prepare a network handover before starting")
+	ErrTunnelDefaultConflict = errors.New("another tunnel owns a default route; prepare a network handover before starting")
+)
+
 func Command(ctx context.Context, name string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
