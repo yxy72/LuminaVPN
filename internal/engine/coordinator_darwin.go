@@ -225,7 +225,7 @@ func serve(run string) (returned error) {
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				if alivePulse(run) != nil {
+				if alivePulse(run) != nil || managed && fenceExpiredDarwinFallback(ctx, run) != nil {
 					cancel()
 					return
 				}
@@ -373,6 +373,9 @@ func serve(run string) (returned error) {
 	sampling := &personalSampling{}
 	defer sampling.close()
 	lastHealth := time.Now()
+	health := &darwinPersonalHealth{}
+	defer health.reset()
+	var nextFallbackAttempt time.Time
 	lastResumeRequest, e := platform.WakeEpoch()
 	if e != nil {
 		return e
@@ -384,6 +387,20 @@ func serve(run string) (returned error) {
 	retry := &vpnRetry{}
 	disconnected := false
 	networkUnavailable := false
+	transitionFallback := func(state State, wake string, direct bool) error {
+		next, err := applyDarwinAutoFallback(ctx, run, state, company, verification, nodes, secret, wake, direct, func(current State) time.Time {
+			return health.directDeadline(current, wake, nodes, time.Now())
+		})
+		if err != nil {
+			return err
+		}
+		verification = next
+		selection = selector.New(names)
+		health.sampledAt = make(map[string]time.Time)
+		boundChecks.reset()
+		systemChecks.reset()
+		return nil
+	}
 	for ctx.Err() == nil {
 		select {
 		case <-companyDone:
@@ -396,6 +413,12 @@ func serve(run string) (returned error) {
 		current, e := load(run)
 		if e != nil {
 			return e
+		}
+		if current.PersonalFallback && (current.Personal != "PHYSICAL" || darwinFallbackExpired(current, time.Now()) || darwinManualChangePending(current) || health.directDeadline(current, lastResumeRequest, nodes, time.Now()).IsZero()) {
+			if e = transitionFallback(current, lastResumeRequest, false); e != nil {
+				return e
+			}
+			continue
 		}
 		if current.DarwinCompany != nil && current.DarwinCompany.Pending {
 			updated, e := applyPendingDarwinCompanyChange(run, company)
@@ -418,6 +441,7 @@ func serve(run string) (returned error) {
 		}
 		if current.DarwinPersonal != nil && current.DarwinPersonal.Pending {
 			sampling.close()
+			health.reset()
 			updated, next, e := applyPendingDarwinPersonalChange(ctx, run, current, company, verification, frozenNodes, secret)
 			if errors.Is(e, errDarwinPersonalRequestCanceled) || errors.Is(e, errDarwinPersonalPreflight) {
 				continue
@@ -442,6 +466,13 @@ func serve(run string) (returned error) {
 			return e
 		}
 		if lastResumeRequest != epoch {
+			health.reset()
+			if current.PersonalFallback {
+				if err := closeDarwinFallbackPaths(ctx, run); err != nil {
+					return err
+				}
+				networkUnavailable = true // Recompose the resolver even if the physical adapter stayed the same.
+			}
 			if err := closeDarwinVerification(run, verification); err != nil {
 				return err
 			}
@@ -466,6 +497,8 @@ func serve(run string) (returned error) {
 					s.Personal = selector.Reject
 				}
 				s.VPN.Bootstrap, s.Leases, s.Channels, s.Phase = false, nil, nil, "reconnecting"
+				s.PersonalFallback = false
+				s.DarwinAutoFallbackUntil = nil
 				return nil
 			}); e != nil {
 				return e
@@ -500,6 +533,12 @@ func serve(run string) (returned error) {
 				return err
 			}
 			networkUnavailable = true
+			health.reset()
+			if current.PersonalFallback {
+				if err := closeDarwinFallbackPaths(ctx, run); err != nil {
+					return err
+				}
+			}
 			boundChecks.reset()
 			systemChecks.reset()
 			if company != nil {
@@ -510,12 +549,18 @@ func serve(run string) (returned error) {
 				s.VPN.Bootstrap = false
 				s.Leases = nil
 				s.Phase = "network_unavailable"
+				if s.PersonalFallback {
+					s.PersonalFallback = false
+					s.DarwinAutoFallbackUntil = nil
+					s.Personal = selector.Reject
+				}
 				return nil
 			})
 			time.Sleep(time.Second)
 			continue
 		}
 		if observed != network || networkUnavailable {
+			health.reset()
 			if err := closeDarwinVerification(run, verification); err != nil {
 				return err
 			}
@@ -527,7 +572,11 @@ func serve(run string) (returned error) {
 					return e
 				}
 			}
-			if managed {
+			if current.PersonalFallback {
+				if e = closeDarwinFallbackPaths(ctx, run); e != nil {
+					return e
+				}
+			} else if managed {
 				if e = closeDarwinBasePaths(ctx, run); e != nil {
 					return e
 				}
@@ -542,6 +591,8 @@ func serve(run string) (returned error) {
 				if managed {
 					s.Channels = nil
 					s.Phase, s.Personal = "reconnecting", selector.Reject
+					s.PersonalFallback = false
+					s.DarwinAutoFallbackUntil = nil
 				}
 				return nil
 			}); e != nil {
@@ -558,6 +609,12 @@ func serve(run string) (returned error) {
 			manifest.Binding = binding
 			if managed {
 				manifest.Channels = &intent
+			}
+			if managed && intent.Personal && verification == nil {
+				verification, e = newPersonalVerification(manifest)
+				if e != nil {
+					return e
+				}
 			}
 			config, e = darwinCoreConfig(manifest, nodes, secret, company, verification)
 			if e != nil {
@@ -612,6 +669,36 @@ func serve(run string) (returned error) {
 		current, e = load(run)
 		if e != nil {
 			return e
+		}
+		if managed && intent.Personal {
+			health.advance(ctx, run, current, lastResumeRequest, nodes)
+			proof := func(s State) time.Time { return health.directDeadline(s, lastResumeRequest, nodes, time.Now()) }
+			direct := !proof(current).IsZero()
+			if current.PersonalFallback {
+				direct = direct && current.Personal == "PHYSICAL" && !darwinFallbackExpired(current, time.Now())
+				if direct {
+					if e := renewDarwinFallback(ctx, run, current, proof); e != nil {
+						return e
+					}
+				}
+			}
+			if direct != current.PersonalFallback && (!direct || !time.Now().Before(nextFallbackAttempt)) {
+				if e = transitionFallback(current, lastResumeRequest, direct); errors.Is(e, errDarwinFallbackDeferred) {
+					nextFallbackAttempt = time.Now().Add(5 * time.Second)
+				} else if e != nil {
+					return e
+				} else {
+					continue
+				}
+			}
+			if !current.PersonalFallback {
+				ranking := health.ranking()
+				if len(ranking) != 0 || verification.pending() {
+					if e := applyPersonalTimedSamples(ctx, run, selection, verification, ranking); e != nil {
+						return e
+					}
+				}
+			}
 		}
 		vpnAlive := false
 		if intent.Company {
@@ -710,7 +797,7 @@ func serve(run string) (returned error) {
 				return err
 			}
 		}
-		if intent.Personal && time.Since(lastHealth) > 15*time.Second {
+		if !managed && intent.Personal && time.Since(lastHealth) > 15*time.Second {
 			done, err := sampling.refresh(ctx, run, selection, verification)
 			if err != nil {
 				return err

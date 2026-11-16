@@ -56,7 +56,7 @@ func queueDarwinCompanyChange(s *State, requestID string, generation uint64, ena
 		}
 		return nil
 	}
-	if s.DarwinCompany.Pending || s.DarwinPersonal != nil && s.DarwinPersonal.Pending || s.ChannelGeneration != generation || s.AppliedGeneration != generation ||
+	if s.DarwinAutoFallbackPending || s.DarwinCompany.Pending || s.DarwinPersonal != nil && s.DarwinPersonal.Pending || s.ChannelGeneration != generation || s.AppliedGeneration != generation ||
 		s.AppliedChannels == nil || *s.AppliedChannels != intent {
 		return errors.New("company request generation is stale or another change is pending")
 	}

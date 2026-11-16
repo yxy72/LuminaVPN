@@ -16,6 +16,26 @@ type desktopReloadControl struct {
 	save        func(config map[string]any) error
 }
 
+type desktopConnection struct {
+	ID     string   `json:"id"`
+	Chains []string `json:"chains"`
+}
+
+func desktopConnections(request func(method, path string, payload, out any) error) ([]desktopConnection, error) {
+	var snapshot struct {
+		Connections []desktopConnection `json:"connections"`
+	}
+	err := request("GET", "/connections", nil, &snapshot)
+	return snapshot.Connections, err
+}
+
+func closeDesktopConnection(id string, request func(method, path string, payload, out any) error) error {
+	if id == "" || len(id) > 128 || strings.ContainsAny(id, "/\\\x00\r\n") {
+		return errors.New("ambiguous owned core connection during resolver transition")
+	}
+	return request("DELETE", "/connections/"+url.PathEscape(id), nil, nil)
+}
+
 func closeDesktopEgress(config map[string]any, c desktopReloadControl) error {
 	candidates := map[string]bool{}
 	if proxies, ok := config["proxies"].([]any); ok {
@@ -32,16 +52,11 @@ func closeDesktopEgress(config map[string]any, c desktopReloadControl) error {
 			}
 		}
 	}
-	var snapshot struct {
-		Connections []struct {
-			ID     string   `json:"id"`
-			Chains []string `json:"chains"`
-		} `json:"connections"`
-	}
-	if err := c.request("GET", "/connections", nil, &snapshot); err != nil {
+	connections, err := desktopConnections(c.request)
+	if err != nil {
 		return err
 	}
-	for _, connection := range snapshot.Connections {
+	for _, connection := range connections {
 		egress, company, rejected := false, false, false
 		for _, chain := range connection.Chains {
 			if candidates[chain] {
@@ -62,10 +77,10 @@ func closeDesktopEgress(config map[string]any, c desktopReloadControl) error {
 			}
 			return errors.New("unclassified owned core connection during resolver transition")
 		}
-		if company || connection.ID == "" || len(connection.ID) > 128 || strings.ContainsAny(connection.ID, "/\\\x00\r\n") {
+		if company {
 			return errors.New("ambiguous owned core connection during resolver transition")
 		}
-		if err := c.request("DELETE", "/connections/"+url.PathEscape(connection.ID), nil, nil); err != nil {
+		if err := closeDesktopConnection(connection.ID, c.request); err != nil {
 			return err
 		}
 	}

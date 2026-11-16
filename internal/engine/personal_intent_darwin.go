@@ -29,7 +29,7 @@ func queueDarwinPersonalChange(s *State, r DarwinDesktopPersonalRequest) error {
 		return nil
 	}
 	intent := currentIntent(*s)
-	if s.DarwinPersonal.Pending || s.DarwinCompany != nil && s.DarwinCompany.Pending ||
+	if s.DarwinAutoFallbackPending || s.DarwinPersonal.Pending || s.DarwinCompany != nil && s.DarwinCompany.Pending ||
 		s.ChannelGeneration != r.Generation || s.AppliedGeneration != r.Generation ||
 		s.AppliedChannels == nil || *s.AppliedChannels != intent || intent.Company != r.Company || intent.Personal == r.Personal {
 		return errors.New("personal request generation or unchanged Company intent is stale")
@@ -99,6 +99,7 @@ func (change darwinPersonalChange) publish(s *State, check func(State) error, se
 	s.ChannelGeneration++
 	s.AppliedGeneration = s.ChannelGeneration
 	s.Personal, s.PersonalFallback = selector.Reject, false
+	s.DarwinAutoFallbackUntil = nil
 	if !change.to.Personal {
 		s.Personal = "PHYSICAL"
 	}
@@ -124,7 +125,7 @@ func (change darwinPersonalChange) decline(run string, failure error) error {
 	return failure
 }
 
-func stageDarwinPersonalConfig(ctx context.Context, run string, m Manifest, nodes []policy.Node, company *companyRuntime, secret string) (map[string]any, *personalVerification, error) {
+func stageDarwinPersonalConfig(ctx context.Context, run string, m Manifest, nodes []policy.Node, company *companyRuntime, secret string, keepCandidateAdapters bool) (map[string]any, *personalVerification, error) {
 	var verification *personalVerification
 	if m.InitialChannels().Personal {
 		if len(nodes) == 0 || policy.ValidateEndpointsForIntent(m.Config, nodes, m.InitialChannels()) != nil {
@@ -135,7 +136,7 @@ func stageDarwinPersonalConfig(ctx context.Context, run string, m Manifest, node
 		if err != nil {
 			return nil, nil, err
 		}
-	} else {
+	} else if !keepCandidateAdapters {
 		nodes = nil
 	}
 	config, err := darwinCoreConfig(m, nodes, secret, company, verification)
@@ -170,7 +171,7 @@ func applyPendingDarwinPersonalChange(ctx context.Context, run string, before St
 	}
 	manifest := before.Manifest
 	manifest.Channels = &change.to
-	config, verification, err := stageDarwinPersonalConfig(ctx, run, manifest, frozenNodes, company, secret)
+	config, verification, err := stageDarwinPersonalConfig(ctx, run, manifest, frozenNodes, company, secret, false)
 	if err != nil {
 		return policy.ChannelIntent{}, nil, change.decline(run, errDarwinPersonalPreflight)
 	}
@@ -205,10 +206,10 @@ func applyPendingDarwinPersonalChange(ctx context.Context, run string, before St
 	return change.to, verification, nil
 }
 
-func confirmDarwinPersonalChange(ctx context.Context, run string, before State, change darwinPersonalChange, authorize func(State) error) error {
+func verifyDarwinPersonalResolverOwnership(before State) error {
 	network, err := platform.Discover()
-	if err != nil || network != change.network {
-		return errors.New("macOS physical network changed during personal transition")
+	if err != nil || network != before.Manifest.Network {
+		return errors.New("macOS physical network changed during personal resolver transition")
 	}
 	owned, ok := before.DNS[network.Service]
 	if !ok || !slices.Equal(owned.After, []string{"127.0.0.1"}) {
@@ -216,7 +217,14 @@ func confirmDarwinPersonalChange(ctx context.Context, run string, before State, 
 	}
 	dns, err := platform.DNS(network.Service)
 	if err != nil || !slices.Equal(dns, owned.After) {
-		return errors.New("macOS system DNS changed during personal transition")
+		return errors.New("macOS system DNS changed during personal resolver transition")
+	}
+	return nil
+}
+
+func confirmDarwinPersonalChange(ctx context.Context, run string, before State, change darwinPersonalChange, authorize func(State) error) error {
+	if err := verifyDarwinPersonalResolverOwnership(before); err != nil {
+		return err
 	}
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()

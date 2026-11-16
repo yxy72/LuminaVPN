@@ -79,33 +79,35 @@ type darwinPersonalControl struct {
 }
 
 type State struct {
-	DesiredChannels   *policy.ChannelIntent    `json:"desired_channels,omitempty"`
-	ChannelGeneration uint64                   `json:"channel_generation,omitempty"`
-	PersonalFallback  bool                     `json:"personal_fallback,omitempty"`
-	AppliedChannels   *policy.ChannelIntent    `json:"applied_channels,omitempty"`
-	AppliedGeneration uint64                   `json:"applied_generation,omitempty"`
-	TakeoverActive    bool                     `json:"takeover_active,omitempty"`
-	RunSpecDigest     string                   `json:"run_spec_digest,omitempty"`
-	Channels          map[string]ChannelHealth `json:"channels,omitempty"`
-	Version           int                      `json:"version"`
-	Windows           *WindowsState            `json:"windows,omitempty"`
-	DarwinCompany     *darwinCompanyControl    `json:"darwin_company,omitempty"`
-	DarwinPersonal    *darwinPersonalControl   `json:"darwin_personal,omitempty"`
-	Phase             string                   `json:"phase"`
-	Updated           time.Time                `json:"updated"`
-	Heartbeat         time.Time                `json:"heartbeat"`
-	Runner            platform.Identity        `json:"runner"`
-	Watcher           platform.Identity        `json:"watcher"`
-	Manifest          Manifest                 `json:"manifest"`
-	Children          []Child                  `json:"children"`
-	Routes            []OwnedRoute             `json:"routes"`
-	DNS               map[string]DNSChange     `json:"dns"`
-	VPN               VPNSession               `json:"vpn"`
-	Leases            []dnswire.Answer         `json:"leases"`
-	Personal          string                   `json:"personal"`
-	Error             string                   `json:"error,omitempty"`
-	LastReady         time.Time                `json:"last_ready"`
-	RecoveryReason    string                   `json:"recovery_reason,omitempty"`
+	DesiredChannels           *policy.ChannelIntent    `json:"desired_channels,omitempty"`
+	ChannelGeneration         uint64                   `json:"channel_generation,omitempty"`
+	PersonalFallback          bool                     `json:"personal_fallback,omitempty"`
+	AppliedChannels           *policy.ChannelIntent    `json:"applied_channels,omitempty"`
+	AppliedGeneration         uint64                   `json:"applied_generation,omitempty"`
+	TakeoverActive            bool                     `json:"takeover_active,omitempty"`
+	RunSpecDigest             string                   `json:"run_spec_digest,omitempty"`
+	Channels                  map[string]ChannelHealth `json:"channels,omitempty"`
+	Version                   int                      `json:"version"`
+	Windows                   *WindowsState            `json:"windows,omitempty"`
+	DarwinCompany             *darwinCompanyControl    `json:"darwin_company,omitempty"`
+	DarwinPersonal            *darwinPersonalControl   `json:"darwin_personal,omitempty"`
+	DarwinAutoFallbackPending bool                     `json:"darwin_auto_fallback_pending,omitempty"`
+	DarwinAutoFallbackUntil   *time.Time               `json:"darwin_auto_fallback_until,omitempty"`
+	Phase                     string                   `json:"phase"`
+	Updated                   time.Time                `json:"updated"`
+	Heartbeat                 time.Time                `json:"heartbeat"`
+	Runner                    platform.Identity        `json:"runner"`
+	Watcher                   platform.Identity        `json:"watcher"`
+	Manifest                  Manifest                 `json:"manifest"`
+	Children                  []Child                  `json:"children"`
+	Routes                    []OwnedRoute             `json:"routes"`
+	DNS                       map[string]DNSChange     `json:"dns"`
+	VPN                       VPNSession               `json:"vpn"`
+	Leases                    []dnswire.Answer         `json:"leases"`
+	Personal                  string                   `json:"personal"`
+	Error                     string                   `json:"error,omitempty"`
+	LastReady                 time.Time                `json:"last_ready"`
+	RecoveryReason            string                   `json:"recovery_reason,omitempty"`
 }
 type Status struct {
 	DarwinCompanyControl  bool                     `json:"darwin_company_control,omitempty"`
@@ -116,6 +118,7 @@ type Status struct {
 	AppliedGeneration     uint64                   `json:"applied_generation,omitempty"`
 	TakeoverActive        bool                     `json:"takeover_active,omitempty"`
 	PersonalFallback      bool                     `json:"personal_fallback,omitempty"`
+	PersonalFallbackUntil *time.Time               `json:"personal_fallback_until,omitempty"`
 	Channels              map[string]ChannelStatus `json:"channels,omitempty"`
 	Lifecycle             string                   `json:"lifecycle,omitempty"`
 	Phase                 string                   `json:"phase"`

@@ -103,6 +103,11 @@ func invalidateChannelHealth(before State, after *State) {
 	}
 }
 
+func activePersonalFallback(s State, now time.Time) bool {
+	return s.PersonalFallback && (s.Windows != nil || s.Personal == "PHYSICAL" &&
+		s.DarwinAutoFallbackUntil != nil && now.Before(*s.DarwinAutoFallbackUntil))
+}
+
 func channelView(s State, name string, now time.Time) ChannelStatus {
 	h, ok := s.Channels[name]
 	out := ageProbeEvidence(h.ChannelStatus, now)
@@ -126,7 +131,7 @@ func channelView(s State, name string, now time.Time) ChannelStatus {
 			}
 			return ChannelStatus{State: "ready", Reason: "disabled_direct", PathState: "physical_direct", CheckedAt: now}
 		}
-		if name == "personal" && s.PersonalFallback {
+		if name == "personal" && activePersonalFallback(s, now) {
 			return ChannelStatus{State: "degraded", Reason: "all_candidates_failed", PathState: "physical_direct", CheckedAt: now}
 		}
 	}
@@ -263,9 +268,9 @@ func publicStatus(s State, now time.Time) Status {
 			lifecycle = "running"
 		}
 	}
-	return Status{Phase: phase, Updated: s.Updated, Company: channels["company"].State, Personal: s.Personal, LastReady: s.LastReady, Error: s.Error, RecoveryReason: s.RecoveryReason, Experimental: true, Channels: channels, Lifecycle: lifecycle, DesiredChannels: s.DesiredChannels, AppliedChannels: s.AppliedChannels, ChannelGeneration: s.ChannelGeneration, AppliedGeneration: s.AppliedGeneration, TakeoverActive: s.TakeoverActive, PersonalFallback: s.PersonalFallback,
-		DarwinCompanyControl: lifecycle == "running" && s.DarwinCompany != nil && !s.DarwinCompany.Pending && (s.DarwinPersonal == nil || !s.DarwinPersonal.Pending),
-		DarwinPersonalControl: lifecycle == "running" && s.TakeoverActive && s.DarwinPersonal != nil && !s.DarwinPersonal.Pending &&
+	return Status{Phase: phase, Updated: s.Updated, Company: channels["company"].State, Personal: s.Personal, LastReady: s.LastReady, Error: s.Error, RecoveryReason: s.RecoveryReason, Experimental: true, Channels: channels, Lifecycle: lifecycle, DesiredChannels: s.DesiredChannels, AppliedChannels: s.AppliedChannels, ChannelGeneration: s.ChannelGeneration, AppliedGeneration: s.AppliedGeneration, TakeoverActive: s.TakeoverActive, PersonalFallback: activePersonalFallback(s, now), PersonalFallbackUntil: s.DarwinAutoFallbackUntil,
+		DarwinCompanyControl: lifecycle == "running" && !s.DarwinAutoFallbackPending && s.DarwinCompany != nil && !s.DarwinCompany.Pending && (s.DarwinPersonal == nil || !s.DarwinPersonal.Pending),
+		DarwinPersonalControl: lifecycle == "running" && !s.DarwinAutoFallbackPending && s.TakeoverActive && s.DarwinPersonal != nil && !s.DarwinPersonal.Pending &&
 			s.ChannelGeneration != 0 && s.AppliedGeneration == s.ChannelGeneration && (s.DarwinCompany == nil || !s.DarwinCompany.Pending)}
 }
 
@@ -279,11 +284,19 @@ func personalUnavailable(s *State, reason string) {
 // RefreshStatus ages public evidence even when the coordinator has stopped
 // updating its status file. It does not infer availability for legacy records.
 func RefreshStatus(s Status, now time.Time) Status {
+	expiredFallback := s.PersonalFallbackUntil != nil && !now.Before(*s.PersonalFallbackUntil)
+	if expiredFallback {
+		s.PersonalFallback = false
+	}
 	if s.Channels == nil {
 		return s
 	}
 	channels := make(map[string]ChannelStatus, len(s.Channels))
 	for name, h := range s.Channels {
+		if expiredFallback && name == "personal" && h.Reason == "all_candidates_failed" {
+			channels[name] = ChannelStatus{State: "unknown", Reason: "check_expired", PathState: "unknown", NextAction: "wait_for_probe"}
+			continue
+		}
 		wasReady := h.State == "ready"
 		h = ageProbeEvidence(h, now)
 		if wasReady && h.State != "ready" {

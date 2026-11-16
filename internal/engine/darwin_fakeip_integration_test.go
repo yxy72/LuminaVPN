@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -120,7 +121,16 @@ func TestDarwinRebuiltCorePreservesFakeIPAcrossReloadAndPersonalDirect(t *testin
 func testDarwinFakeIPContinuity(t *testing.T, executable string, preservesPool bool) {
 	const alpha, beta, gamma, company, direct = "old.personal.example", "new.personal.example", "later.personal.example", "blocked.company.example", "direct.example"
 	const secret = "loopback-fixture-controller-secret"
+	held := make(chan struct{}, 1)
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/hold" {
+			held <- struct{}{}
+			select {
+			case <-r.Context().Done():
+			case <-time.After(3 * time.Second):
+			}
+			return
+		}
 		if r.URL.Path != "/check" {
 			w.WriteHeader(http.StatusNotFound)
 			return
@@ -151,6 +161,7 @@ func testDarwinFakeIPContinuity(t *testing.T, executable string, preservesPool b
 			return
 		}
 		if _, err := http.ReadRequest(rw.Reader); err == nil {
+			time.Sleep(5 * time.Millisecond)
 			_, _ = rw.WriteString("HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\npersonal")
 			_ = rw.Flush()
 		}
@@ -177,10 +188,9 @@ func testDarwinFakeIPContinuity(t *testing.T, executable string, preservesPool b
 	}
 	config := func(personal bool) map[string]any {
 		t.Helper()
-		var nodes []policy.Node
-		if personal {
-			nodes = []policy.Node{{"name": "P001", "type": "hysteria2", "server": "192.0.2.77", "port": 443, "password": "fixture-only"}}
-		}
+		// The fallback variant keeps candidate adapters for authenticated
+		// independent health, with no candidate ingress or PERSONAL membership.
+		nodes := []policy.Node{{"name": "P001", "type": "hysteria2", "server": "192.0.2.77", "port": 443, "password": "fixture-only"}}
 		manifest := Manifest{Mode: Daily, Channels: &policy.ChannelIntent{Personal: personal}, Config: cfg,
 			Binding: policy.Binding{Physical: "lo0", VPN: "utun50", TUN: "utun51", ControllerPort: controllerPort}}
 		var verification *personalVerification
@@ -425,12 +435,54 @@ func testDarwinFakeIPContinuity(t *testing.T, executable string, preservesPool b
 		t.Fatal("personal direct reload changed an address or aliased a new host")
 	}
 	request(third, "physical")
+	var delay struct{ Delay int }
+	query := url.Values{"url": {"http://" + target.Listener.Addr().String() + "/check"}, "timeout": {"2000"}, "expected": {"200-599"}}
+	if err := api(ctx, "GET", "/proxies/P001/delay?"+query.Encode(), nil, &delay); err != nil || delay.Delay < 1 {
+		t.Fatal("fallback removed independent candidate health", delay.Delay, err)
+	}
+	seenProxy("127.0.0.1")
+	if err := selectGroup("PERSONAL", "P001"); err == nil {
+		t.Fatal("fallback exposed a candidate through the ordinary PERSONAL route")
+	}
+	if err := api(ctx, "GET", "/proxies/"+candidateGroup, nil, nil); err == nil {
+		t.Fatal("fallback kept its isolated candidate ingress group")
+	}
 	select {
 	case got := <-vias:
 		t.Fatalf("direct mode unexpectedly used the personal proxy for %s", got)
 	default:
 	}
 
+	// Revoke a real, tracked Personal→PHYSICAL flow before changing DNS.
+	connection, err := (&net.Dialer{Timeout: time.Second}).DialContext(ctx, "tcp4", mixedAddress)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	_ = connection.SetDeadline(time.Now().Add(2 * time.Second))
+	dst := net.JoinHostPort(first.String(), strconv.Itoa(port))
+	_, _ = fmt.Fprintf(connection, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", dst, dst)
+	reader := bufio.NewReader(connection)
+	if tunnel, err := http.ReadResponse(reader, &http.Request{Method: http.MethodConnect}); err != nil || tunnel.StatusCode != http.StatusOK {
+		t.Fatal("could not create the held personal fallback connection", err)
+	}
+	_, _ = fmt.Fprintf(connection, "GET /hold HTTP/1.1\r\nHost: %s\r\n\r\n", dst)
+	select {
+	case <-held:
+	case <-time.After(time.Second):
+		t.Fatal("fixture did not establish the physical fallback connection")
+	}
+	choose("REJECT")
+	if err := drainDarwinFallbackConnections(func(method, path string, payload, out any) error {
+		return api(ctx, method, path, payload, out)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = reader.ReadByte()
+	var timedOut net.Error
+	if err == nil || errors.As(err, &timedOut) && timedOut.Timeout() {
+		t.Fatalf("the old fallback connection was not immediately retired: %v", err)
+	}
 	if err := reload(true, nil); err != nil {
 		t.Fatal(err)
 	}
