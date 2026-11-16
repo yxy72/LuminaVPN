@@ -1,0 +1,934 @@
+diff --git a/adapter/outboundgroup/lumina_fallback_control.go b/adapter/outboundgroup/lumina_fallback_control.go
+new file mode 100644
+--- /dev/null
++++ b/adapter/outboundgroup/lumina_fallback_control.go
+@@ -0,0 +1,183 @@
++package outboundgroup
++
++import (
++	"crypto/rand"
++	"encoding/hex"
++	"errors"
++	"math"
++	"strconv"
++	"time"
++
++	C "github.com/metacubex/mihomo/constant"
++)
++
++var (
++	ErrLuminaFallbackConflict    = errors.New("automatic fallback selector revision or state changed")
++	ErrLuminaFallbackDeadline    = errors.New("automatic fallback deadline is outside the authorized interval")
++	ErrLuminaFallbackUnsupported = errors.New("automatic fallback lease is not configured")
++)
++
++const maxLuminaFallback = 45 * time.Second
++
++type LuminaFallbackRequest struct {
++	Revision   string `json:"revision"`
++	Operation  string `json:"operation"`
++	DeadlineMS int64  `json:"deadline_ms"`
++}
++
++type LuminaFallbackStatus struct {
++	Revision   string `json:"revision"`
++	NowMS      int64  `json:"now_ms"`
++	Active     bool   `json:"active"`
++	DeadlineMS int64  `json:"deadline_ms,omitempty"`
++}
++
++// The instance epoch and all of its deadlines use the same monotonic clock.
++// Clients can map a proof's remaining duration onto the last observed offset.
++type fallbackControl struct {
++	reject     C.Proxy
++	physical   C.Proxy
++	epoch      time.Time
++	instance   string
++	revision   uint64
++	deadline   time.Time
++	deadlineMS int64
++	retired    bool
++	lease      *fallbackLease
++	timer      *time.Timer
++}
++
++func newFallbackControl() (*fallbackControl, error) {
++	var identity [16]byte
++	if _, err := rand.Read(identity[:]); err != nil {
++		return nil, err
++	}
++	return &fallbackControl{epoch: time.Now(), instance: hex.EncodeToString(identity[:])}, nil
++}
++
++func (f *fallbackControl) token() string {
++	return f.instance + "-" + strconv.FormatUint(f.revision, 16)
++}
++
++func (f *fallbackControl) status(now time.Time) LuminaFallbackStatus {
++	return LuminaFallbackStatus{
++		Revision: f.token(), NowMS: now.Sub(f.epoch).Milliseconds(), Active: f.lease != nil, DeadlineMS: f.deadlineMS,
++	}
++}
++
++func (s *Selector) HasLuminaFallback() bool { return s.fallback != nil }
++
++// revokeFallback requires selectionMu. Even REJECT on a closed selector
++// invalidates outstanding permission to open it.
++func (s *Selector) revokeFallback() {
++	f := s.fallback
++	f.revision++
++	if f.timer != nil {
++		f.timer.Stop()
++		f.timer = nil
++	}
++	if f.lease != nil {
++		f.lease.revoke()
++		f.lease = nil
++	}
++	f.deadline, f.deadlineMS = time.Time{}, 0
++	s.selected = "REJECT"
++}
++
++func (s *Selector) applyFallbackExpiry(now time.Time) {
++	if f := s.fallback; f != nil && f.lease != nil && !now.Before(f.deadline) {
++		s.revokeFallback()
++	}
++}
++
++func (s *Selector) expireFallback(revision uint64) {
++	s.selectionMu.Lock()
++	defer s.selectionMu.Unlock()
++	f := s.fallback
++	if f.retired || f.revision != revision || f.lease == nil {
++		return
++	}
++	if remaining := time.Until(f.deadline); remaining > 0 {
++		f.timer = time.AfterFunc(remaining, func() { s.expireFallback(revision) })
++		return
++	}
++	s.revokeFallback()
++}
++
++func (s *Selector) RetireLuminaFallback() {
++	if s.fallback == nil {
++		return
++	}
++	s.selectionMu.Lock()
++	defer s.selectionMu.Unlock()
++	s.fallback.retired = true
++	s.revokeFallback()
++}
++
++func (s *Selector) LuminaFallbackStatus() (LuminaFallbackStatus, error) {
++	s.selectionMu.Lock()
++	defer s.selectionMu.Unlock()
++	f := s.fallback
++	if f == nil {
++		return LuminaFallbackStatus{}, ErrLuminaFallbackUnsupported
++	}
++	if f.retired {
++		return LuminaFallbackStatus{}, ErrLuminaFallbackConflict
++	}
++	now := time.Now()
++	s.applyFallbackExpiry(now)
++	return f.status(now), nil
++}
++
++func (s *Selector) SetLuminaFallback(r LuminaFallbackRequest) (LuminaFallbackStatus, error) {
++	s.selectionMu.Lock()
++	defer s.selectionMu.Unlock()
++	f := s.fallback
++	if f == nil {
++		return LuminaFallbackStatus{}, ErrLuminaFallbackUnsupported
++	}
++	now := time.Now()
++	s.applyFallbackExpiry(now)
++	if f.retired || r.Revision != f.token() {
++		return LuminaFallbackStatus{}, ErrLuminaFallbackConflict
++	}
++	// Validate the offset before multiplication and compare the exact deadline
++	// in monotonic time. A large positive or signed offset cannot wrap.
++	if r.DeadlineMS <= 0 || r.DeadlineMS > math.MaxInt64/int64(time.Millisecond) {
++		return LuminaFallbackStatus{}, ErrLuminaFallbackDeadline
++	}
++	deadline := f.epoch.Add(time.Duration(r.DeadlineMS) * time.Millisecond)
++	if remaining := deadline.Sub(now); remaining <= 0 || remaining > maxLuminaFallback {
++		return LuminaFallbackStatus{}, ErrLuminaFallbackDeadline
++	}
++
++	switch r.Operation {
++	case "open":
++		if f.lease != nil {
++			return LuminaFallbackStatus{}, ErrLuminaFallbackConflict
++		}
++		f.lease = newFallbackLease(deadline)
++	case "renew":
++		if f.lease == nil || !deadline.After(f.deadline) {
++			return LuminaFallbackStatus{}, ErrLuminaFallbackConflict
++		}
++		if !f.lease.renew(deadline) {
++			s.applyFallbackExpiry(time.Now())
++			return LuminaFallbackStatus{}, ErrLuminaFallbackConflict
++		}
++		f.timer.Stop()
++	default:
++		return LuminaFallbackStatus{}, ErrLuminaFallbackDeadline
++	}
++	f.revision++
++	revision := f.revision
++	f.deadline, f.deadlineMS = deadline, r.DeadlineMS
++	f.timer = time.AfterFunc(time.Until(deadline), func() { s.expireFallback(revision) })
++	s.selected = "PHYSICAL"
++	now = time.Now()
++	s.applyFallbackExpiry(now)
++	if f.lease == nil {
++		return LuminaFallbackStatus{}, ErrLuminaFallbackDeadline
++	}
++	return f.status(now), nil
++}
+diff --git a/adapter/outboundgroup/lumina_fallback_lease.go b/adapter/outboundgroup/lumina_fallback_lease.go
+new file mode 100644
+--- /dev/null
++++ b/adapter/outboundgroup/lumina_fallback_lease.go
+@@ -0,0 +1,147 @@
++package outboundgroup
++
++import (
++	"context"
++	"errors"
++	"io"
++	"net"
++	"sync"
++	"time"
++
++	C "github.com/metacubex/mihomo/constant"
++	"github.com/metacubex/sing/common/buf"
++)
++
++var errFallbackRevoked = errors.New("automatic personal fallback is not authorized")
++
++type fallbackLease struct {
++	mu       sync.Mutex
++	live     map[*fallbackUse]io.Closer
++	closed   bool
++	deadline time.Time
++}
++
++type fallbackUse struct {
++	lease  *fallbackLease
++	cancel context.CancelFunc
++}
++
++func newFallbackLease(deadline time.Time) *fallbackLease {
++	return &fallbackLease{live: make(map[*fallbackUse]io.Closer), deadline: deadline}
++}
++
++func (l *fallbackLease) renew(deadline time.Time) bool {
++	l.mu.Lock()
++	defer l.mu.Unlock()
++	if l.closed || !time.Now().Before(l.deadline) {
++		return false
++	}
++	l.deadline = deadline
++	return true
++}
++
++func (l *fallbackLease) authorized() bool {
++	l.mu.Lock()
++	defer l.mu.Unlock()
++	return !l.closed && time.Now().Before(l.deadline)
++}
++
++func (l *fallbackLease) enter(parent context.Context) (context.Context, *fallbackUse, error) {
++	if l == nil {
++		return nil, nil, errFallbackRevoked
++	}
++	l.mu.Lock()
++	defer l.mu.Unlock()
++	if l.closed || !time.Now().Before(l.deadline) {
++		return nil, nil, errFallbackRevoked
++	}
++	ctx, cancel := context.WithDeadline(parent, l.deadline)
++	use := &fallbackUse{lease: l, cancel: cancel}
++	l.live[use] = nil
++	return ctx, use, nil
++}
++
++func (u *fallbackUse) attach(ctx context.Context, conn io.Closer) bool {
++	l := u.lease
++	l.mu.Lock()
++	defer l.mu.Unlock()
++	if _, pending := l.live[u]; !pending || ctx.Err() != nil || !time.Now().Before(l.deadline) {
++		return false
++	}
++	l.live[u] = conn
++	return true
++}
++
++func (u *fallbackUse) Close() error {
++	l := u.lease
++	l.mu.Lock()
++	defer l.mu.Unlock()
++	conn := l.live[u]
++	delete(l.live, u)
++	u.cancel()
++	if conn != nil {
++		return conn.Close()
++	}
++	return nil
++}
++
++func (l *fallbackLease) revoke() {
++	l.mu.Lock()
++	l.closed = true
++	live := l.live
++	l.live = nil
++	l.mu.Unlock()
++	for use := range live {
++		use.cancel()
++	}
++	for _, conn := range live {
++		if conn != nil {
++			_ = conn.Close()
++		}
++	}
++}
++
++type fallbackTCPConn struct {
++	C.Conn
++	use *fallbackUse
++}
++
++func (c *fallbackTCPConn) Close() error { return c.use.Close() }
++
++func (c *fallbackTCPConn) Write(data []byte) (int, error) {
++	if !c.use.lease.authorized() {
++		return 0, errFallbackRevoked
++	}
++	return c.Conn.Write(data)
++}
++
++func (c *fallbackTCPConn) WriteBuffer(buffer *buf.Buffer) error {
++	if !c.use.lease.authorized() {
++		buffer.Release()
++		return errFallbackRevoked
++	}
++	return c.Conn.WriteBuffer(buffer)
++}
++
++type fallbackPacketConn struct {
++	C.PacketConn
++	use *fallbackUse
++}
++
++func (c *fallbackPacketConn) Close() error { return c.use.Close() }
++
++func (c *fallbackPacketConn) WriteTo(data []byte, target net.Addr) (int, error) {
++	if !c.use.lease.authorized() {
++		return 0, errFallbackRevoked
++	}
++	return c.PacketConn.WriteTo(data, target)
++}
++
++func (c *fallbackPacketConn) ResolveUDP(ctx context.Context, metadata *C.Metadata) error {
++	work, lookup, err := c.use.lease.enter(ctx)
++	if err != nil {
++		return err
++	}
++	defer lookup.Close()
++	return c.PacketConn.ResolveUDP(work, metadata)
++}
+diff --git a/adapter/outboundgroup/lumina_fallback_lease_test.go b/adapter/outboundgroup/lumina_fallback_lease_test.go
+new file mode 100644
+--- /dev/null
++++ b/adapter/outboundgroup/lumina_fallback_lease_test.go
+@@ -0,0 +1,158 @@
++package outboundgroup
++
++import (
++	"context"
++	"errors"
++	"io"
++	"net"
++	"os"
++	"testing"
++	"time"
++
++	"github.com/metacubex/sing/common/buf"
++)
++
++func TestLuminaFallbackRevokesPendingAndEstablishedSockets(t *testing.T) {
++	lease := newFallbackLease(time.Now().Add(time.Second))
++	pending, pendingUse, err := lease.enter(context.Background())
++	if err != nil {
++		t.Fatal(err)
++	}
++	work, use, err := lease.enter(context.Background())
++	if err != nil {
++		t.Fatal(err)
++	}
++	local, peer := net.Pipe()
++	defer peer.Close()
++	if !use.attach(work, local) {
++		t.Fatal("unable to attach established fixture")
++	}
++	lease.revoke()
++	if !errors.Is(pending.Err(), context.Canceled) || !errors.Is(work.Err(), context.Canceled) {
++		t.Fatal("revocation returned while dial contexts were active")
++	}
++	if _, _, err := lease.enter(context.Background()); !errors.Is(err, errFallbackRevoked) {
++		t.Fatal("revoked lease permitted a new dial", err)
++	}
++	late, latePeer := net.Pipe()
++	defer late.Close()
++	defer latePeer.Close()
++	if pendingUse.attach(pending, late) {
++		t.Fatal("late socket escaped the revoked lease")
++	}
++	_ = peer.SetReadDeadline(time.Now().Add(time.Second))
++	if _, err := peer.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
++		t.Fatalf("revocation did not close the established socket: %v", err)
++	}
++}
++
++func TestLuminaFallbackRenewalAndAutonomousExpiry(t *testing.T) {
++	control, err := newFallbackControl()
++	if err != nil {
++		t.Fatal(err)
++	}
++	selector := &Selector{selected: "REJECT", fallback: control}
++	defer selector.RetireLuminaFallback()
++	initial, _ := selector.LuminaFallbackStatus()
++	if initial.Active || initial.NowMS < 0 {
++		t.Fatal("fallback started open", initial)
++	}
++	for _, bad := range []int64{-1, 0, initial.NowMS + 46000, 1<<63 - 1} {
++		_, err := selector.SetLuminaFallback(LuminaFallbackRequest{initial.Revision, "open", bad})
++		if !errors.Is(err, ErrLuminaFallbackDeadline) {
++			t.Fatalf("invalid deadline %d: %v", bad, err)
++		}
++	}
++	if err := selector.Set("PHYSICAL"); !errors.Is(err, ErrLuminaFallbackConflict) {
++		t.Fatal("stock selector bypassed lease", err)
++	}
++	open, err := selector.SetLuminaFallback(LuminaFallbackRequest{initial.Revision, "open", initial.NowMS + 200})
++	if err != nil || !open.Active || open.Revision == initial.Revision || open.DeadlineMS != initial.NowMS+200 {
++		t.Fatal("lease did not echo the assigned deadline", open, err)
++	}
++
++	selector.selectionMu.Lock()
++	lease := control.lease
++	selector.selectionMu.Unlock()
++	ctx, use, err := lease.enter(context.Background())
++	if err != nil {
++		t.Fatal(err)
++	}
++	local, peer := net.Pipe()
++	defer peer.Close()
++	if !use.attach(ctx, local) {
++		t.Fatal("unable to attach established fixture")
++	}
++	renew, err := selector.SetLuminaFallback(LuminaFallbackRequest{open.Revision, "renew", initial.NowMS + 500})
++	if err != nil || !renew.Active || renew.Revision == open.Revision || renew.DeadlineMS != initial.NowMS+500 {
++		t.Fatal("renewal failed or discarded established sockets", renew, err)
++	}
++	// This waits past the initial lease but before the renewal, without
++	// contacting the selector. The earliest timer must not close the socket.
++	_ = peer.SetReadDeadline(control.epoch.Add(300 * time.Millisecond))
++	if _, err := peer.Read(make([]byte, 1)); !errors.Is(err, os.ErrDeadlineExceeded) {
++		t.Fatalf("earlier timer closed a renewed socket: %v", err)
++	}
++	_ = peer.SetReadDeadline(control.epoch.Add(3 * time.Second))
++	if _, err := peer.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
++		t.Fatalf("renewal expiry did not close the socket without controller activity: %v", err)
++	}
++	closed, err := selector.LuminaFallbackStatus()
++	if err != nil || closed.Active || closed.Revision == renew.Revision || closed.DeadlineMS != 0 {
++		t.Fatal("expiry readback is not closed", closed, err)
++	}
++	_, err = selector.SetLuminaFallback(LuminaFallbackRequest{closed.Revision, "renew", closed.NowMS + 1000})
++	if !errors.Is(err, ErrLuminaFallbackConflict) {
++		t.Fatal("expired lease was renewed", err)
++	}
++}
++
++func TestLuminaFallbackRejectAndRetirementInvalidateConcurrentOpen(t *testing.T) {
++	control, err := newFallbackControl()
++	if err != nil {
++		t.Fatal(err)
++	}
++	selector := &Selector{selected: "REJECT", fallback: control}
++	initial, _ := selector.LuminaFallbackStatus()
++	if err := selector.Set("REJECT"); err != nil {
++		t.Fatal(err)
++	}
++	_, err = selector.SetLuminaFallback(LuminaFallbackRequest{initial.Revision, "open", initial.NowMS + 1000})
++	if !errors.Is(err, ErrLuminaFallbackConflict) {
++		t.Fatal("a delayed open survived an explicit REJECT", err)
++	}
++	closed, _ := selector.LuminaFallbackStatus()
++	done := make(chan error, 1)
++	go func() {
++		_, err := selector.SetLuminaFallback(LuminaFallbackRequest{closed.Revision, "open", closed.NowMS + 1000})
++		done <- err
++	}()
++	selector.RetireLuminaFallback()
++	if err := <-done; err != nil && !errors.Is(err, ErrLuminaFallbackConflict) {
++		t.Fatal(err)
++	}
++	if selector.selected != "REJECT" || control.lease != nil {
++		t.Fatal("a swapped-out selector remained authorized")
++	}
++	_, err = selector.SetLuminaFallback(LuminaFallbackRequest{control.token(), "open", closed.NowMS + 1000})
++	if !errors.Is(err, ErrLuminaFallbackConflict) {
++		t.Fatal("a removed selector accepted a new lease", err)
++	}
++}
++
++func TestLuminaFallbackDeniesWritesBeforeDelayedTimer(t *testing.T) {
++	// A deadline can elapse while the scheduler has yet to deliver its timer.
++	use := &fallbackUse{lease: newFallbackLease(time.Now().Add(-time.Millisecond))}
++	conn := &fallbackTCPConn{use: use}
++	packet := &fallbackPacketConn{use: use}
++	if _, err := conn.Write([]byte("late")); !errors.Is(err, errFallbackRevoked) {
++		t.Fatal("a TCP write escaped its deadline", err)
++	}
++	b := buf.New()
++	if err := conn.WriteBuffer(b); !errors.Is(err, errFallbackRevoked) {
++		t.Fatal("a buffered TCP write escaped its deadline", err)
++	}
++	if _, err := packet.WriteTo([]byte("late"), nil); !errors.Is(err, errFallbackRevoked) {
++		t.Fatal("a UDP write escaped its deadline", err)
++	}
++}
+diff --git a/adapter/outboundgroup/selector.go b/adapter/outboundgroup/selector.go
+--- a/adapter/outboundgroup/selector.go
++++ b/adapter/outboundgroup/selector.go
+@@ -4,38 +4,81 @@
+ 	"context"
+ 	"encoding/json"
+ 	"errors"
++	"sync"
++	"time"
+ 
+ 	C "github.com/metacubex/mihomo/constant"
+ 	P "github.com/metacubex/mihomo/constant/provider"
+ )
+ 
+ type SelectorOption struct {
+-	DefaultSelected string `group:"default-selected,omitempty"`
++	LuminaFallbackLease bool   `group:"lumina-fallback-lease,omitempty"`
++	DefaultSelected     string `group:"default-selected,omitempty"`
+ }
+ 
+ type Selector struct {
+ 	*GroupBase
+-	disableUDP bool
+-	selected   string
+-	testUrl    string
++	disableUDP  bool
++	selected    string
++	testUrl     string
++	selectionMu sync.RWMutex
++	fallback    *fallbackControl
+ }
+ 
+ // DialContext implements C.ProxyAdapter
+ func (s *Selector) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, error) {
+-	c, err := s.selectedProxy(true).DialContext(ctx, metadata)
+-	if err == nil {
+-		c.AppendToChains(s)
+-	}
+-	return c, err
++	target, lease := s.selection(true)
++	if lease == nil {
++		c, err := target.DialContext(ctx, metadata)
++		if err == nil {
++			c.AppendToChains(s)
++		}
++		return c, err
++	}
++	work, use, err := lease.enter(ctx)
++	if err != nil {
++		return nil, err
++	}
++	c, err := target.DialContext(work, metadata)
++	if err != nil {
++		_ = use.Close()
++		return nil, err
++	}
++	if !use.attach(work, c) {
++		_ = use.Close()
++		_ = c.Close()
++		return nil, errFallbackRevoked
++	}
++	c.AppendToChains(s)
++	return &fallbackTCPConn{Conn: c, use: use}, nil
+ }
+ 
+ // ListenPacketContext implements C.ProxyAdapter
+ func (s *Selector) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (C.PacketConn, error) {
+-	pc, err := s.selectedProxy(true).ListenPacketContext(ctx, metadata)
+-	if err == nil {
+-		pc.AppendToChains(s)
+-	}
+-	return pc, err
++	target, lease := s.selection(true)
++	if lease == nil {
++		pc, err := target.ListenPacketContext(ctx, metadata)
++		if err == nil {
++			pc.AppendToChains(s)
++		}
++		return pc, err
++	}
++	work, use, err := lease.enter(ctx)
++	if err != nil {
++		return nil, err
++	}
++	pc, err := target.ListenPacketContext(work, metadata)
++	if err != nil {
++		_ = use.Close()
++		return nil, err
++	}
++	if !use.attach(work, pc) {
++		_ = use.Close()
++		_ = pc.Close()
++		return nil, errFallbackRevoked
++	}
++	pc.AppendToChains(s)
++	return &fallbackPacketConn{PacketConn: pc, use: use}, nil
+ }
+ 
+ // SupportUDP implements C.ProxyAdapter
+@@ -81,18 +124,37 @@
+ }
+ 
+ func (s *Selector) Set(name string) error {
++	if s.fallback != nil {
++		s.selectionMu.Lock()
++		defer s.selectionMu.Unlock()
++		if s.fallback.retired || name != "REJECT" {
++			return ErrLuminaFallbackConflict
++		}
++		s.revokeFallback()
++		return nil
++	}
+ 	for _, proxy := range s.GetProxies(false) {
+ 		if proxy.Name() == name {
+-			s.selected = name
++			s.ForceSet(name)
+ 			return nil
+ 		}
+ 	}
+-
+ 	return errors.New("proxy not exist")
+ }
+ 
+ func (s *Selector) ForceSet(name string) {
++	s.selectionMu.Lock()
++	defer s.selectionMu.Unlock()
++	if s.fallback != nil {
++		s.revokeFallback()
++		return
++	}
+ 	s.selected = name
++}
++
++func (s *Selector) Close() error {
++	s.RetireLuminaFallback()
++	return s.GroupBase.Close()
+ }
+ 
+ // Unwrap implements C.ProxyAdapter
+@@ -101,14 +163,30 @@
+ }
+ 
+ func (s *Selector) selectedProxy(touch bool) C.Proxy {
++	proxy, _ := s.selection(touch)
++	return proxy
++}
++
++func (s *Selector) selection(touch bool) (C.Proxy, *fallbackLease) {
++	if f := s.fallback; f != nil {
++		s.selectionMu.Lock()
++		defer s.selectionMu.Unlock()
++		s.applyFallbackExpiry(time.Now())
++		if f.lease != nil {
++			return f.physical, f.lease
++		}
++		return f.reject, nil
++	}
+ 	proxies := s.GetProxies(touch)
++	s.selectionMu.RLock()
++	selected := s.selected
++	s.selectionMu.RUnlock()
+ 	for _, proxy := range proxies {
+-		if proxy.Name() == s.selected {
+-			return proxy
+-		}
+-	}
+-
+-	return proxies[0]
++		if proxy.Name() == selected {
++			return proxy, nil
++		}
++	}
++	return proxies[0], nil
+ }
+ 
+ func (s *Selector) Providers() []P.ProxyProvider {
+@@ -120,7 +198,21 @@
+ }
+ 
+ func NewSelector(option GroupCommonOption, selectorOption SelectorOption, emptyFallback C.Proxy, providers []P.ProxyProvider) (*Selector, error) {
+-	return &Selector{
++	if selectorOption.LuminaFallbackLease && (option.Name != "PERSONAL" ||
++		selectorOption.DefaultSelected != "" && selectorOption.DefaultSelected != "REJECT") {
++		return nil, errors.New("automatic fallback lease requires a closed PERSONAL selector")
++	}
++	var fallback *fallbackControl
++	if selectorOption.LuminaFallbackLease {
++		var err error
++		fallback, err = newFallbackControl()
++		if err != nil {
++			return nil, err
++		}
++		selectorOption.DefaultSelected = "REJECT"
++	}
++	s := &Selector{
++		fallback: fallback,
+ 		GroupBase: NewGroupBase(GroupBaseOption{
+ 			Name:           option.Name,
+ 			Type:           C.Selector,
+@@ -137,5 +229,13 @@
+ 		selected:   selectorOption.DefaultSelected,
+ 		disableUDP: option.DisableUDP,
+ 		testUrl:    option.URL,
+-	}, nil
+-}
++	}
++	if fallback != nil {
++		proxies := s.GetProxies(false)
++		if len(proxies) != 2 || proxies[0].Name() != "REJECT" || proxies[1].Name() != "PHYSICAL" {
++			return nil, errors.New("automatic fallback selector requires REJECT and PHYSICAL")
++		}
++		fallback.reject, fallback.physical = proxies[0], proxies[1]
++	}
++	return s, nil
++}
+diff --git a/hub/executor/executor.go b/hub/executor/executor.go
+--- a/hub/executor/executor.go
++++ b/hub/executor/executor.go
+@@ -43,6 +43,14 @@
+ )
+ 
+ var mux sync.Mutex
++
++// WithConfigLock serializes a configuration-dependent controller mutation
++// with an entire reload, including DNS and rule publication.
++func WithConfigLock(action func()) {
++	mux.Lock()
++	defer mux.Unlock()
++	action()
++}
+ 
+ func readConfig(path string) ([]byte, error) {
+ 	if _, err := os.Stat(path); os.IsNotExist(err) {
+diff --git a/hub/route/lumina_fallback.go b/hub/route/lumina_fallback.go
+new file mode 100644
+--- /dev/null
++++ b/hub/route/lumina_fallback.go
+@@ -0,0 +1,67 @@
++package route
++
++import (
++	"bytes"
++	"encoding/json"
++	"errors"
++	"io"
++
++	"github.com/metacubex/chi/render"
++	"github.com/metacubex/http"
++	"github.com/metacubex/mihomo/adapter/outboundgroup"
++	"github.com/metacubex/mihomo/hub/executor"
++	"github.com/metacubex/mihomo/tunnel"
++)
++
++func useLuminaFallback(w http.ResponseWriter, r *http.Request, action func(*outboundgroup.Selector) (outboundgroup.LuminaFallbackStatus, error)) {
++	var status outboundgroup.LuminaFallbackStatus
++	err := outboundgroup.ErrLuminaFallbackUnsupported
++	executor.WithConfigLock(func() {
++		if r.Context().Err() != nil {
++			err = outboundgroup.ErrLuminaFallbackConflict
++			return
++		}
++		if proxy := tunnel.CurrentProxy("PERSONAL"); proxy != nil {
++			if selector, ok := proxy.Adapter().(*outboundgroup.Selector); ok {
++				status, err = action(selector)
++			}
++		}
++	})
++	if err != nil {
++		code := http.StatusBadRequest
++		if errors.Is(err, outboundgroup.ErrLuminaFallbackConflict) {
++			code = http.StatusConflict
++		} else if errors.Is(err, outboundgroup.ErrLuminaFallbackUnsupported) {
++			code = http.StatusNotFound
++		}
++		render.Status(r, code)
++		render.JSON(w, r, newError(err.Error()))
++		return
++	}
++	render.JSON(w, r, status)
++}
++
++func getLuminaFallback(w http.ResponseWriter, r *http.Request) {
++	useLuminaFallback(w, r, (*outboundgroup.Selector).LuminaFallbackStatus)
++}
++
++func setLuminaFallback(w http.ResponseWriter, r *http.Request) {
++	const requestLimit = 1024
++	data, err := io.ReadAll(io.LimitReader(r.Body, requestLimit+1))
++	if err != nil || len(data) > requestLimit {
++		render.Status(r, http.StatusBadRequest)
++		render.JSON(w, r, ErrBadRequest)
++		return
++	}
++	var req outboundgroup.LuminaFallbackRequest
++	decoder := json.NewDecoder(bytes.NewReader(data))
++	decoder.DisallowUnknownFields()
++	if decoder.Decode(&req) != nil || decoder.Decode(new(any)) != io.EOF {
++		render.Status(r, http.StatusBadRequest)
++		render.JSON(w, r, ErrBadRequest)
++		return
++	}
++	useLuminaFallback(w, r, func(s *outboundgroup.Selector) (outboundgroup.LuminaFallbackStatus, error) {
++		return s.SetLuminaFallback(req)
++	})
++}
+diff --git a/hub/route/proxies.go b/hub/route/proxies.go
+--- a/hub/route/proxies.go
++++ b/hub/route/proxies.go
+@@ -2,6 +2,7 @@
+ 
+ import (
+ 	"context"
++	"errors"
+ 	"fmt"
+ 	"strconv"
+ 	"time"
+@@ -10,6 +11,7 @@
+ 	"github.com/metacubex/mihomo/common/utils"
+ 	"github.com/metacubex/mihomo/component/profile/cachefile"
+ 	C "github.com/metacubex/mihomo/constant"
++	"github.com/metacubex/mihomo/hub/executor"
+ 	"github.com/metacubex/mihomo/tunnel"
+ 
+ 	"github.com/metacubex/chi"
+@@ -24,6 +26,8 @@
+ func proxyRouter() http.Handler {
+ 	r := chi.NewRouter()
+ 	r.Get("/", getProxies)
++	r.Get("/PERSONAL/lumina-fallback", getLuminaFallback)
++	r.Put("/PERSONAL/lumina-fallback", setLuminaFallback)
+ 
+ 	r.Route("/{name}", func(r chi.Router) {
+ 		r.Use(parseProxyName, findProxyByName)
+@@ -46,9 +50,8 @@
+ func findProxyByName(next http.Handler) http.Handler {
+ 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+ 		name := r.Context().Value(CtxKeyProxyName).(string)
+-		proxies := tunnel.Proxies()
+-		proxy, exist := proxies[name]
+-		if !exist {
++		proxy := tunnel.CurrentProxy(name)
++		if proxy == nil {
+ 			render.Status(r, http.StatusNotFound)
+ 			render.JSON(w, r, ErrNotFound)
+ 			return
+@@ -82,20 +85,47 @@
+ 	}
+ 
+ 	proxy := r.Context().Value(CtxKeyProxy).(C.Proxy)
+-	selector, ok := proxy.Adapter().(outboundgroup.SelectAble)
+-	if !ok {
+-		render.Status(r, http.StatusBadRequest)
+-		render.JSON(w, r, newError("Must be a Selector"))
++	var setErr error
++	useCache := true
++	set := func() {
++		if proxy == nil || r.Context().Err() != nil {
++			setErr = outboundgroup.ErrLuminaFallbackConflict
++			return
++		}
++		selector, ok := proxy.Adapter().(outboundgroup.SelectAble)
++		if !ok {
++			setErr = errors.New("must be a Selector")
++			return
++		}
++		if leased, ok := selector.(*outboundgroup.Selector); ok {
++			useCache = !leased.HasLuminaFallback()
++		}
++		setErr = selector.Set(req.Name)
++	}
++	if proxy.Name() == "PERSONAL" {
++		executor.WithConfigLock(func() {
++			if tunnel.CurrentProxy("PERSONAL") != proxy {
++				setErr = outboundgroup.ErrLuminaFallbackConflict
++				return
++			}
++			set()
++		})
++	} else {
++		set()
++	}
++	if setErr != nil {
++		code := http.StatusBadRequest
++		if errors.Is(setErr, outboundgroup.ErrLuminaFallbackConflict) {
++			code = http.StatusConflict
++		}
++		render.Status(r, code)
++		render.JSON(w, r, newError(fmt.Sprintf("Selector update error: %s", setErr.Error())))
+ 		return
+ 	}
+ 
+-	if err := selector.Set(req.Name); err != nil {
+-		render.Status(r, http.StatusBadRequest)
+-		render.JSON(w, r, newError(fmt.Sprintf("Selector update error: %s", err.Error())))
+-		return
++	if useCache {
++		cachefile.Cache().SetSelected(proxy.Name(), req.Name)
+ 	}
+-
+-	cachefile.Cache().SetSelected(proxy.Name(), req.Name)
+ 	if SwitchProxiesCallback != nil {
+ 		// refresh tray menu
+ 		go SwitchProxiesCallback(proxy.Name(), req.Name)
+diff --git a/tunnel/tunnel.go b/tunnel/tunnel.go
+--- a/tunnel/tunnel.go
++++ b/tunnel/tunnel.go
+@@ -216,6 +216,12 @@
+ 	return proxies
+ }
+ 
++func CurrentProxy(name string) C.Proxy {
++	configMux.RLock()
++	defer configMux.RUnlock()
++	return proxies[name]
++}
++
+ // Providers return all compatible providers
+ func Providers() map[string]P.ProxyProvider {
+ 	return providers
+@@ -229,6 +235,11 @@
+ // UpdateProxies handle update proxies
+ func UpdateProxies(newProxies map[string]C.Proxy, newProviders map[string]P.ProxyProvider) {
+ 	configMux.Lock()
++	if old := proxies["PERSONAL"]; old != nil {
++		if lease, ok := old.Adapter().(interface{ RetireLuminaFallback() }); ok {
++			lease.RetireLuminaFallback()
++		}
++	}
+ 	proxies = newProxies
+ 	providers = newProviders
+ 	configMux.Unlock()
