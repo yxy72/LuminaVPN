@@ -18,12 +18,13 @@ import (
 )
 
 type macStopFixture struct {
-	report  macRunReport
-	request func(context.Context) error
-	wait    func(context.Context) error
-	recover func(context.Context) error
-	company func(context.Context, string, uint64, bool, bool) error
-	auth    func(context.Context, string, string, uint64) error
+	report   macRunReport
+	request  func(context.Context) error
+	wait     func(context.Context) error
+	recover  func(context.Context) error
+	company  func(context.Context, string, uint64, bool, bool) error
+	personal func(context.Context, string, uint64, bool, bool) error
+	auth     func(context.Context, string, string, uint64) error
 }
 
 func (f *macStopFixture) Matches(path string, file os.FileInfo) bool {
@@ -35,6 +36,9 @@ func (f *macStopFixture) RecoverVerified(ctx context.Context) error      { retur
 func (f *macStopFixture) Close() error                                   { return nil }
 func (f *macStopFixture) SetMacCompany(ctx context.Context, id string, generation uint64, company, personal bool) error {
 	return f.company(ctx, id, generation, company, personal)
+}
+func (f *macStopFixture) SetMacPersonal(ctx context.Context, id string, generation uint64, company, personal bool) error {
+	return f.personal(ctx, id, generation, company, personal)
 }
 func (f *macStopFixture) AuthenticateMacCompany(ctx context.Context, profile, runtime string, generation uint64) error {
 	return f.auth(ctx, profile, runtime, generation)
@@ -176,6 +180,123 @@ func TestMacCompanyControlUsesBoundGenerationAndAllowsPriorityStop(t *testing.T)
 		t.Fatal(op)
 	}
 	if op := macCompleted(t, d, "switch"); op.Error == nil || op.Error.Code != "MAC_OPERATION_INTERRUPTED" {
+		t.Fatal(op)
+	}
+}
+
+func TestMacPersonalControlRequiresNativeProofAndPreservesCompany(t *testing.T) {
+	d, current := macBackendFixture(t)
+	n := d.localWorkspace.network
+	running := makeMacReport(t, "managed")
+	start := policy.ChannelIntent{Company: true, Personal: true, Environment: "home"}
+	running.status.DesiredChannels, running.status.AppliedChannels = &start, &start
+	running.status.TakeoverActive = true
+	running.status.ChannelGeneration, running.status.AppliedGeneration = 9, 9
+	current.Store(&running)
+	initial := macSnapshot(t, d)
+	change := macMutation(initial, "no-candidates", p.ChannelsSet)
+	change.Channels = &p.DesiredChannels{Company: true}
+	_, err := macCall(t, d, "service.submit", change)
+	macErrorCode(t, err, "MAC_PERSONAL_UNAVAILABLE")
+
+	eligible := running
+	eligible.status.DarwinPersonalControl = true
+	current.Store(&eligible)
+	s := macSnapshot(t, d)
+	if !s.MacPersonalControl || s.MacCompanyControl || s.Revision == initial.Revision {
+		t.Fatal("wrong per-channel control capability", s)
+	}
+	both := macMutation(s, "both", p.ChannelsSet)
+	both.Channels.Personal = false
+	_, err = macCall(t, d, "service.submit", both)
+	macErrorCode(t, err, "INVALID_PARAMS")
+	same := macMutation(s, "same", p.ChannelsSet)
+	same.Channels.Company = true
+	_, err = macCall(t, d, "service.submit", same)
+	macErrorCode(t, err, "INVALID_PARAMS")
+	_, err = macCall(t, d, "service.submit", map[string]any{
+		"kind": p.ChannelsSet, "request_id": "implicit-personal-off", "profile_id": s.ProfileID,
+		"run_ref": s.RunRef, "expected_revision": s.Revision, "channels": map[string]bool{"company": true},
+	})
+	macErrorCode(t, err, "INVALID_PARAMS")
+
+	started, proof := make(chan struct{}), make(chan struct{})
+	var stopped, canceled atomic.Bool
+	n.bind = func(_ context.Context, profile string) (macRunStop, error) {
+		if profile != d.Profile {
+			return nil, errors.New("wrong profile")
+		}
+		return &macStopFixture{
+			report: running,
+			personal: func(ctx context.Context, id string, generation uint64, company, personal bool) error {
+				switch id {
+				case "personal-off":
+					if generation != 9 || !company || personal {
+						return errors.New("Personal OFF did not preserve Company and generation")
+					}
+					// User-readable status alone is not protected acknowledgement.
+					off := eligible
+					intent := start
+					intent.Personal = false
+					off.status.DesiredChannels, off.status.AppliedChannels = &intent, &intent
+					off.status.ChannelGeneration, off.status.AppliedGeneration = 10, 10
+					current.Store(&off)
+					close(started)
+					select {
+					case <-proof:
+						return nil
+					case <-ctx.Done():
+						return ctx.Err()
+					}
+				case "personal-on":
+					if generation != 10 || !company || !personal {
+						return errors.New("Personal ON did not preserve Company and generation")
+					}
+					<-ctx.Done()
+					canceled.Store(true)
+					return ctx.Err()
+				}
+				return errors.New("unexpected personal request")
+			},
+			request: func(context.Context) error { stopped.Store(true); return nil },
+			wait:    func(context.Context) error { return nil },
+		}, nil
+	}
+	off := macMutation(s, "personal-off", p.ChannelsSet)
+	off.Channels = &p.DesiredChannels{Company: true}
+	if _, err := macCall(t, d, "service.submit", off); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("no native Personal OFF request")
+	}
+	if pending := macSnapshot(t, d); pending.TakeoverState != "applying_personal" || pending.MacPersonalControl {
+		t.Fatal(pending)
+	}
+	pending, err := macCall(t, d, "service.operation", map[string]string{"operation_id": "personal-off"})
+	if err != nil || pending.(p.Operation).Completed {
+		t.Fatal("saved status prematurely completed Personal", err)
+	}
+	close(proof)
+	if op := macCompleted(t, d, "personal-off"); op.Error != nil || op.Phase != "personal_applied" {
+		t.Fatal(op)
+	}
+	s = macSnapshot(t, d)
+	on := macMutation(s, "personal-on", p.ChannelsSet)
+	on.Channels = &p.DesiredChannels{Company: true, Personal: true}
+	if _, err := macCall(t, d, "service.submit", on); err != nil {
+		t.Fatal(err)
+	}
+	stop := macMutation(s, "stop-personal", p.TakeoverStop)
+	if _, err := macCall(t, d, "service.submit", stop); err != nil {
+		t.Fatal(err)
+	}
+	if op := macCompleted(t, d, "stop-personal"); op.Error != nil || !stopped.Load() || !canceled.Load() {
+		t.Fatal(op)
+	}
+	if op := macCompleted(t, d, "personal-on"); op.Error == nil || op.Error.Code != "MAC_OPERATION_INTERRUPTED" {
 		t.Fatal(op)
 	}
 }

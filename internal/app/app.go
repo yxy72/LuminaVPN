@@ -81,6 +81,9 @@ func (c CLI) RunContext(ctx context.Context, args []string) error {
 	if len(args) > 0 && args[0] == "_company-intent" {
 		return companyIntentEntry(args[1:], c.Err)
 	}
+	if len(args) > 0 && args[0] == "_personal-intent" {
+		return personalIntentEntry(args[1:], c.Err)
+	}
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" {
 		fmt.Fprintln(c.Out, "NetLaunch "+Version+"\nCommands: init, import, sync, plan, config validate|diff|apply|rollback|history, rules explain TARGET, doctor, check-runtime, auth, up, status, down, version, diagnostics export, runs cleanup\nOptions: --profile DIR --runtime DIR; init --file POLICY_OR_BOOTSTRAP.json; import --file FILE; config validate|diff|apply --file POLICY.json; config apply|rollback --restart; config rollback --revision SHA256; up --prepare-only; version --json; runs cleanup --profile DIR --run DIR [--apply] (administrator terminal)\nmacOS network lifecycle is experimental; config apply/rollback changes the next-start policy unless --restart is specified. Diagnostics exports allowlisted saved status to stdout; it does not check live network health.")
 		return nil

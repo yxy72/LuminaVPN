@@ -78,18 +78,29 @@ func (r *RunStop) AuthenticateMacCompany(ctx context.Context, profile, bundle st
 }
 
 func (r *RunStop) checkMacCompany(ctx context.Context, generation uint64) error {
-	if err := r.check(ctx); err != nil {
+	status, err := r.checkMacChannelGeneration(ctx, generation)
+	if err != nil {
 		return err
 	}
+	if !status.DarwinCompanyControl {
+		return errors.New("selected macOS company channel is unavailable")
+	}
+	return nil
+}
+
+func (r *RunStop) checkMacChannelGeneration(ctx context.Context, generation uint64) (engine.Status, error) {
+	if err := r.check(ctx); err != nil {
+		return engine.Status{}, err
+	}
 	if _, err := r.dir.Lstat("STOP"); !errors.Is(err, os.ErrNotExist) {
-		return errors.New("macOS run is stopping")
+		return engine.Status{}, errors.New("macOS run is stopping")
 	}
 	status, err := statusFor(r.path)
 	if err != nil || generation == 0 || status.AppliedGeneration != generation ||
-		status.ChannelGeneration != generation || !status.DarwinCompanyControl || !status.TakeoverActive {
-		return errors.New("selected macOS channel generation is unavailable")
+		status.ChannelGeneration != generation || !status.TakeoverActive {
+		return engine.Status{}, errors.New("selected macOS channel generation is unavailable")
 	}
-	return nil
+	return status, nil
 }
 
 func authenticateMacCompany(ctx context.Context, profile, bundle string, run *RunStop, generation uint64) error {

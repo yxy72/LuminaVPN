@@ -15,3 +15,11 @@ func (*RunStop) SetMacCompany(context.Context, string, uint64, bool, bool) error
 func companyIntentEntry([]string, io.Writer) error {
 	return errors.New("native macOS company intent is unavailable on this platform")
 }
+
+func (*RunStop) SetMacPersonal(context.Context, string, uint64, bool, bool) error {
+	return errors.New("native macOS personal intent is unavailable on this platform")
+}
+
+func personalIntentEntry([]string, io.Writer) error {
+	return errors.New("native macOS personal intent is unavailable on this platform")
+}

@@ -30,6 +30,10 @@ type macRunCompanyControl interface {
 	AuthenticateMacCompany(context.Context, string, string, uint64) error
 }
 
+type macRunPersonalControl interface {
+	SetMacPersonal(context.Context, string, uint64, bool, bool) error
+}
+
 type macRunReport struct {
 	present, stop, reported bool
 	path                    string
@@ -108,7 +112,8 @@ func (n *macNetwork) observe(profile string) {
 		(next.path != n.current.path || (next.identity != nil || n.current.identity != nil) && !next.sameRun(n.current)))
 	if identityChanged || n.current.stop != next.stop || n.current.status.Phase != next.status.Phase ||
 		n.current.status.ChannelGeneration != next.status.ChannelGeneration || n.current.status.AppliedGeneration != next.status.AppliedGeneration ||
-		n.current.status.DarwinCompanyControl != next.status.DarwinCompanyControl {
+		n.current.status.DarwinCompanyControl != next.status.DarwinCompanyControl ||
+		n.current.status.DarwinPersonalControl != next.status.DarwinPersonalControl {
 		n.revision++
 	}
 	if identityChanged {
@@ -141,11 +146,19 @@ func validMacNetworkMutation(m p.Mutation) bool {
 	}
 }
 
-func macCompanyEligible(r macRunReport) bool {
+func macChannelsSettled(r macRunReport) bool {
 	s := r.status
-	return r.reported && r.identity != nil && !r.stop && s.TakeoverActive && s.DarwinCompanyControl &&
+	return r.reported && r.identity != nil && !r.stop && s.TakeoverActive &&
 		s.ChannelGeneration != 0 && s.ChannelGeneration == s.AppliedGeneration &&
 		s.DesiredChannels != nil && s.AppliedChannels != nil && *s.DesiredChannels == *s.AppliedChannels
+}
+
+func macCompanyEligible(r macRunReport) bool {
+	return r.status.DarwinCompanyControl && macChannelsSettled(r)
+}
+
+func macPersonalEligible(r macRunReport) bool {
+	return r.status.DarwinPersonalControl && macChannelsSettled(r)
 }
 
 func savedMacDesired(r macRunReport) p.DesiredChannels {
@@ -202,9 +215,10 @@ func (w *localWorkspace) networkSnapshot(ctx context.Context) (p.Snapshot, error
 		Revision: n.revision, RunRef: n.runRef, OperationID: w.activeID,
 		Desired: desired,
 		Company: savedMacChannel(r, "company", desired.Company), Personal: savedMacChannel(r, "personal", desired.Personal),
-		RecoveryRequired:  n.lost.present || r.present && !n.restored() && !n.stoppedReport(),
-		Restored:          n.restored(),
-		MacCompanyControl: w.activeID == "" && macCompanyEligible(r),
+		RecoveryRequired:   n.lost.present || r.present && !n.restored() && !n.stoppedReport(),
+		Restored:           n.restored(),
+		MacCompanyControl:  w.activeID == "" && macCompanyEligible(r),
+		MacPersonalControl: w.activeID == "" && macPersonalEligible(r),
 	}
 	switch {
 	case s.Restored:
@@ -264,6 +278,7 @@ func (w *localWorkspace) submitNetwork(ctx context.Context, m p.Mutation) (p.Ope
 	}
 	var target macRunStop
 	var phase string
+	var personalChange bool
 	if m.Kind == p.TakeoverStart || idleAuth {
 		if n.lost.present || n.current.present && !n.stoppedReport() && !n.restored() {
 			return p.Operation{}, unavailable("RECOVERY_REQUIRED", "The previous run's state must be resolved before starting.")
@@ -273,14 +288,19 @@ func (w *localWorkspace) submitNetwork(ctx context.Context, m p.Mutation) (p.Ope
 			phase = "authenticating"
 		}
 	} else {
-		if m.Kind == p.ChannelsSet || m.Kind == p.AuthBegin {
+		if m.Kind == p.AuthBegin {
 			if !macCompanyEligible(n.current) {
 				return p.Operation{}, unavailable("MAC_COMPANY_UNAVAILABLE", "The selected run does not support changing the company channel.")
 			}
-			current := n.current.status.AppliedChannels
-			if m.Kind == p.ChannelsSet && (m.Channels.Personal != current.Personal || m.Channels.Company == current.Company) ||
-				m.Kind == p.AuthBegin && !current.Company {
-				return p.Operation{}, unavailable("INVALID_PARAMS", "This operation may only change the current company channel.")
+			if !n.current.status.AppliedChannels.Company {
+				return p.Operation{}, unavailable("INVALID_PARAMS", "The current company channel must be enabled for authentication.")
+			}
+		}
+		if m.Kind == p.ChannelsSet {
+			var err error
+			personalChange, err = macChannelChange(n.current, *m.Channels)
+			if err != nil {
+				return p.Operation{}, err
 			}
 		}
 		// Resolve and retain the exact run before dispatch. A changed profile
@@ -298,6 +318,12 @@ func (w *localWorkspace) submitNetwork(ctx context.Context, m p.Mutation) (p.Ope
 		phase = "waiting_for_stop_report"
 		if m.Kind == p.ExitRestore {
 			phase = "recovering"
+		} else if personalChange {
+			if _, ok := target.(macRunPersonalControl); !ok {
+				_ = target.Close()
+				return p.Operation{}, unavailable("MAC_PERSONAL_UNAVAILABLE", "The selected run cannot change the personal channel.")
+			}
+			phase = "applying_personal"
 		} else if m.Kind == p.ChannelsSet || m.Kind == p.AuthBegin {
 			if _, ok := target.(macRunCompanyControl); !ok {
 				_ = target.Close()
@@ -324,11 +350,29 @@ func (w *localWorkspace) submitNetwork(ctx context.Context, m p.Mutation) (p.Ope
 	op := w.enqueueLocked(m.RequestID, digest, m.Kind, phase, m.RunRef, n.revision)
 	job, cancel := context.WithCancel(w.ctx)
 	w.activeCancel = cancel
-	go w.executeNetwork(job, cancel, m, target, n.current, prior)
+	go w.executeNetwork(job, cancel, m, target, n.current, prior, personalChange)
 	return op, nil
 }
 
-func (w *localWorkspace) executeNetwork(job context.Context, done context.CancelFunc, m p.Mutation, target macRunStop, bound macRunReport, prior <-chan struct{}) {
+func macChannelChange(r macRunReport, desired p.DesiredChannels) (personal bool, err error) {
+	current := savedMacDesired(r)
+	personal = desired.Personal != current.Personal && desired.Company == current.Company
+	if personal {
+		if !macPersonalEligible(r) {
+			return false, unavailable("MAC_PERSONAL_UNAVAILABLE", "The selected run does not have a frozen personal channel available.")
+		}
+		return true, nil
+	}
+	if macChannelsSettled(r) && (desired.Company == current.Company || desired.Personal != current.Personal) {
+		return false, unavailable("INVALID_PARAMS", "Change exactly one channel for the current run.")
+	}
+	if !macCompanyEligible(r) {
+		return false, unavailable("MAC_COMPANY_UNAVAILABLE", "The selected run does not support changing the company channel.")
+	}
+	return false, nil
+}
+
+func (w *localWorkspace) executeNetwork(job context.Context, done context.CancelFunc, m p.Mutation, target macRunStop, bound macRunReport, prior <-chan struct{}, personalChange bool) {
 	defer done()
 	var err error
 	var phase, failureCode string
@@ -350,9 +394,14 @@ func (w *localWorkspace) executeNetwork(job context.Context, done context.Cancel
 		phase, failureCode = "authenticated", "MAC_AUTH_FAILED"
 	case p.ChannelsSet:
 		ctx, cancel := context.WithTimeout(job, 4*time.Minute)
-		err = target.(macRunCompanyControl).SetMacCompany(ctx, m.RequestID, bound.status.AppliedGeneration, m.Channels.Company, m.Channels.Personal)
+		if personalChange {
+			err = target.(macRunPersonalControl).SetMacPersonal(ctx, m.RequestID, bound.status.AppliedGeneration, m.Channels.Company, m.Channels.Personal)
+			phase, failureCode = "personal_applied", "MAC_PERSONAL_UNCONFIRMED"
+		} else {
+			err = target.(macRunCompanyControl).SetMacCompany(ctx, m.RequestID, bound.status.AppliedGeneration, m.Channels.Company, m.Channels.Personal)
+			phase, failureCode = "company_applied", "MAC_COMPANY_UNCONFIRMED"
+		}
 		cancel()
-		phase, failureCode = "company_applied", "MAC_COMPANY_UNCONFIRMED"
 	case p.TakeoverStop:
 		ctx, cancel := context.WithTimeout(job, 20*time.Second)
 		err = target.Request(ctx)

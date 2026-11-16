@@ -52,11 +52,18 @@ func (r *RunStop) SetMacCompany(ctx context.Context, id string, generation uint6
 	if err := r.checkMacCompany(ctx, generation); err != nil {
 		return err
 	}
+	return r.withMacChannelPermit(engine.DarwinCompanyPermitName(id), func(device int32, inode uint64) error {
+		return engine.LaunchDarwinDesktopCompany(ctx, r.path, engine.DarwinDesktopCompanyRequest{
+			ID: id, Generation: generation, Company: company, Personal: personal, Device: device, Inode: inode,
+		})
+	})
+}
+
+func (r *RunStop) withMacChannelPermit(name string, launch func(device int32, inode uint64) error) error {
 	native, ok := r.identity.Sys().(*syscall.Stat_t)
 	if !ok {
 		return errors.New("selected macOS run identity is unavailable")
 	}
-	name := engine.DarwinCompanyPermitName(id)
 	permit, err := r.dir.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
 		return err
@@ -66,7 +73,5 @@ func (r *RunStop) SetMacCompany(ctx context.Context, id string, generation uint6
 	if err := syscall.Flock(int(permit.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		return err
 	}
-	return engine.LaunchDarwinDesktopCompany(ctx, r.path, engine.DarwinDesktopCompanyRequest{
-		ID: id, Generation: generation, Company: company, Personal: personal, Device: native.Dev, Inode: native.Ino,
-	})
+	return launch(native.Dev, native.Ino)
 }

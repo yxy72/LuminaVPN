@@ -165,17 +165,24 @@ func (d *Desktop) ClientRequest(ctx context.Context, method string, raw json.Raw
 			return nil, unavailable("INVALID_PARAMS", "The typed service mutation is invalid.")
 		}
 		if d.MacClientEnabled() {
-			if mutation.Kind == serviceprotocol.TakeoverStart {
-				// Start must declare each channel, including an explicit false.
+			if mutation.Kind == serviceprotocol.TakeoverStart || mutation.Kind == serviceprotocol.ChannelsSet {
+				// Both changes and starts must declare an explicit false.
+				type channels struct {
+					Company  *bool `json:"company"`
+					Personal *bool `json:"personal"`
+				}
 				var required struct {
-					Start struct {
-						Channels struct {
-							Company  *bool `json:"company"`
-							Personal *bool `json:"personal"`
-						} `json:"channels"`
+					Channels channels `json:"channels"`
+					Start    struct {
+						Channels channels `json:"channels"`
 					} `json:"start"`
 				}
-				if json.Unmarshal(raw, &required) != nil || required.Start.Channels.Company == nil || required.Start.Channels.Personal == nil {
+				err := json.Unmarshal(raw, &required)
+				selection := required.Channels
+				if mutation.Kind == serviceprotocol.TakeoverStart {
+					selection = required.Start.Channels
+				}
+				if err != nil || selection.Company == nil || selection.Personal == nil {
 					return nil, unavailable("INVALID_PARAMS", "Both channel selections are required.")
 				}
 			}
