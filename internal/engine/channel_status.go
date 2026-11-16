@@ -121,6 +121,9 @@ func channelView(s State, name string, now time.Time) ChannelStatus {
 			return ChannelStatus{State: "ready", Reason: "disabled_blocked", PathState: "blocked", CheckedAt: now}
 		}
 		if name == "personal" && !intent.Personal {
+			if s.Personal != "PHYSICAL" {
+				return ChannelStatus{State: "unknown", Reason: "intent_pending", NextAction: "wait_for_apply"}
+			}
 			return ChannelStatus{State: "ready", Reason: "disabled_direct", PathState: "physical_direct", CheckedAt: now}
 		}
 		if name == "personal" && s.PersonalFallback {
@@ -199,22 +202,41 @@ func desktopPhase(s *State, now time.Time) {
 	if s.Phase == "authentication_required" && currentIntent(*s).Company {
 		return
 	}
-	ready, failed := true, false
-	var checked time.Time
+	var failed bool
 	for _, name := range []string{"company", "personal", "direct"} {
 		h := channelView(*s, name, now)
-		ready = ready && h.State == "ready"
 		failed = failed || h.State == "unavailable" || h.State == "degraded"
-		if h.ProbeScope == "system_tun" && (checked.IsZero() || h.CheckedAt.Before(checked)) {
-			checked = h.CheckedAt
-		}
 	}
+	checked := systemReadyAt(*s, now)
 	s.Phase = "managed"
-	if ready && !checked.IsZero() {
+	if !checked.IsZero() {
 		s.Phase, s.LastReady = "ready", checked
 	} else if failed {
 		s.Phase = "degraded"
 	}
+}
+
+func systemReadyAt(s State, now time.Time) time.Time {
+	intent := currentIntent(s)
+	if s.Manifest.Mode != "" {
+		if !s.TakeoverActive || s.ChannelGeneration != s.AppliedGeneration || !intent.Personal && s.Personal != "PHYSICAL" {
+			return time.Time{}
+		}
+	}
+	var oldest time.Time
+	for _, name := range []string{"company", "personal", "direct"} {
+		if name == "company" && !intent.Company || name == "personal" && !intent.Personal {
+			continue
+		}
+		h := channelView(s, name, now)
+		if h.State != "ready" || h.ProbeScope != "system_tun" {
+			return time.Time{}
+		}
+		if oldest.IsZero() || h.CheckedAt.Before(oldest) {
+			oldest = h.CheckedAt
+		}
+	}
+	return oldest
 }
 
 func NeedsAuthentication(s Status) bool {

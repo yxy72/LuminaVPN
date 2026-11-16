@@ -3,13 +3,36 @@ package app
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"netlaunch/internal/engine"
+	"netlaunch/internal/policy"
+	"netlaunch/internal/testutil"
 )
+
+func TestMacTypedCompanyStartRequiresAuthenticationBeforeStaging(t *testing.T) {
+	profile := testutil.PrivateTempDir(t)
+	cfg, err := policy.Decode([]byte(Example))
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent := policy.ChannelIntent{Company: true}
+	o := options{profile: profile, mode: engine.Daily, channels: &intent}
+	if err := validateLaunchOptions(&o, "up"); err != nil {
+		t.Fatal(err)
+	}
+	c := CLI{Out: io.Discard, Err: io.Discard}
+	if err := c.upLockedContext(t.Context(), o, cfg, nil); !errors.Is(err, ErrMacAuthenticationRequired) {
+		t.Fatalf("typed start without a session: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(profile, "runs")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unauthenticated start staged a run: %v", err)
+	}
+}
 
 func TestMacCanceledStartPinsStopAfterNativeAuthorization(t *testing.T) {
 	profile, first, second := macStopFixture(t)

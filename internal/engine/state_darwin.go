@@ -119,6 +119,12 @@ func darwinRunDeadline(m Manifest) time.Time {
 }
 
 func validateDarwinRunStart(m Manifest, now time.Time) error {
+	if m.Service != nil || (m.Mode == "") != (m.Channels == nil) {
+		return errors.New("invalid macOS channel intent binding")
+	}
+	if err := m.ValidateMode(); err != nil {
+		return err
+	}
 	if m.ValidationTimeout == 0 {
 		return nil
 	}

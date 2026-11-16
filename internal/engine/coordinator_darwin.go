@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
-	"net"
 	"net/url"
 	"os"
 	"os/exec"
@@ -20,7 +19,6 @@ import (
 
 	"netlaunch/internal/auth"
 	"netlaunch/internal/platform"
-	"netlaunch/internal/policy"
 	"netlaunch/internal/runtimebundle"
 	"netlaunch/internal/securefile"
 	"netlaunch/internal/selector"
@@ -70,6 +68,10 @@ func initialize(run string) (State, error) {
 	}
 	m.Executable = filepath.Join(private(run), "netlaunch")
 	s := State{Version: 1, Phase: "preparing", Heartbeat: time.Now(), Runner: identity, Manifest: m, DNS: map[string]DNSChange{}, Personal: selector.Reject}
+	if m.Mode != "" {
+		intent := m.InitialChannels()
+		s.DesiredChannels, s.ChannelGeneration = &intent, 1
+	}
 	if e = initializeStateStorage(run, &s); e != nil {
 		return s, e
 	}
@@ -125,26 +127,11 @@ func serve(run string) (returned error) {
 	if e = runtimebundle.Copy(filepath.Join(run, "runtime"), filepath.Join(private(run), "runtime")); e != nil {
 		return e
 	}
-	var nodes []policy.Node
-	if e = readJSON(filepath.Join(run, "nodes.json"), &nodes); e != nil {
-		return e
-	}
-	nodes, e = policy.SanitizeNodes(nodes)
+	intent := s.Manifest.InitialChannels()
+	nodes, e := freezeDarwinChannelInputs(run, s.Manifest)
 	if e != nil {
 		return e
 	}
-	session, e := readAuth(run)
-	if e != nil {
-		return e
-	}
-	if e = securefile.Write(filepath.Join(private(run), "auth.json"), session); e != nil {
-		return e
-	}
-	_ = os.Remove(filepath.Join(run, "auth.json"))
-	if e = securefile.Write(filepath.Join(private(run), "nodes.json"), nodes); e != nil {
-		return e
-	}
-	_ = os.Remove(filepath.Join(run, "nodes.json"))
 	network, e := platform.Discover()
 	if e != nil || network != s.Manifest.Network {
 		return errors.New("network changed during authorization; prepare a new run")
@@ -164,7 +151,7 @@ func serve(run string) (returned error) {
 	if e != nil {
 		return e
 	}
-	if interfaces[s.Manifest.Binding.VPN] || interfaces[s.Manifest.Binding.TUN] {
+	if hasDarwinCandidateInterface(s, interfaces) {
 		return errors.New("candidate interface now in use")
 	}
 	secretBytes := make([]byte, 32)
@@ -172,21 +159,23 @@ func serve(run string) (returned error) {
 		return e
 	}
 	secret := hex.EncodeToString(secretBytes)
-	config, e := policy.Compile(s.Manifest.Config, nodes, s.Manifest.Binding, secret)
-	if e != nil {
-		return e
-	}
 	names := candidateNames(nodes)
-	verification, e := newPersonalVerification(s.Manifest)
-	if e != nil {
-		return e
+	var verification *personalVerification
+	if intent.Personal {
+		verification, e = newPersonalVerification(s.Manifest)
+		if e != nil {
+			return e
+		}
 	}
-	verification.ingress.configure(config, s.Manifest.Config, names)
-	company, e := startCompany(ctx, run)
-	if e != nil {
-		return e
+	var company *companyRuntime
+	if intent.Company {
+		company, e = startCompany(ctx, run)
+		if e != nil {
+			return e
+		}
 	}
-	if e = company.configure(config); e != nil {
+	config, e := darwinCoreConfig(s.Manifest, nodes, secret, company, verification)
+	if e != nil {
 		return e
 	}
 	if e = saveCore(run, config); e != nil {
@@ -232,28 +221,30 @@ func serve(run string) (returned error) {
 			}
 		}
 	}()
-	if e = endpoint(run, network); e != nil {
-		return e
-	}
 	exits := &childExitTracker{}
-	vpnChild, e := startVPN(run, exits)
-	if e != nil {
-		return e
-	}
-	if e = wait(ctx, run, 45*time.Second, func(ctx context.Context) error {
-		if live, err := alive(vpnChild); err != nil || !live {
-			return &terminalReadinessError{vpnBootstrapFailure(run, vpnChild)}
+	if intent.Company {
+		if e = endpoint(run, network); e != nil {
+			return e
 		}
-		s, e := load(run)
+		vpnChild, e := startVPN(run, exits)
 		if e != nil {
 			return e
 		}
-		if !s.VPN.Bootstrap || !validVPN(s) {
-			return vpnBootstrapFailure(run, vpnChild)
+		if e = wait(ctx, run, 45*time.Second, func(ctx context.Context) error {
+			if live, err := alive(vpnChild); err != nil || !live {
+				return &terminalReadinessError{vpnBootstrapFailure(run, vpnChild)}
+			}
+			s, e := load(run)
+			if e != nil {
+				return e
+			}
+			if !s.VPN.Bootstrap || !validVPN(s) {
+				return vpnBootstrapFailure(run, vpnChild)
+			}
+			return company.ready()
+		}); e != nil {
+			return e
 		}
-		return company.ready()
-	}); e != nil {
-		return e
 	}
 	coreChild, e := spawn(run, "core", []string{core, "-d", private(run), "-f", filepath.Join(private(run), "core.json")}, exits)
 	if e != nil {
@@ -272,22 +263,30 @@ func serve(run string) (returned error) {
 		return e
 	}
 	boundChecks, systemChecks := newCompanyProbeSchedule(), newProbeSchedule()
-	if e = wait(ctx, run, 45*time.Second, func(ctx context.Context) error {
-		_, err := openCompany(ctx, run, company, boundChecks)
-		return err
-	}); e != nil {
+	if intent.Company {
+		if e = wait(ctx, run, 45*time.Second, func(ctx context.Context) error {
+			_, err := openCompany(ctx, run, company, boundChecks)
+			return err
+		}); e != nil {
+			return e
+		}
+	} else if e = selectCoreGroupContext(ctx, run, "CORP", selector.Reject); e != nil {
 		return e
 	}
 	selection := selector.New(names)
-	if e = wait(ctx, run, 45*time.Second, func(ctx context.Context) error {
-		if e := choose(ctx, run, selection, verification); e != nil {
+	if intent.Personal {
+		if e = wait(ctx, run, 45*time.Second, func(ctx context.Context) error {
+			if e := choose(ctx, run, selection, verification); e != nil {
+				return e
+			}
+			if selection.Current == selector.Reject {
+				return errors.New("no healthy personal node")
+			}
+			return nil
+		}); e != nil {
 			return e
 		}
-		if selection.Current == selector.Reject {
-			return errors.New("no healthy personal node")
-		}
-		return nil
-	}); e != nil {
+	} else if e = setDarwinPersonalDirect(ctx, run); e != nil {
 		return e
 	}
 	if e = apiContext(ctx, run, "PATCH", "/configs", map[string]any{"tun": map[string]bool{"enable": true}}, nil); e != nil {
@@ -308,12 +307,21 @@ func serve(run string) (returned error) {
 	if e = takeoverDNS(run); e != nil {
 		return e
 	}
-	if e = wait(ctx, run, 60*time.Second, func(ctx context.Context) error {
-		if e := ensurePersonalSelection(ctx, run, selection, verification); e != nil {
+	if s.Manifest.Mode != "" {
+		if e = applyDarwinTakeover(run, intent); e != nil {
 			return e
 		}
-		if _, e := openCompany(ctx, run, company, boundChecks); e != nil {
-			return e
+	}
+	if e = wait(ctx, run, 60*time.Second, func(ctx context.Context) error {
+		if intent.Personal {
+			if e := ensurePersonalSelection(ctx, run, selection, verification); e != nil {
+				return e
+			}
+		}
+		if intent.Company {
+			if _, e := openCompany(ctx, run, company, boundChecks); e != nil {
+				return e
+			}
 		}
 		next := systemChecks.next
 		ready, err := checkSystemChannels(ctx, run, systemChecks, selection, boundChecks.open, false)
@@ -339,12 +347,22 @@ func serve(run string) (returned error) {
 	defer sampling.close()
 	lastHealth := time.Now()
 	lastResumeRequest := ""
+	if !intent.Company {
+		lastResumeRequest, e = platform.WakeEpoch()
+		if e != nil {
+			return e
+		}
+	}
+	var companyDone <-chan error
+	if company != nil {
+		companyDone = company.done
+	}
 	retry := &vpnRetry{}
 	disconnected := false
 	networkUnavailable := false
 	for ctx.Err() == nil {
 		select {
-		case <-company.done:
+		case <-companyDone:
 			return errors.New("company ingress stopped")
 		default:
 		}
@@ -359,20 +377,35 @@ func serve(run string) (returned error) {
 		if e != nil {
 			return e
 		}
-		if current.VPN.WakeEpoch != "" && current.VPN.WakeEpoch != epoch && lastResumeRequest != epoch {
-			if err := verification.close(run); err != nil {
+		wokeWithoutVPN := !intent.Company && lastResumeRequest != epoch
+		wokeWithVPN := intent.Company && current.VPN.WakeEpoch != "" && current.VPN.WakeEpoch != epoch && lastResumeRequest != epoch
+		if wokeWithoutVPN || wokeWithVPN {
+			if err := closeDarwinVerification(run, verification); err != nil {
 				return err
 			}
 			boundChecks.reset()
 			systemChecks.reset()
-			company.revoke()
-			if e = gate(run); e != nil {
-				return e
+			if company != nil {
+				company.revoke()
+				if e = gate(run); e != nil {
+					return e
+				}
 			}
-			if e = selectPersonal(run, selector.Reject); e != nil {
-				return e
+			if intent.Personal {
+				if e = selectPersonal(run, selector.Reject); e != nil {
+					return e
+				}
 			}
-			if e = update(run, func(s *State) error { s.VPN.Bootstrap = false; s.Leases = nil; s.Phase = "reconnecting"; return nil }); e != nil {
+			if e = update(run, func(s *State) error {
+				if err := guard(run, s); err != nil {
+					return err
+				}
+				if intent.Personal {
+					s.Personal = selector.Reject
+				}
+				s.VPN.Bootstrap, s.Leases, s.Channels, s.Phase = false, nil, nil, "reconnecting"
+				return nil
+			}); e != nil {
 				return e
 			}
 			for _, child := range current.Children {
@@ -401,14 +434,16 @@ func serve(run string) (returned error) {
 		}
 		observed, e := platform.Discover()
 		if e != nil {
-			if err := verification.close(run); err != nil {
+			if err := closeDarwinVerification(run, verification); err != nil {
 				return err
 			}
 			networkUnavailable = true
 			boundChecks.reset()
 			systemChecks.reset()
-			company.revoke()
-			_ = gate(run)
+			if company != nil {
+				company.revoke()
+				_ = gate(run)
+			}
 			_ = update(run, func(s *State) error {
 				s.VPN.Bootstrap = false
 				s.Leases = nil
@@ -419,30 +454,34 @@ func serve(run string) (returned error) {
 			continue
 		}
 		if observed != network || networkUnavailable {
-			if err := verification.close(run); err != nil {
+			if err := closeDarwinVerification(run, verification); err != nil {
 				return err
 			}
 			boundChecks.reset()
 			systemChecks.reset()
-			company.revoke()
-			_ = gate(run)
-			_ = selectPersonal(run, selector.Reject)
+			if company != nil {
+				company.revoke()
+				_ = gate(run)
+			}
+			if intent.Personal {
+				_ = selectPersonal(run, selector.Reject)
+			}
 			if e = update(run, func(s *State) error { s.VPN.Bootstrap = false; s.Leases = nil; return nil }); e != nil {
 				return e
 			}
-			if e = endpoint(run, observed); e != nil {
-				return e
+			if intent.Company {
+				if e = endpoint(run, observed); e != nil {
+					return e
+				}
 			}
 			binding := current.Manifest.Binding
 			binding.Physical = observed.Interface
-			config, e = policy.Compile(current.Manifest.Config, nodes, binding, secret)
+			manifest := current.Manifest
+			manifest.Binding = binding
+			config, e = darwinCoreConfig(manifest, nodes, secret, company, verification)
 			if e != nil {
 				return e
 			}
-			if e = company.configure(config); e != nil {
-				return e
-			}
-			verification.ingress.configure(config, current.Manifest.Config, names)
 			config["tun"].(map[string]any)["enable"] = true
 			if e = saveCore(run, config); e != nil {
 				return e
@@ -451,15 +490,24 @@ func serve(run string) (returned error) {
 				return e
 			}
 			if e = update(run, func(s *State) error {
+				if err := guard(run, s); err != nil {
+					return err
+				}
 				s.Manifest.Network = observed
 				s.Manifest.Binding = binding
 				s.Phase = "reconnecting"
+				s.Personal = selector.Reject
 				return nil
 			}); e != nil {
 				return e
 			}
 			if e = takeoverDNS(run); e != nil {
 				return e
+			}
+			if !intent.Personal {
+				if e = setDarwinPersonalDirect(ctx, run); e != nil {
+					return e
+				}
 			}
 			network = observed
 			networkUnavailable = false
@@ -478,97 +526,99 @@ func serve(run string) (returned error) {
 		if e != nil {
 			return e
 		}
-		if _, e := os.Stat(filepath.Join(run, "auth-refresh.json")); e == nil {
-			var fresh auth.Session
-			if e = readJSON(filepath.Join(run, "auth-refresh.json"), &fresh); e != nil || requireVPNAuthentication(fresh, current.Manifest.Config.VPN, time.Now()) != nil {
-				return errors.New("invalid refreshed authentication")
-			}
-			if e = stopVPN(run, company); e != nil {
-				return e
-			}
-			disconnected = true
-			if e = securefile.Write(filepath.Join(private(run), "auth.json"), fresh); e != nil {
-				return e
-			}
-			if e = os.Remove(filepath.Join(run, "auth-refresh.json")); e != nil {
-				return e
-			}
-			retry.FreshAuthentication(time.Now())
-			delete(exits.exits, "vpn")
-		}
 		vpnAlive := false
-		currentVPN, hasVPN := latestVPN(current)
-		if hasVPN {
-			vpnAlive, e = alive(currentVPN)
-			if e != nil {
-				return e
+		if intent.Company {
+			if _, e := os.Stat(filepath.Join(run, "auth-refresh.json")); e == nil {
+				var fresh auth.Session
+				if e = readJSON(filepath.Join(run, "auth-refresh.json"), &fresh); e != nil || requireVPNAuthentication(fresh, current.Manifest.Config.VPN, time.Now()) != nil {
+					return errors.New("invalid refreshed authentication")
+				}
+				if e = stopVPN(run, company); e != nil {
+					return e
+				}
+				disconnected = true
+				if e = securefile.Write(filepath.Join(private(run), "auth.json"), fresh); e != nil {
+					return e
+				}
+				if e = os.Remove(filepath.Join(run, "auth-refresh.json")); e != nil {
+					return e
+				}
+				retry.FreshAuthentication(time.Now())
+				delete(exits.exits, "vpn")
 			}
-		}
-		exitKnown := false
-		if !vpnAlive && hasVPN {
-			if reason, known := exits.failure(currentVPN); known {
-				exitKnown = true
-				if e = retry.Failed(time.Now(), currentVPN, reason); e != nil {
+			currentVPN, hasVPN := latestVPN(current)
+			if hasVPN {
+				vpnAlive, e = alive(currentVPN)
+				if e != nil {
 					return e
 				}
 			}
-		}
-		if !vpnAlive && !disconnected {
-			boundChecks.reset()
-			systemChecks.reset()
-			if e = stopVPN(run, company); e != nil {
-				return e
+			exitKnown := false
+			if !vpnAlive && hasVPN {
+				if reason, known := exits.failure(currentVPN); known {
+					exitKnown = true
+					if e = retry.Failed(time.Now(), currentVPN, reason); e != nil {
+						return e
+					}
+				}
 			}
-			disconnected = true
-		}
-		if (!vpnAlive || retry.AuthenticationRequired) && current.Phase != vpnRecoveryPhase(retry) {
-			if e = update(run, func(s *State) error { markVPNRecovery(s, retry); return nil }); e != nil {
-				return e
-			}
-		}
-		if !vpnAlive && (exitKnown || exits.exits["vpn"] == nil) && retry.Due(time.Now()) {
-			if _, e = startVPN(run, exits); e != nil {
-				if !errors.Is(e, errVPNAuthenticationRequired) {
+			if !vpnAlive && !disconnected {
+				boundChecks.reset()
+				systemChecks.reset()
+				if e = stopVPN(run, company); e != nil {
 					return e
 				}
-				retry.AuthenticationRequired = true
+				disconnected = true
+			}
+			if (!vpnAlive || retry.AuthenticationRequired) && current.Phase != vpnRecoveryPhase(retry) {
 				if e = update(run, func(s *State) error { markVPNRecovery(s, retry); return nil }); e != nil {
 					return e
 				}
-			} else {
-				retry.Attempted(time.Now())
-				disconnected = false
 			}
-			continue // reload the newly journalled attempt and its generation
-		}
-		retry.Ready(time.Now(), vpnAlive && company.ready() == nil)
-		if vpnAlive && !retry.AuthenticationRequired {
-			for _, lease := range current.Leases {
-				if time.Until(lease.ExpiresAt) < 15*time.Second {
-					boundChecks.next = time.Time{}
-					break
+			if !vpnAlive && (exitKnown || exits.exits["vpn"] == nil) && retry.Due(time.Now()) {
+				if _, e = startVPN(run, exits); e != nil {
+					if !errors.Is(e, errVPNAuthenticationRequired) {
+						return e
+					}
+					retry.AuthenticationRequired = true
+					if e = update(run, func(s *State) error { markVPNRecovery(s, retry); return nil }); e != nil {
+						return e
+					}
+				} else {
+					retry.Attempted(time.Now())
+					disconnected = false
 				}
+				continue // reload the newly journalled attempt and its generation
 			}
-			opened, err := openCompany(ctx, run, company, boundChecks)
-			var terminal *terminalReadinessError
-			if errors.As(err, &terminal) {
+			retry.Ready(time.Now(), vpnAlive && company.ready() == nil)
+			if vpnAlive && !retry.AuthenticationRequired {
+				for _, lease := range current.Leases {
+					if time.Until(lease.ExpiresAt) < 15*time.Second {
+						boundChecks.next = time.Time{}
+						break
+					}
+				}
+				opened, err := openCompany(ctx, run, company, boundChecks)
+				var terminal *terminalReadinessError
+				if errors.As(err, &terminal) {
+					return err
+				}
+				if opened {
+					systemChecks.reset()
+				} else if err != nil && current.Phase != "company_unavailable" {
+					_ = update(run, func(s *State) error {
+						if err := guard(run, s); err != nil {
+							return err
+						}
+						s.Phase = "company_unavailable"
+						return nil
+					})
+				}
+			} else if err := boundChecks.close(run); err != nil {
 				return err
 			}
-			if opened {
-				systemChecks.reset()
-			} else if err != nil && current.Phase != "company_unavailable" {
-				_ = update(run, func(s *State) error {
-					if err := guard(run, s); err != nil {
-						return err
-					}
-					s.Phase = "company_unavailable"
-					return nil
-				})
-			}
-		} else if err := boundChecks.close(run); err != nil {
-			return err
 		}
-		if time.Since(lastHealth) > 15*time.Second {
+		if intent.Personal && time.Since(lastHealth) > 15*time.Second {
 			done, err := sampling.refresh(ctx, run, selection, verification)
 			if err != nil {
 				return err
@@ -578,7 +628,7 @@ func serve(run string) (returned error) {
 			}
 		}
 		wasSelected := selection.Current != selector.Reject
-		if _, err := checkSystemChannels(ctx, run, systemChecks, selection, boundChecks.open, retry.AuthenticationRequired || !vpnAlive); err != nil {
+		if _, err := checkSystemChannels(ctx, run, systemChecks, selection, boundChecks.open, !intent.Company || retry.AuthenticationRequired || !vpnAlive); err != nil {
 			return err
 		}
 		if wasSelected && selection.Current == selector.Reject {
@@ -593,6 +643,9 @@ func startVPN(run string, exits *childExitTracker) (Child, error) {
 	s, e := load(run)
 	if e != nil {
 		return Child{}, e
+	}
+	if !currentIntent(s).Company {
+		return Child{}, errors.New("macOS company channel is disabled")
 	}
 	var a auth.Session
 	if e = readJSON(filepath.Join(private(run), "auth.json"), &a); e != nil {
@@ -883,10 +936,12 @@ func VerifyOwnedInterfaces(run string) error {
 	if e != nil {
 		return e
 	}
-	for _, n := range []string{s.Manifest.Binding.VPN, s.Manifest.Binding.TUN} {
-		if _, e := net.InterfaceByName(n); e == nil {
-			return errors.New("candidate interface is still present")
-		}
+	interfaces, e := platform.Interfaces()
+	if e != nil {
+		return e
+	}
+	if hasDarwinCandidateInterface(s, interfaces) {
+		return errors.New("candidate interface is still present")
 	}
 	return nil
 }

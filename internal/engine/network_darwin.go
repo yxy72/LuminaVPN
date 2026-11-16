@@ -107,6 +107,9 @@ func endpoint(run string, network platform.Network) error {
 		if e := guard(run, s); e != nil {
 			return e
 		}
+		if !currentIntent(*s).Company {
+			return errors.New("macOS company channel is disabled")
+		}
 		r := platform.Route{Prefix: s.Manifest.Config.VPN.EndpointIPv4 + "/32", Gateway: network.Gateway, Interface: network.Interface}
 		for i, old := range s.Routes {
 			if !old.Route.Scoped && old.State != "removed" && (old.Route.Interface != r.Interface || old.Route.Gateway != r.Gateway) {
@@ -123,6 +126,9 @@ func hook(run string) error {
 	s, e := load(run)
 	if e != nil {
 		return e
+	}
+	if !currentIntent(s).Company {
+		return errors.New("macOS company channel is disabled")
 	}
 	reason := os.Getenv("reason")
 	if reason == "pre-init" {
@@ -262,6 +268,9 @@ func takeoverDNS(run string) error {
 }
 
 func validVPN(s State) bool {
+	if !currentIntent(s).Company {
+		return false
+	}
 	epoch, e := platform.WakeEpoch()
 	if e != nil || s.VPN.WakeEpoch == "" || epoch != s.VPN.WakeEpoch {
 		return false

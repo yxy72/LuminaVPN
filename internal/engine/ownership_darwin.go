@@ -494,7 +494,7 @@ func verifyDarwinRecoveredInterfaces(s State) error {
 	if err != nil {
 		return err
 	}
-	if interfaces[s.Manifest.Binding.VPN] || interfaces[s.Manifest.Binding.TUN] {
+	if hasDarwinCandidateInterface(s, interfaces) {
 		return errors.New("candidate interface remains; recovery stopped")
 	}
 	return nil

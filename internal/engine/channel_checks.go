@@ -24,13 +24,8 @@ func checkSystemChannels(ctx context.Context, run string, schedule *probeSchedul
 	}
 	node := selection.Current
 	scope := scopeForProbes(before, node)
-	selected := make([]policy.Probe, 0, len(before.Manifest.Config.Probes))
-	for _, p := range before.Manifest.Config.Probes {
-		if (!authorized || skipCompany) && p.Channel == "company" || node == selector.Reject && p.Channel == "personal" {
-			continue
-		}
-		selected = append(selected, p)
-	}
+	intent := currentIntent(before)
+	selected := systemProbeTargets(before.Manifest.Config.Probes, intent, node, authorized && !skipCompany)
 	schedule.bind(scope, selected)
 	if !schedule.due(time.Now()) {
 		return !systemReadyAt(before, time.Now()).IsZero(), ctx.Err()
@@ -61,7 +56,7 @@ func checkSystemChannels(ctx context.Context, run string, schedule *probeSchedul
 			personalFailure = failure
 		}
 	}
-	if node == selector.Reject {
+	if intent.Personal && node == selector.Reject {
 		// A deliberately closed ingress cannot verify the system path. Preserve
 		// its actionable failure instead of replacing a service error with the
 		// connection failure caused by our own REJECT gate.
@@ -111,7 +106,9 @@ func checkSystemChannels(ctx context.Context, run string, schedule *probeSchedul
 		s.Channels = checks
 		checked := systemReadyAt(*s, time.Now())
 		ready = !checked.IsZero()
-		if !s.TakeoverActive {
+		if s.TakeoverActive && s.Windows == nil {
+			desktopPhase(s, time.Now())
+		} else if !s.TakeoverActive {
 			if ready {
 				s.Phase, s.LastReady, s.Error = "ready", checked, ""
 			} else if s.Phase == "ready" {
@@ -127,16 +124,21 @@ func checkSystemChannels(ctx context.Context, run string, schedule *probeSchedul
 	return ready, err
 }
 
-func systemReadyAt(s State, now time.Time) time.Time {
-	var oldest time.Time
-	for _, name := range []string{"company", "personal", "direct"} {
-		h := channelView(s, name, now)
-		if h.State != "ready" || h.ProbeScope != "system_tun" {
-			return time.Time{}
-		}
-		if oldest.IsZero() || h.CheckedAt.Before(oldest) {
-			oldest = h.CheckedAt
+func systemProbeTargets(probes []policy.Probe, intent policy.ChannelIntent, node string, companyAuthorized bool) []policy.Probe {
+	selected := make([]policy.Probe, 0, len(probes))
+	for _, p := range probes {
+		switch p.Channel {
+		case "company":
+			if intent.Company && companyAuthorized {
+				selected = append(selected, p)
+			}
+		case "personal":
+			if intent.Personal && node != selector.Reject {
+				selected = append(selected, p)
+			}
+		case "direct":
+			selected = append(selected, p)
 		}
 	}
-	return oldest
+	return selected
 }

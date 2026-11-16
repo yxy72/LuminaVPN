@@ -10,15 +10,29 @@ import (
 	"time"
 
 	"netlaunch/internal/engine"
+	"netlaunch/internal/policy"
 	"netlaunch/internal/securefile"
 )
 
 const startupReadinessWindow = 150 * time.Second
 
+// Typed desktop callers can direct the ordinary user to the authentication action.
+var ErrMacAuthenticationRequired = errors.New("macOS company VPN authentication is required")
+
 // StartMacNetwork uses the native macOS controller with the profile and
 // runtime selected by the desktop host. The caller controls the operation
 // lifetime independently of the bridge's per-request deadline.
 func StartMacNetwork(ctx context.Context, profile, bundle string, validation time.Duration) error {
+	return startMacNetwork(ctx, profile, bundle, validation, nil)
+}
+
+// StartMacNetworkWithIntent applies the intent to a single native run. Company
+// authentication must already be present when the company channel is enabled.
+func StartMacNetworkWithIntent(ctx context.Context, profile, bundle string, validation time.Duration, intent policy.ChannelIntent) error {
+	return startMacNetwork(ctx, profile, bundle, validation, &intent)
+}
+
+func startMacNetwork(ctx context.Context, profile, bundle string, validation time.Duration, intent *policy.ChannelIntent) error {
 	if runtime.GOOS != "darwin" || os.Geteuid() == 0 {
 		return errors.New("macOS desktop startup requires the ordinary user")
 	}
@@ -32,7 +46,13 @@ func StartMacNetwork(ctx context.Context, profile, bundle string, validation tim
 	if err := securefile.CheckDir(profile); err != nil {
 		return err
 	}
-	o := options{profile: profile, runtime: bundle, validationTimeout: validation}
+	o := options{profile: profile, runtime: bundle, validationTimeout: validation, channels: intent}
+	if intent != nil {
+		o.mode = engine.Daily
+		if validation != 0 {
+			o.mode = engine.Validation
+		}
+	}
 	if err := validateLaunchOptions(&o, "up"); err != nil {
 		return err
 	}
@@ -87,7 +107,11 @@ func launchPreparedRun(ctx context.Context, stop *RunStop, launch func(context.C
 			case "stopped":
 				finished = true
 				if engine.NeedsAuthentication(observed) {
-					return s, errors.New("VPN authentication was rejected or expired; run auth, then up")
+					e := errors.New("VPN authentication was rejected or expired; run auth, then up")
+					if runtime.GOOS == "darwin" && observed.DesiredChannels != nil {
+						e = errors.Join(e, ErrMacAuthenticationRequired)
+					}
+					return s, e
 				}
 				return s, errors.New("startup did not complete; inspect status and use the recovery entry")
 			case "recovery_failed":

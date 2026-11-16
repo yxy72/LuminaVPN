@@ -491,8 +491,17 @@ func (c CLI) upLockedContext(ctx context.Context, o options, cfg policy.Config, 
 	if run, e := currentRun(o); e == nil {
 		if s, e := statusFor(run); e != nil || s.Phase != "stopped" {
 			return errors.New("a previous run needs attention; run status or down first")
-		} else if requiresFreshAuthentication(o.profile, cfg, s) {
+		} else if intent.Company && requiresFreshAuthentication(o.profile, cfg, s) {
 			o.force = true
+		}
+	}
+	var session auth.Session
+	haveSession := false
+	macDesktop := runtime.GOOS == "darwin" && o.mode != ""
+	if macDesktop && intent.Company {
+		session, haveSession = auth.Load(o.profile, cfg.VPN)
+		if !haveSession || o.force {
+			return ErrMacAuthenticationRequired
 		}
 	}
 	if issues, _ := diagnoseLaunch(o, cfg); len(issues) > 0 {
@@ -501,9 +510,7 @@ func (c CLI) upLockedContext(ctx context.Context, o options, cfg policy.Config, 
 		}
 		return errors.New("startup stopped before authentication or network changes; resolve doctor findings first")
 	}
-	var session auth.Session
-	haveSession := false
-	if intent.Company {
+	if intent.Company && !macDesktop {
 		if o.mode == "" {
 			if e = c.obtainAuthContext(ctx, o, cfg); e != nil {
 				return e
@@ -565,8 +572,10 @@ func (c CLI) upLockedContext(ctx context.Context, o options, cfg policy.Config, 
 	if e = runtimebundle.Copy(o.runtime, filepath.Join(run, "runtime")); e != nil {
 		return e
 	}
-	if e = securefile.Write(filepath.Join(run, "nodes.json"), nodes); e != nil {
-		return e
+	if intent.Personal {
+		if e = securefile.Write(filepath.Join(run, "nodes.json"), nodes); e != nil {
+			return e
+		}
 	}
 	if intent.Company && haveSession {
 		protectedSession, encodeErr := auth.EncodeRuntime(cfg.VPN, session)
@@ -653,8 +662,8 @@ func validateLaunchOptions(o *options, command string) error {
 		return errors.New("--verify-restored is available only for macOS down")
 	}
 	if o.mode != "" {
-		if command != "up" || !platform.WindowsClientBuild || o.channels == nil {
-			return errors.New("explicit desktop mode requires the Windows client service and channel intent")
+		if command != "up" || (runtime.GOOS != "darwin" && !platform.WindowsClientBuild) || o.channels == nil {
+			return errors.New("explicit desktop mode requires a supported client and channel intent")
 		}
 		if platform.WindowsValidationBuild || platform.WindowsHomeBuild {
 			return errors.New("Windows client and legacy preview build gates cannot be combined")
