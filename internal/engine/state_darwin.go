@@ -100,7 +100,7 @@ func update(run string, fn func(*State) error) error {
 	return save(run, &s)
 }
 func guard(run string, s *State) error {
-	if _, e := os.Stat(filepath.Join(run, "STOP")); e == nil || s.Phase == "stopping" || s.Phase == "stopped" || s.Phase == "recovery_failed" {
+	if _, e := os.Lstat(filepath.Join(run, "STOP")); !errors.Is(e, os.ErrNotExist) || s.Phase == "stopping" || s.Phase == "stopped" || s.Phase == "recovery_failed" {
 		return errors.New("stop requested")
 	}
 	if deadline := darwinRunDeadline(s.Manifest); !deadline.IsZero() && !time.Now().Before(deadline) {
@@ -223,6 +223,9 @@ func spawn(run, role string, args []string, exits *childExitTracker) (Child, err
 		if e := guard(run, s); e != nil {
 			return e
 		}
+		if role == "vpn" && !currentIntent(*s).Company {
+			return errors.New("macOS company channel is disabled")
+		}
 		index := len(s.Children)
 		m := s.Manifest
 		gateArgs := []string{m.Executable, "_child", "--run", run, "--index", strconv.Itoa(index)}
@@ -271,10 +274,15 @@ func spawn(run, role string, args []string, exits *childExitTracker) (Child, err
 			return e
 		}
 		for i := range s.Children {
-			if s.Children[i].PID == result.PID {
-				s.Children[i].Released = true
-				return nil
+			c := &s.Children[i]
+			if c.PID != result.PID || c.Birth != result.Birth {
+				continue
 			}
+			if c.Role == "vpn" && (c.DarwinVPNRetired || !currentIntent(*s).Company) {
+				return errors.New("macOS company VPN attempt was cancelled")
+			}
+			c.Released = true
+			return nil
 		}
 		return errors.New("child journal missing")
 	})
@@ -292,6 +300,9 @@ func child(run string, index int) error {
 			}
 			if e = guard(run, &s); e != nil {
 				return e
+			}
+			if c.Role == "vpn" && (c.DarwinVPNRetired || !currentIntent(s).Company) {
+				return errors.New("macOS company VPN attempt was cancelled")
 			}
 			if c.Released {
 				if c.Role == "vpn" {

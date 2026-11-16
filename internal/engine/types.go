@@ -29,14 +29,15 @@ type Manifest struct {
 	ValidationTimeout time.Duration         `json:"validation_timeout,omitempty"`
 }
 type Child struct {
-	Role     string             `json:"role"`
-	PID      int                `json:"pid"`
-	Birth    string             `json:"birth"`
-	Args     []string           `json:"args"`
-	GateArgs []string           `json:"gate_args"`
-	Released bool               `json:"released"`
-	Native   *platform.Identity `json:"native,omitempty"`
-	LogName  string             `json:"log_name,omitempty"`
+	Role             string             `json:"role"`
+	PID              int                `json:"pid"`
+	Birth            string             `json:"birth"`
+	Args             []string           `json:"args"`
+	GateArgs         []string           `json:"gate_args"`
+	Released         bool               `json:"released"`
+	Native           *platform.Identity `json:"native,omitempty"`
+	LogName          string             `json:"log_name,omitempty"`
+	DarwinVPNRetired bool               `json:"darwin_vpn_retired,omitempty"`
 }
 type OwnedRoute struct {
 	Route          platform.Route `json:"route"`

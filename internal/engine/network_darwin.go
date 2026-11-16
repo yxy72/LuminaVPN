@@ -3,6 +3,7 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"net"
 	"net/netip"
@@ -123,46 +124,24 @@ func endpoint(run string, network platform.Network) error {
 }
 
 func hook(run string) error {
-	s, e := load(run)
-	if e != nil {
-		return e
-	}
-	if !currentIntent(s).Company {
-		return errors.New("macOS company channel is disabled")
-	}
 	reason := os.Getenv("reason")
 	if reason == "pre-init" {
-		return nil
+		s, err := load(run)
+		if err != nil {
+			return err
+		}
+		if !currentIntent(s).Company {
+			return errors.New("macOS company channel is disabled")
+		}
+		return guard(run, &s)
 	}
 	pid, e := strconv.Atoi(os.Getenv("VPNPID"))
-	if e != nil {
+	if e != nil || pid < 2 {
 		return errors.New("VPN hook PID missing")
 	}
 	iface := os.Getenv("TUNDEV")
-	if iface != s.Manifest.Binding.VPN {
-		return errors.New("VPN hook interface mismatch")
-	}
-	owned := false
-	for _, c := range s.Children {
-		if c.Role == "vpn" && c.PID == pid {
-			ok, e := alive(c)
-			if e != nil {
-				return e
-			}
-			owned = ok
-		}
-	}
-	if !owned {
-		return errors.New("VPN hook is not from an owned process")
-	}
 	if reason == "disconnect" || reason == "attempt-reconnect" {
-		_ = gate(run)
-		return update(run, func(s *State) error {
-			if guard(run, s) != nil {
-				return nil
-			}
-			s.VPN.Bootstrap = false
-			s.Leases = nil
+		return applyDarwinVPNHook(run, pid, iface, func(s *State) error {
 			s.Phase = "reconnecting"
 			for i, r := range s.Routes {
 				if r.Route.Scoped && r.State != "removed" {
@@ -192,11 +171,7 @@ func hook(run string) error {
 			return errors.New("invalid VPN MTU")
 		}
 	}
-	_ = gate(run)
-	return update(run, func(s *State) error {
-		if e := guard(run, s); e != nil {
-			return e
-		}
+	return applyDarwinVPNHook(run, pid, iface, func(s *State) error {
 		// A fresh generation revokes old route leases before publishing bootstrap.
 		for index, route := range s.Routes {
 			if route.Route.Scoped && route.State != "removed" {
@@ -226,10 +201,100 @@ func hook(run string) error {
 		if current, e := platform.WakeEpoch(); e != nil || current != epoch {
 			return errors.New("sleep changed during VPN bootstrap")
 		}
+		if e := guard(run, s); e != nil {
+			return e
+		}
 		s.VPN.Bootstrap = true
 		s.Phase = "connecting"
 		return nil
 	})
+}
+
+func applyDarwinVPNHook(run string, pid int, iface string, change func(*State) error) error {
+	return update(run, func(s *State) error {
+		if err := guard(run, s); err != nil {
+			return err
+		}
+		if err := requireActiveDarwinOwner(run, *s); err != nil {
+			return err
+		}
+		if err := validateDarwinVPNHook(*s, pid, iface, platform.Process); err != nil {
+			return err
+		}
+		// All hook mutations, including closing the gate, follow validation of
+		// the current attempt while holding state.lock.
+		if err := fenceDarwinCompanyTraffic(s, func() error { return save(run, s) }, func() error { return closeDarwinCompanyGate(run, *s) }); err != nil {
+			return err
+		}
+		if err := guard(run, s); err != nil {
+			return err
+		}
+		return change(s)
+	})
+}
+
+func validateDarwinVPNHook(s State, pid int, iface string, process func(int) (platform.Identity, error)) error {
+	if !currentIntent(s).Company {
+		return errors.New("macOS company channel is disabled")
+	}
+	if iface == "" || iface != s.Manifest.Binding.VPN {
+		return errors.New("VPN hook interface mismatch")
+	}
+	child, found := latestVPN(s)
+	if !found || !child.Released || child.DarwinVPNRetired || pid != child.PID || len(child.Args) == 0 {
+		return errors.New("VPN hook is not from the current attempt")
+	}
+	id, err := process(pid)
+	if err != nil {
+		return err
+	}
+	if id.PID != pid || id.Birth != child.Birth || id.Executable != child.Args[0] || id.Command != strings.Join(child.Args, " ") {
+		return errors.New("VPN hook process identity mismatch")
+	}
+	return nil
+}
+
+func retireDarwinVPNAttempt(s *State) {
+	for i := len(s.Children) - 1; i >= 0; i-- {
+		if s.Children[i].Role == "vpn" {
+			s.Children[i].DarwinVPNRetired = true
+			return
+		}
+	}
+}
+
+func fenceDarwinCompanyTraffic(s *State, persist, closeGate func() error) error {
+	s.VPN.Bootstrap = false
+	s.Leases = nil
+	delete(s.Channels, "company")
+	// Persist the revoked authority before contacting the core so the bound
+	// ingress rejects new dials even if the controller does not acknowledge.
+	if err := persist(); err != nil {
+		return err
+	}
+	return closeGate()
+}
+
+func closeDarwinCompanyGate(run string, s State) error {
+	for i := len(s.Children) - 1; i >= 0; i-- {
+		c := s.Children[i]
+		if c.Role != "core" || !c.Released {
+			continue
+		}
+		ok, err := alive(c)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return errors.New("owned core unavailable during company gate closure")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		return selectCoreGroupContext(ctx, run, "CORP", "REJECT")
+	}
+	// The first VPN bootstrap can occur before the core is released. Its
+	// configuration starts with the company gate closed.
+	return nil
 }
 
 func takeoverDNS(run string) error {

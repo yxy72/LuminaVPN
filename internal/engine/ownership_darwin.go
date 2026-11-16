@@ -196,6 +196,27 @@ func darwinOwnerFor(run string, state State) (darwinRunOwner, error) {
 	return owner, nil
 }
 
+// Called within state.lock. The owner cannot be released while this journal
+// still owns native resources, and the owner record is replaced atomically.
+func requireActiveDarwinOwner(run string, state State) error {
+	store, err := openDarwinOwnershipStore(run)
+	if err != nil {
+		return err
+	}
+	owner, err := darwinOwnerFor(run, state)
+	if err != nil {
+		return err
+	}
+	active, err := store.active()
+	if err != nil {
+		return err
+	}
+	if active != owner {
+		return errors.New("administrator run no longer owns native resources")
+	}
+	return nil
+}
+
 // Older frozen binaries published no global owner. Their administrator journal
 // still fences new startups while it might own resources.
 func (store darwinOwnershipStore) requireLegacyIdle() error {

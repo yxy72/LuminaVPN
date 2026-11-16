@@ -669,12 +669,19 @@ func startVPN(run string, exits *childExitTracker) (Child, error) {
 
 func stopVPN(run string, company *companyRuntime) error {
 	company.revoke()
-	if e := gate(run); e != nil {
+	if e := update(run, func(s *State) error {
+		if err := guard(run, s); err != nil {
+			return err
+		}
+		if err := requireActiveDarwinOwner(run, *s); err != nil {
+			return err
+		}
+		retireDarwinVPNAttempt(s)
+		return fenceDarwinCompanyTraffic(s, func() error { return save(run, s) }, func() error { return closeDarwinCompanyGate(run, *s) })
+	}); e != nil {
 		return e
 	}
-	if e := update(run, func(s *State) error { s.VPN.Bootstrap = false; s.Leases = nil; return nil }); e != nil {
-		return e
-	}
+	company.revoke()
 	s, e := load(run)
 	if e != nil {
 		return e
@@ -721,7 +728,7 @@ func watch(run string) error {
 			return nil
 		}
 		reason := ""
-		if _, e = os.Stat(filepath.Join(run, "STOP")); e == nil {
+		if _, e = os.Lstat(filepath.Join(run, "STOP")); !errors.Is(e, os.ErrNotExist) {
 			reason = "user_stop"
 		}
 		if deadline := darwinRunDeadline(s.Manifest); reason == "" && !deadline.IsZero() && !time.Now().Before(deadline) {
