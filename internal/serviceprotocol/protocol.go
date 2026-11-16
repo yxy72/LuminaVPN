@@ -357,23 +357,24 @@ type LocalExitProof struct {
 	NoOwnedState  bool   `json:"no_owned_state"`
 }
 type Snapshot struct {
-	ProtocolVersion  int              `json:"protocol_version"`
-	ServiceState     string           `json:"service_state"`
-	TakeoverState    string           `json:"takeover_state"`
-	ProfileID        string           `json:"profile_id"`
-	Revision         uint64           `json:"revision"`
-	RunRef           string           `json:"run_ref,omitempty"`
-	Desired          DesiredChannels  `json:"desired"`
-	Company          Channel          `json:"company"`
-	Personal         Channel          `json:"personal"`
-	Direct           *Channel         `json:"direct,omitempty"`
-	OperationID      string           `json:"operation_id,omitempty"`
-	Challenge        *Challenge       `json:"challenge,omitempty"`
-	RecoveryRequired bool             `json:"recovery_required"`
-	Restored         bool             `json:"restored"`
-	AutoConnect      bool             `json:"auto_connect"`
-	Settings         *SettingsPayload `json:"settings,omitempty"`
-	LocalExitProof   *LocalExitProof  `json:"local_exit_proof,omitempty"`
+	ProtocolVersion   int              `json:"protocol_version"`
+	ServiceState      string           `json:"service_state"`
+	TakeoverState     string           `json:"takeover_state"`
+	ProfileID         string           `json:"profile_id"`
+	Revision          uint64           `json:"revision"`
+	RunRef            string           `json:"run_ref,omitempty"`
+	Desired           DesiredChannels  `json:"desired"`
+	Company           Channel          `json:"company"`
+	Personal          Channel          `json:"personal"`
+	Direct            *Channel         `json:"direct,omitempty"`
+	OperationID       string           `json:"operation_id,omitempty"`
+	Challenge         *Challenge       `json:"challenge,omitempty"`
+	RecoveryRequired  bool             `json:"recovery_required"`
+	Restored          bool             `json:"restored"`
+	AutoConnect       bool             `json:"auto_connect"`
+	Settings          *SettingsPayload `json:"settings,omitempty"`
+	LocalExitProof    *LocalExitProof  `json:"local_exit_proof,omitempty"`
+	MacCompanyControl bool             `json:"mac_company_control,omitempty"`
 }
 
 type Client interface {

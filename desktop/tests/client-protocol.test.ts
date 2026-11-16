@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
-import { CLIENT_METHODS, LOCAL_WORKSPACE_METHODS, validateMacLifecycleMutation, validateWorkspaceActivity, validateClientRequest, validateClientResult } from '../protocol/client'
+import { CLIENT_METHODS, LOCAL_WORKSPACE_METHODS, canPreemptMacCompanyOperation, validateMacLifecycleMutation, validateWorkspaceActivity, validateClientRequest, validateClientResult } from '../protocol/client'
 import { validateRequest, validateResult } from '../protocol/validation'
 import { READ_METHODS } from '../protocol/types'
 
@@ -40,6 +40,7 @@ describe('Windows client closed boundary', () => {
     expect(validateMacLifecycleMutation({ ...daily, start: { ...daily.start, channels: { company: false } } })).toBe(false)
     const auth = { ...envelope, kind: 'auth_begin', begin_auth: {} }
     expect(validateMacLifecycleMutation(auth)).toBe(true)
+    expect(validateMacLifecycleMutation({ ...auth, run_ref: 'run' })).toBe(true)
     expect(validateMacLifecycleMutation({ ...auth, begin_auth: { password: 'secret' } })).toBe(false)
     expect(validateMacLifecycleMutation({ ...auth, profile: '/private/other' })).toBe(false)
     expect(validateClientResult('service.operation', { ...operation, kind: 'auth_begin', phase: 'authenticated' })).toBe(true)
@@ -49,7 +50,29 @@ describe('Windows client closed boundary', () => {
     expect(validateMacLifecycleMutation({ ...envelope, kind: 'exit_restore', run_ref: 'run', stop: {} })).toBe(true)
     expect(validateMacLifecycleMutation({ ...envelope, kind: 'takeover_stop', stop: {} })).toBe(false)
     expect(validateMacLifecycleMutation({ ...envelope, kind: 'channels_set', channels })).toBe(false)
+    expect(validateMacLifecycleMutation({ ...envelope, kind: 'channels_set', run_ref: 'run', channels })).toBe(true)
     expect(validateMacLifecycleMutation({ ...envelope, kind: 'auth_respond', auth: { challenge_id: 'c', sequence: 1 } })).toBe(false)
+  })
+  it('scopes macOS company control and stop preemption to the live operation', () => {
+    const channel = { desired: true, state: 'unknown', route: 'unknown' }
+    const snapshot = {
+      protocol_version: 1 as const, service_state: 'local', takeover_state: 'applying_company', profile_id: envelope.profile_id,
+      run_ref: 'run', operation_id: operation.operation_id, revision: 1, auto_connect: false, restored: false,
+      recovery_required: true, desired: { company: true, personal: true }, company: channel, personal: channel,
+    }
+    expect(validateClientResult('service.snapshot', { ...snapshot, mac_company_control: true })).toBe(true)
+    expect(validateClientResult('service.snapshot', { ...snapshot, mac_company_control: 'true' })).toBe(false)
+    expect(validateClientResult('service.snapshot', { ...snapshot, service_state: 'available', mac_company_control: true })).toBe(false)
+    expect(validateClientResult('service.snapshot', { ...snapshot, run_ref: undefined, mac_company_control: true })).toBe(false)
+    const active = { ...operation, kind: 'channels_set' as const, phase: 'applying_company', completed: false, run_ref: 'run' }
+    expect(canPreemptMacCompanyOperation(snapshot, active)).toBe(true)
+    expect(canPreemptMacCompanyOperation({ ...snapshot, takeover_state: 'ready_reported' }, active)).toBe(false)
+    expect(canPreemptMacCompanyOperation(snapshot, { ...active, run_ref: 'other-run' })).toBe(false)
+    expect(canPreemptMacCompanyOperation(snapshot, { ...active, completed: true })).toBe(false)
+    const runtimeAuth = { ...active, kind: 'auth_begin' as const, phase: 'authenticating' }
+    const authenticating = { ...snapshot, takeover_state: 'authenticating' }
+    expect(canPreemptMacCompanyOperation(authenticating, runtimeAuth)).toBe(true)
+    expect(canPreemptMacCompanyOperation(authenticating, { ...runtimeAuth, run_ref: undefined })).toBe(false)
   })
   it('uses exactly one initialization source and source revision preconditions', () => {
     const base={profile_id:'profile',action:'initialize',request_id:'request'}

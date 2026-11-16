@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"netlaunch/internal/auth"
+	"netlaunch/internal/engine"
 	"netlaunch/internal/policy"
 	"netlaunch/internal/runtimebundle"
 	"netlaunch/internal/securefile"
@@ -67,6 +68,31 @@ const (
 // AuthenticateMacCompany refreshes the local company session in the ordinary
 // user's Terminal. This does not stage or start network takeover.
 func AuthenticateMacCompany(ctx context.Context, profile, bundle string) error {
+	return authenticateMacCompany(ctx, profile, bundle, nil, 0)
+}
+
+// AuthenticateMacCompany binds the Terminal refresh to exactly the observed
+// running generation. The coordinator independently checks its frozen VPN.
+func (r *RunStop) AuthenticateMacCompany(ctx context.Context, profile, bundle string, generation uint64) error {
+	return authenticateMacCompany(ctx, profile, bundle, r, generation)
+}
+
+func (r *RunStop) checkMacCompany(ctx context.Context, generation uint64) error {
+	if err := r.check(ctx); err != nil {
+		return err
+	}
+	if _, err := r.dir.Lstat("STOP"); !errors.Is(err, os.ErrNotExist) {
+		return errors.New("macOS run is stopping")
+	}
+	status, err := statusFor(r.path)
+	if err != nil || generation == 0 || status.AppliedGeneration != generation ||
+		status.ChannelGeneration != generation || !status.DarwinCompanyControl || !status.TakeoverActive {
+		return errors.New("selected macOS channel generation is unavailable")
+	}
+	return nil
+}
+
+func authenticateMacCompany(ctx context.Context, profile, bundle string, run *RunStop, generation uint64) error {
 	if runtime.GOOS != "darwin" || os.Geteuid() == 0 {
 		return errors.New("macOS desktop authentication requires the ordinary user")
 	}
@@ -93,8 +119,38 @@ func AuthenticateMacCompany(ctx context.Context, profile, bundle string) error {
 	if err != nil {
 		return err
 	}
+	if run != nil {
+		if err := run.checkMacCompany(ctx, generation); err != nil {
+			return err
+		}
+		current, err := statusFor(run.path)
+		if err != nil || current.AppliedChannels == nil || !current.AppliedChannels.Company {
+			return errors.New("selected company channel is no longer enabled")
+		}
+		frozen, err := engine.ReadManifest(run.path)
+		if err != nil || frozen.Mode == "" || frozen.Config.VPN != cfg.VPN {
+			return errors.New("configured company endpoint changed since the run started")
+		}
+	}
 	c := CLI{Out: io.Discard, Err: io.Discard}
-	return c.obtainAuthContext(ctx, options{profile: profile, runtime: bundle, force: true, channels: &intent}, cfg)
+	if err := c.obtainAuthContext(ctx, options{profile: profile, runtime: bundle, force: true, channels: &intent}, cfg); err != nil || run == nil {
+		return err
+	}
+	if err := run.checkMacCompany(ctx, generation); err != nil {
+		return err
+	}
+	current, err := statusFor(run.path)
+	if err != nil || current.AppliedChannels == nil || !current.AppliedChannels.Company {
+		return errors.New("selected company channel is no longer enabled")
+	}
+	session, ok := auth.Load(profile, cfg.VPN)
+	if !ok {
+		return errors.New("company authentication did not produce a valid session")
+	}
+	if err := publishDarwinCompanyRefresh(ctx, run, generation, cfg.VPN, session); err != nil {
+		return err
+	}
+	return run.checkMacCompany(ctx, generation)
 }
 
 func readAuthenticationPolicy(o options) (policy.Config, error) {

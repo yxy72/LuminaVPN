@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
 import type { ClientAPI, DesiredChannels, ServiceMutation, ServiceOperation, ServiceSnapshot, WorkspaceReadBody, WorkspaceWrite, WorkspaceCommand, EnvironmentOverride, ServiceChannel } from '../../../protocol/client'
-import { validateWorkspaceActivity } from '../../../protocol/client'
+import { canPreemptMacCompanyOperation, validateWorkspaceActivity } from '../../../protocol/client'
 import type { Nodes, Subscriptions, Environment, Config } from '../../../protocol/types'
 import { isRecord } from '../../../protocol/validation-base'
 import { healthLabels, verifiedHealthState, type NodeHealthRound } from './node-health'
@@ -77,9 +77,11 @@ export function ClientWorkspace({ page, api, refreshInventory, nodes, subscripti
   const [officeRules, setOfficeRules] = useState('[]'), [homeRules, setHomeRules] = useState('[]')
   const mounted = useRef(true), reading = useRef(false), editedChannels = useRef(false), loadedDocument = useRef(false), loadedSettings=useRef(false)
   const pending = useRef<string | null>(null), lastOperation = useRef<string | null>(null)
+  const submitting = useRef(false)
   const latest = useRef<ServiceSnapshot | null>(null)
   const [workspaceActivity, setWorkspaceActivity] = useState<boolean | null>(null)
   const canControl = windowsClient ? snapshot?.service_state === 'available' : workspaceActivity === false
+  const macPreemptible = macosClient && snapshot !== null && canPreemptMacCompanyOperation(snapshot, operation)
   const refreshDocumentMetadata = async () => {
     // Never advance a draft's revision without replacing its document. This
     // preserves compare-and-swap protection if another host edited the policy.
@@ -108,7 +110,7 @@ export function ClientWorkspace({ page, api, refreshInventory, nodes, subscripti
           setOfficeRules(pretty(current.settings.office_overrides))
           setHomeRules(pretty(current.settings.home_overrides))
         }
-        if (current.operation_id && current.operation_id !== lastOperation.current) {
+        if (!submitting.current && current.operation_id && current.operation_id !== lastOperation.current) {
           pending.current = current.operation_id
           lastOperation.current = current.operation_id
         }
@@ -116,7 +118,7 @@ export function ClientWorkspace({ page, api, refreshInventory, nodes, subscripti
       }
 
       const id = pending.current
-      if (id) {
+      if (id && !submitting.current) {
         let next: ServiceOperation
         try { next = await scopedOperation(id) }
         catch (error) {
@@ -132,7 +134,7 @@ export function ClientWorkspace({ page, api, refreshInventory, nodes, subscripti
           }
           throw error
         }
-        if (!mounted.current || pending.current !== id) return
+        if (!mounted.current || submitting.current || pending.current !== id) return
         if (next.operation_id !== id) throw new Error('OPERATION_MISMATCH')
         setOperation(next)
         if (next.completed || next.error) {
@@ -187,24 +189,48 @@ export function ClientWorkspace({ page, api, refreshInventory, nodes, subscripti
   const read = async (request: WorkspaceReadBody) => { setError(null); try { const value = await scopedRead(request); setResult(value); if (request.action === 'document') { if (typeof value.policy_json === 'string') setPolicyText(value.policy_json); else if (isRecord(value.policy)) setPolicyText(pretty(value.policy)); if (typeof value.revision === 'string') setRevision(value.revision) } } catch (e) { setError(safeError(e)) } }
   const operationNotice = (next: ServiceOperation): string => {
     if (next.kind === 'workspace' || next.kind === 'settings_apply') return '配置操作已完成，请重新读取保存结果。'
-    if (macosClient && next.phase === 'authenticated') return '公司认证已完成，可以连接网络。'
+    if (macosClient && next.phase === 'authenticated') return next.run_ref ? '本次运行的公司会话已更新。' : '公司认证已完成，可以连接网络。'
+    if (macosClient && next.phase === 'company_applied') return '公司 VPN 设置已应用到本次运行。'
     if (macosClient && next.phase === 'ready_reported') return '已收到运行就绪报告，可在总览查看检查结果。'
     if (macosClient && next.phase === 'stopped_reported') return '已收到停止报告。管理员恢复仍待确认。'
     return '操作完成。'
   }
-  const accepted = (next: ServiceOperation) => { lastOperation.current = next.operation_id; setOperation(next); pending.current = next.completed ? null : next.operation_id; setBusy(!next.completed); if (next.error) setError(safeError(next.error)); else {setNotice(next.completed ? operationNotice(next) : windowsClient ? '后台服务已接受操作。' : next.kind === 'workspace' ? '配置操作进行中，请保持应用打开。' : next.kind === 'auth_begin' ? '请在本机 Terminal 完成公司认证。' : '网络操作进行中，请留意 macOS 授权提示。');if(next.completed&&next.kind==='workspace')void refreshDocumentMetadata()}; editedChannels.current = false; void refresh() }
+  const accepted = (next: ServiceOperation) => { lastOperation.current = next.operation_id; setOperation(next); pending.current = next.completed ? null : next.operation_id; setBusy(!next.completed); if (next.error) setError(safeError(next.error)); else {setNotice(next.completed ? operationNotice(next) : windowsClient ? '后台服务已接受操作。' : next.kind === 'workspace' ? '配置操作进行中，请保持应用打开。' : next.kind === 'auth_begin' ? '请在本机 Terminal 完成公司认证。' : next.kind === 'channels_set' ? '正在应用本次运行的公司 VPN 设置。' : '网络操作进行中，请留意 macOS 授权提示。');if(next.completed&&next.kind==='workspace')void refreshDocumentMetadata()}; editedChannels.current = false; void refresh() }
   const command = async (request: WorkspaceCommand) => {
     if (!canControl) {setError(windowsClient ? '后台服务尚未确认可用。' : '请等待当前配置操作完成，或刷新工作空间。');return}
     setBusy(true); setError(null); setNotice(null)
     try { accepted(await scopedCommand({ ...request, profile_id:profileID,request_id: crypto.randomUUID() } as WorkspaceWrite) as ServiceOperation) }
     catch(e) { setBusy(false); setError(safeError(e)) }
   }
-  const submit = async (request: Record<string, unknown>) => {
-    const current = connectionControl ? latest.current : null
+  const submit = async (request: Record<string, unknown>, bindRun = true) => {
+    let current = connectionControl ? latest.current : null
     if (!current) { setError('后台状态未确认，未发出变更。'); return }
+    if (submitting.current) return
+    submitting.current = true
     setBusy(true); setError(null); setNotice(null)
-    try { accepted(await scopedSubmit({ request_id: crypto.randomUUID(), profile_id: current.profile_id, expected_revision: current.revision, ...(current.run_ref ? { run_ref: current.run_ref } : {}), ...request } as ServiceMutation)) }
-    catch(e) { setBusy(false); setError(safeError(e)) }
+    try {
+      if (macosClient && request.kind === 'takeover_stop') {
+        if (current.run_ref !== snapshot?.run_ref) throw stale()
+        if (macPreemptible) {
+          const verified = await scopedSnapshot()
+          if (verified.run_ref !== current.run_ref || verified.service_state !== 'local') throw stale()
+          current = verified
+        }
+      }
+      const runRef = bindRun ? current.run_ref : undefined
+      accepted(await scopedSubmit({
+        request_id: crypto.randomUUID(), profile_id: current.profile_id, expected_revision: current.revision,
+        ...(runRef ? { run_ref: runRef } : {}), ...request,
+      } as ServiceMutation))
+    } catch (e) {
+      setBusy(false); setError(safeError(e))
+    } finally { submitting.current = false }
+  }
+  const runtimeCompany = () => {
+    const current = latest.current
+    if (current?.mac_company_control === true && current.run_ref && current.run_ref === snapshot?.run_ref) return current
+    setError('当前运行待确认，请刷新后重试。')
+    return null
   }
   const edit = (section: string, key: string, value: unknown) => {
     try { const doc = JSON.parse(policyText) as PolicyDocument; const parent = isRecord(doc[section]) ? doc[section] as Record<string, unknown> : {}; doc[section] = { ...parent, [key]: value }; setPolicyText(pretty(doc)) } catch { setError('策略 JSON 格式需要先修正。') }
@@ -228,9 +254,17 @@ export function ClientWorkspace({ page, api, refreshInventory, nodes, subscripti
       ? `后台操作记录 ${operation.kind} · ${operation.phase}${operation.restored ? ' · 此操作曾确认恢复' : ''}${!snapshot ? ' · 当前恢复状态 unknown' : busy ? ' · 执行中' : ''}`
       : macOperationText(operation)}</div>}
     {page === 'overview' && macosClient && <MacLifecycle snapshot={snapshot} configured={configured}
-      busy={busy || workspaceActivity !== false} desired={desired} setDesired={setDesired}
+      busy={busy || workspaceActivity !== false} preemptible={macPreemptible} desired={desired} setDesired={setDesired}
       start={start => { void submit({ kind: 'takeover_start', start }) }}
-      authenticate={() => { void submit({ kind: 'auth_begin', begin_auth: {} }) }}
+      setCompany={company => {
+        const current = runtimeCompany()
+        if (current && current.desired.company !== company) {
+          void submit({ kind: 'channels_set', channels: { company, personal: current.desired.personal } })
+        }
+      }}
+      authenticate={runtime => {
+        if (!runtime || runtimeCompany()?.desired.company) void submit({ kind: 'auth_begin', begin_auth: {} }, runtime)
+      }}
       stop={() => { void submit({ kind: 'takeover_stop', stop: {} }) }} exit={() => { void api.exit() }} />}
     {page === 'overview' && windowsClient && <>
       <h1>连接工作空间</h1><p>默认流量走直连，公司与个人通道独立控制。策略要求公司白名单目标在公司通道关闭时阻断；实际保护与个人回退状态以后台接管证据为准。</p>

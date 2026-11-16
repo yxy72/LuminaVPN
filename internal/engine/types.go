@@ -65,6 +65,7 @@ type darwinCompanyControl struct {
 	RequestGeneration uint64 `json:"request_generation,omitempty"`
 	Enabled           bool   `json:"enabled,omitempty"`
 	Pending           bool   `json:"pending,omitempty"`
+	DesktopBound      bool   `json:"desktop_bound,omitempty"`
 }
 
 type State struct {
@@ -96,22 +97,23 @@ type State struct {
 	RecoveryReason    string                   `json:"recovery_reason,omitempty"`
 }
 type Status struct {
-	DesiredChannels   *policy.ChannelIntent    `json:"desired_channels,omitempty"`
-	AppliedChannels   *policy.ChannelIntent    `json:"applied_channels,omitempty"`
-	ChannelGeneration uint64                   `json:"channel_generation,omitempty"`
-	AppliedGeneration uint64                   `json:"applied_generation,omitempty"`
-	TakeoverActive    bool                     `json:"takeover_active,omitempty"`
-	PersonalFallback  bool                     `json:"personal_fallback,omitempty"`
-	Channels          map[string]ChannelStatus `json:"channels,omitempty"`
-	Lifecycle         string                   `json:"lifecycle,omitempty"`
-	Phase             string                   `json:"phase"`
-	Updated           time.Time                `json:"updated"`
-	Company           string                   `json:"company"`
-	Personal          string                   `json:"personal"`
-	LastReady         time.Time                `json:"last_ready"`
-	Error             string                   `json:"error,omitempty"`
-	RecoveryReason    string                   `json:"recovery_reason,omitempty"`
-	Experimental      bool                     `json:"experimental"`
+	DarwinCompanyControl bool                     `json:"darwin_company_control,omitempty"`
+	DesiredChannels      *policy.ChannelIntent    `json:"desired_channels,omitempty"`
+	AppliedChannels      *policy.ChannelIntent    `json:"applied_channels,omitempty"`
+	ChannelGeneration    uint64                   `json:"channel_generation,omitempty"`
+	AppliedGeneration    uint64                   `json:"applied_generation,omitempty"`
+	TakeoverActive       bool                     `json:"takeover_active,omitempty"`
+	PersonalFallback     bool                     `json:"personal_fallback,omitempty"`
+	Channels             map[string]ChannelStatus `json:"channels,omitempty"`
+	Lifecycle            string                   `json:"lifecycle,omitempty"`
+	Phase                string                   `json:"phase"`
+	Updated              time.Time                `json:"updated"`
+	Company              string                   `json:"company"`
+	Personal             string                   `json:"personal"`
+	LastReady            time.Time                `json:"last_ready"`
+	Error                string                   `json:"error,omitempty"`
+	RecoveryReason       string                   `json:"recovery_reason,omitempty"`
+	Experimental         bool                     `json:"experimental"`
 }
 
 func ReadManifest(run string) (Manifest, error) {

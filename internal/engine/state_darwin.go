@@ -206,9 +206,13 @@ func LaunchContext(ctx context.Context, action, run string) error {
 	if action == "serve" {
 		line += " >/dev/null 2>&1 </dev/null &"
 	}
+	return runDarwinAuthorization(ctx, line)
+}
+
+func runDarwinAuthorization(ctx context.Context, line string) error {
 	script := "do shell script " + strconv.Quote(line) + " with administrator privileges"
 	cmd := exec.CommandContext(ctx, "/usr/bin/osascript", "-e", script)
-	if e = cmd.Run(); e != nil {
+	if e := cmd.Run(); e != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}

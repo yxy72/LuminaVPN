@@ -22,6 +22,8 @@ type macStopFixture struct {
 	request func(context.Context) error
 	wait    func(context.Context) error
 	recover func(context.Context) error
+	company func(context.Context, string, uint64, bool, bool) error
+	auth    func(context.Context, string, string, uint64) error
 }
 
 func (f *macStopFixture) Matches(path string, file os.FileInfo) bool {
@@ -31,6 +33,12 @@ func (f *macStopFixture) Request(ctx context.Context) error              { retur
 func (f *macStopFixture) WaitForStoppedReport(ctx context.Context) error { return f.wait(ctx) }
 func (f *macStopFixture) RecoverVerified(ctx context.Context) error      { return f.recover(ctx) }
 func (f *macStopFixture) Close() error                                   { return nil }
+func (f *macStopFixture) SetMacCompany(ctx context.Context, id string, generation uint64, company, personal bool) error {
+	return f.company(ctx, id, generation, company, personal)
+}
+func (f *macStopFixture) AuthenticateMacCompany(ctx context.Context, profile, runtime string, generation uint64) error {
+	return f.auth(ctx, profile, runtime, generation)
+}
 
 func makeMacReport(t *testing.T, phase string) macRunReport {
 	t.Helper()
@@ -83,10 +91,93 @@ func macMutation(s p.Snapshot, id string, kind p.Kind) p.Mutation {
 		m.Start = &p.StartPayload{Mode: "validation", ValidationSeconds: 90, Channels: p.DesiredChannels{Company: true, Personal: true}}
 	case p.AuthBegin:
 		m.BeginAuth = &p.AuthBeginPayload{}
+	case p.ChannelsSet:
+		m.Channels = &p.DesiredChannels{Company: !s.Desired.Company, Personal: s.Desired.Personal}
 	default:
 		m.Stop = &p.StopPayload{}
 	}
 	return m
+}
+
+func TestMacCompanyControlUsesBoundGenerationAndAllowsPriorityStop(t *testing.T) {
+	d, current := macBackendFixture(t)
+	n := d.localWorkspace.network
+	running := makeMacReport(t, "managed")
+	intent := policy.DefaultIntent()
+	running.status.DesiredChannels, running.status.AppliedChannels = &intent, &intent
+	running.status.DarwinCompanyControl, running.status.TakeoverActive = true, true
+	running.status.ChannelGeneration, running.status.AppliedGeneration = 9, 9
+	current.Store(&running)
+	started := make(chan struct{})
+	stopped := running
+	stopped.status.Phase, stopped.stop = "stopped", true
+	var canceled, requested, authenticated atomic.Bool
+	n.bind = func(ctx context.Context, profile string) (macRunStop, error) {
+		if profile != d.Profile {
+			return nil, errors.New("wrong profile")
+		}
+		return &macStopFixture{
+			report: running,
+			company: func(ctx context.Context, id string, generation uint64, company, personal bool) error {
+				if id != "switch" || generation != 9 || company || !personal {
+					return errors.New("native call was not Company-only and generation-bound")
+				}
+				close(started)
+				<-ctx.Done()
+				canceled.Store(true)
+				return ctx.Err()
+			},
+			auth: func(_ context.Context, profile, runtime string, generation uint64) error {
+				authenticated.Store(profile == d.Profile && runtime == d.Runtime && generation == 9)
+				return nil
+			},
+			request: func(context.Context) error {
+				requested.Store(true)
+				current.Store(&stopped)
+				return nil
+			},
+			wait: func(context.Context) error { return nil },
+		}, nil
+	}
+	s := macSnapshot(t, d)
+	if !s.MacCompanyControl || s.TakeoverState != "managed_reported" {
+		t.Fatal(s)
+	}
+	auth := macMutation(s, "refresh", p.AuthBegin)
+	if _, err := macCall(t, d, "service.submit", auth); err != nil {
+		t.Fatal(err)
+	}
+	if op := macCompleted(t, d, "refresh"); op.Error != nil || !authenticated.Load() || op.Phase != "authenticated" {
+		t.Fatal(op)
+	}
+	s = macSnapshot(t, d)
+	wrong := macMutation(s, "both", p.ChannelsSet)
+	wrong.Channels.Personal = false
+	_, err := macCall(t, d, "service.submit", wrong)
+	macErrorCode(t, err, "INVALID_PARAMS")
+	change := macMutation(s, "switch", p.ChannelsSet)
+	if _, err = macCall(t, d, "service.submit", change); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("native company operation not dispatched")
+	}
+	if pending := macSnapshot(t, d); pending.MacCompanyControl || pending.TakeoverState != "applying_company" {
+		t.Fatal(pending)
+	}
+	// An already-rendered same-run STOP may race the native apply status.
+	stop := macMutation(s, "stop-company", p.TakeoverStop)
+	if _, err := macCall(t, d, "service.submit", stop); err != nil {
+		t.Fatal(err)
+	}
+	if op := macCompleted(t, d, "stop-company"); op.Error != nil || !requested.Load() || !canceled.Load() {
+		t.Fatal(op)
+	}
+	if op := macCompleted(t, d, "switch"); op.Error == nil || op.Error.Code != "MAC_OPERATION_INTERRUPTED" {
+		t.Fatal(op)
+	}
 }
 
 func macCompleted(t *testing.T, d *Desktop, id string) p.Operation {
@@ -291,7 +382,7 @@ func TestMacNetworkStopsOnlyExplicitValidLifecycleRequests(t *testing.T) {
 	macErrorCode(t, err, "INVALID_PARAMS")
 	toggle := p.Mutation{RequestID: "toggle", ProfileID: report.ProfileID, RunRef: report.RunRef, ExpectedRevision: report.Revision, Kind: p.ChannelsSet, Channels: &p.DesiredChannels{}}
 	_, err = macCall(t, d, "service.submit", toggle)
-	macErrorCode(t, err, "INVALID_PARAMS")
+	macErrorCode(t, err, "MAC_COMPANY_UNAVAILABLE")
 	current.Store(&macRunReport{})
 	lost := macSnapshot(t, d)
 	if lost.TakeoverState != "unconfirmed" || !lost.RecoveryRequired || lost.Restored {
@@ -387,7 +478,11 @@ func TestMacStartupChannelsAndAuthenticationUseSeparateOperations(t *testing.T) 
 	}
 	active := makeMacReport(t, "ready")
 	current.Store(&active)
-	_, err = macCall(t, d, "service.submit", macMutation(macSnapshot(t, d), "unresolved-auth", p.AuthBegin))
+	byRun := macMutation(macSnapshot(t, d), "unresolved-auth", p.AuthBegin)
+	_, err = macCall(t, d, "service.submit", byRun)
+	macErrorCode(t, err, "MAC_COMPANY_UNAVAILABLE")
+	byRun.RequestID, byRun.RunRef = "unresolved-idle-auth", ""
+	_, err = macCall(t, d, "service.submit", byRun)
 	macErrorCode(t, err, "RECOVERY_REQUIRED")
 }
 

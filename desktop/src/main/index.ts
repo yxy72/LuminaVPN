@@ -7,7 +7,7 @@ import { deflateSync } from 'node:zlib'
 import { Bridge } from './bridge'
 import { isRecord, validateRequest } from '../../protocol/validation'
 import { READ_METHODS, type Hello, type ReadMethod, type Profile } from '../../protocol/types'
-import { CLIENT_METHODS, opaqueID, validateClientRequest, validateMacLifecycleMutation, type ServiceSnapshot, type ServiceOperation, type ClientMethod } from '../../protocol/client'
+import { CLIENT_METHODS, canPreemptMacCompanyOperation, opaqueID, validateClientRequest, validateMacLifecycleMutation, type ServiceSnapshot, type ServiceOperation, type ClientMethod } from '../../protocol/client'
 import { QuitController, checkMacExitOperation, classifyMacExit, confirmedUninstalledWithoutOwnedState, macExitSnapshotMatches } from './quit-controller'
 import {installedRecoveryScript} from './recovery-entry'
 import { assertLocalWorkspaceIdle, assertProfileMayLeave, commitProfileSelection, desktopHello, windowsClientProfile } from './profile-selection'
@@ -70,10 +70,26 @@ async function attemptMacExit(): Promise<boolean> {
   try {
     const hello = await desktopHello(current, app.getVersion())
     owner = hello.capabilities.macos_client === true
-    if (hello.capabilities.config_write) await assertLocalWorkspaceIdle(current)
+    let workspaceBusy = false
+    if (hello.capabilities.config_write) {
+      try { await assertLocalWorkspaceIdle(current) }
+      catch (error) {
+        if (!owner || !(error instanceof Error) || error.message !== 'WORKSPACE_BUSY') throw error
+        workspaceBusy = true
+      }
+    }
     if (!owner) { finishQuit(); return true }
 
-    const snapshot = await current.request('service.snapshot') as ServiceSnapshot
+    let snapshot = await current.request('service.snapshot') as ServiceSnapshot
+    if (workspaceBusy) {
+      const operation = snapshot.operation_id
+        ? await current.request('service.operation', { operation_id: snapshot.operation_id }) as ServiceOperation
+        : null
+      if (!canPreemptMacCompanyOperation(snapshot, operation)) {
+        await assertLocalWorkspaceIdle(current)
+        snapshot = await current.request('service.snapshot') as ServiceSnapshot
+      }
+    }
     const disposition = classifyMacExit(snapshot)
     if (disposition === 'no_current_run' || disposition === 'restored') { finishQuit(); return true }
     if (disposition !== 'needs_restore' || !snapshot.run_ref) throw new Error('EXIT_RESTORE_UNCONFIRMED')

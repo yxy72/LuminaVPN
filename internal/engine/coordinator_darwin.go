@@ -379,10 +379,14 @@ func serve(run string) (returned error) {
 			return e
 		}
 		if current.DarwinCompany != nil && current.DarwinCompany.Pending {
-			intent, e = applyPendingDarwinCompanyChange(run, company)
+			updated, e := applyPendingDarwinCompanyChange(run, company)
+			if errors.Is(e, errDarwinCompanyRequestCanceled) {
+				continue
+			}
 			if e != nil {
 				return e
 			}
+			intent = updated
 			boundChecks.reset()
 			systemChecks.reset()
 			retry.FreshAuthentication(time.Now())

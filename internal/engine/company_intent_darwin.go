@@ -149,9 +149,15 @@ func applyPendingDarwinCompanyChange(run string, company *companyRuntime) (polic
 		return policy.ChannelIntent{}, errors.New("company ingress disappeared during transition")
 	}
 	var change darwinCompanyTransition
+	var canceled bool
 	if err := update(run, func(state *State) error {
 		if err := checkDarwinCompanyOwner(run, *state); err != nil {
 			return err
+		}
+		if record := state.DarwinCompany; record != nil && record.DesktopBound && !darwinCompanyPermit(run, record.RequestID) {
+			state.DarwinCompany = &darwinCompanyControl{}
+			canceled = true
+			return nil
 		}
 		if err := beginDarwinCompanyChange(state); err != nil {
 			return err
@@ -161,6 +167,9 @@ func applyPendingDarwinCompanyChange(run string, company *companyRuntime) (polic
 		return err
 	}); err != nil {
 		return policy.ChannelIntent{}, err
+	}
+	if canceled {
+		return policy.ChannelIntent{}, errDarwinCompanyRequestCanceled
 	}
 	check := func(state *State) error {
 		if err := checkDarwinCompanyOwner(run, *state); err != nil {

@@ -1,5 +1,5 @@
 import { test, expect, _electron as electron, type ElectronApplication, type Page } from '@playwright/test'
-import { chmod, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, cp, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { existsSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
@@ -223,6 +223,251 @@ test('desktop reads real fixtures, protects IPC and ages evidence', async () => 
       await application.close()
     }
     await rm(join(profile, 'current.json'), { force: true })
+  }
+})
+
+// An injected local bridge for the Mac Electron Company lifecycle test.
+const macCompanyFixture = String.raw`#!/usr/bin/env node
+const { appendFileSync, existsSync, unlinkSync } = require('node:fs')
+const { join } = require('node:path')
+const readline = require('node:readline')
+
+const profile = 'fixture-profile'
+const now = () => new Date().toISOString()
+let run = 'fixture-run-1'
+let phase = 'ready_reported'
+let channels = { company: false, personal: true }
+let revision = 1
+let active
+const operations = new Map()
+const reachability = { state: 'unknown', reason: '', checked_at: null, path_state: 'unknown', service_state: 'unknown' }
+const methods = [
+  'session.hello', 'state.get', 'profile.inspect', 'nodes.list', 'config.get', 'subscriptions.summary',
+  'environment.check', 'recovery.describe', 'service.snapshot', 'service.submit', 'service.operation',
+  'workspace.read', 'workspace.submit',
+]
+
+function snapshot() {
+  const restored = phase === 'restored'
+  const running = phase === 'ready_reported'
+  return {
+    protocol_version: 1, service_state: 'local', takeover_state: active?.phase ?? phase, profile_id: profile,
+    revision, run_ref: run, operation_id: active?.operation_id, desired: channels, auto_connect: false,
+    company: { desired: channels.company, state: 'unknown', route: running && !channels.company ? 'blocked_reported' : 'unknown' },
+    personal: { desired: channels.personal, state: 'unknown', route: 'unknown' },
+    recovery_required: running && !restored, restored, mac_company_control: !active && running,
+  }
+}
+
+function settle(operation, nextPhase, restored = false) {
+  Object.assign(operation, { phase: nextPhase, completed: true, restored, updated_at: now() })
+  active = undefined
+}
+
+function submit(request) {
+  if (request.profile_id !== profile || request.run_ref !== run || request.expected_revision !== revision) {
+    throw new Error('REVISION_CONFLICT')
+  }
+  const { kind } = request
+  const priority = kind === 'takeover_stop' || kind === 'exit_restore'
+  if (active && !priority) throw new Error('PROFILE_BUSY')
+  if (kind === 'channels_set' && (phase !== 'ready_reported' || request.channels.personal !== channels.personal)) {
+    throw new Error('INVALID_PARAMS')
+  }
+  if (kind === 'auth_begin' && !channels.company) throw new Error('INVALID_PARAMS')
+  if (active) settle(active, 'cancelled')
+  const operation = {
+    kind, operation_id: 'op-' + ++revision, request_id: request.request_id, profile_id: profile, run_ref: run,
+    revision, completed: false, restored: false, created_at: now(), updated_at: now(),
+  }
+  operations.set(operation.operation_id, operation)
+  appendFileSync(join(process.cwd(), 'accepted.jsonl'), JSON.stringify(request) + '\n')
+
+  switch (kind) {
+    case 'channels_set':
+      operation.phase = 'applying_company'
+      active = operation
+      operation.nextChannels = request.channels
+      break
+    case 'auth_begin':
+      operation.phase = 'authenticating'
+      active = operation
+      break
+    case 'takeover_stop':
+      phase = 'stopped_reported'
+      settle(operation, phase)
+      break
+    case 'takeover_start':
+      run = 'fixture-run-2'
+      channels = request.start.channels
+      phase = 'ready_reported'
+      settle(operation, phase)
+      break
+    case 'exit_restore':
+      phase = 'restored'
+      settle(operation, phase, true)
+      break
+    default:
+      throw new Error('INVALID_PARAMS')
+  }
+  return operation
+}
+
+function handle(method, params) {
+  const marker = join(process.cwd(), 'apply-company')
+  if (active?.kind === 'channels_set' && existsSync(marker)) {
+    unlinkSync(marker)
+    channels = active.nextChannels
+    settle(active, 'company_applied')
+  }
+  switch (method) {
+    case 'session.hello':
+      return {
+        protocol_major: 1, session_id: 'company-fixture', mode: 'macos',
+        build: { version: 'fixture', os: 'darwin', arch: 'arm64', go_version: 'fixture' },
+        capabilities: {
+          read_only: false, connection_start: true, connection_stop: true, config_write: true, native_lifecycle: true,
+          windows_client: false, macos_client: true, methods,
+        },
+      }
+    case 'state.get':
+      return {
+        profile_configured: true, run_ref: run, snapshot_stale: false, snapshot_age_seconds: 0,
+        runtime_liveness: 'not_checked', recovery_required: phase === 'ready_reported', stop_requested: false,
+        observed_at: now(),
+        status: { phase: 'ready', lifecycle: 'running', updated: now(), last_ready: null, personal: null,
+          channels: { company: reachability, personal: reachability, direct: reachability } },
+      }
+    case 'profile.inspect':
+      return {
+        profile_id: profile, configured: true, profile_name: 'Fixture', policy_valid: true, nodes_available: true,
+        node_count: 0, revision: null, transaction_pending: false, issues: [], read_only: false,
+      }
+    case 'nodes.list':
+      return { total: 0, offset: 0, limit: 100, inventory: 'empty', selection_scope: 'not_compared', latency: 'not_provided', items: [] }
+    case 'config.get':
+      return { revision: null, total: 0, offset: 0, limit: 100, static_only: true, read_only: true, rules: [] }
+    case 'subscriptions.summary':
+      return { configured: false, cache_available: false, next_start_only: true, updated_at: null, sources: [] }
+    case 'environment.check':
+      return { checked_at: now(), read_only: true, checks: [] }
+    case 'recovery.describe':
+      return { required: false, run_ref: run, stop_requested: false, available: true, instructions: [], read_only: true }
+    case 'workspace.read':
+      return params.action === 'activity' ? { profile_id: profile, active: Boolean(active) } : { profile_id: profile }
+    case 'service.snapshot':
+      return snapshot()
+    case 'service.submit':
+    case 'service.operation': {
+      const { nextChannels, ...operation } = method === 'service.submit' ? submit(params) : operations.get(params.operation_id)
+      return operation
+    }
+    default:
+      throw new Error('METHOD_NOT_FOUND')
+  }
+}
+
+readline.createInterface({ input: process.stdin }).on('line', line => {
+  const { id, method, params } = JSON.parse(line)
+  try { process.stdout.write(JSON.stringify({ id, result: handle(method, params) }) + '\n') }
+  catch (error) { process.stdout.write(JSON.stringify({ id, error: { code: error.message } }) + '\n') }
+})
+`
+
+test('macOS switches only Company on the bound run and can interrupt it to restore', async () => {
+  test.skip(process.platform !== 'darwin', 'Requires the macOS desktop main process')
+  await mkdir(resolve('../.local'), { recursive: true })
+  const root = await mkdtemp(join(resolve('../.local'), 'desktop-company-e2e-'))
+  const userData = join(root, 'userdata')
+  const backend = join(root, 'resources', 'backend', 'netlaunch')
+  await cp(resolve('out'), join(root, 'out'), { recursive: true })
+  await mkdir(userData)
+  await mkdir(join(root, 'resources', 'backend'), { recursive: true })
+  await writeFile(backend, macCompanyFixture, { mode: 0o700 })
+  await writeFile(join(root, 'package.json'), JSON.stringify({ main: 'out/main/index.js', version: '0.2.0' }))
+  const env: Record<string, string> = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined))
+  delete env.ELECTRON_RUN_AS_NODE; delete env.NODE_OPTIONS
+  const application = await electron.launch({ args: [root, '--user-data-dir=' + userData], cwd: root, env })
+  const mainProcess = application.process()
+  try {
+    await application.context().route(/^https?:\/\//, route => route.abort())
+    const page = await application.firstWindow()
+    const company = page.getByRole('checkbox', { name: '开启公司 VPN', exact: true })
+    const personal = page.getByRole('checkbox', { name: '开启个人代理', exact: true })
+    const auth = page.getByRole('button', { name: '在终端进行公司认证', exact: true })
+    const stop = page.getByRole('button', { name: '请求停止', exact: true })
+    await expect(company).toBeEnabled()
+    await expect(company).not.toBeChecked()
+    await expect(personal).toBeChecked()
+    await expect(personal).toBeDisabled()
+    await expect(auth).toBeDisabled()
+
+    await company.click()
+    await expect(page.getByText('正在切换本次运行的公司 VPN', { exact: true })).toBeVisible()
+    await expect(company).toBeDisabled()
+    await expect(company).not.toBeChecked()
+    await expect(stop).toBeEnabled()
+    await writeFile(join(root, 'apply-company'), '')
+    await expect(company).toBeChecked()
+    await expect(page.getByText('公司 VPN 设置已应用到本次运行。')).toBeVisible()
+    await expect(personal).toBeDisabled()
+    await expect(auth).toBeEnabled()
+
+    await company.click()
+    await expect(company).toBeDisabled()
+    await expect(company).toBeChecked()
+    await writeFile(join(root, 'apply-company'), '')
+    await expect(company).not.toBeChecked()
+    await expect(auth).toBeDisabled()
+    await expect(page.getByText(/公司：报告已阻断/)).toBeVisible()
+    await company.click()
+    await expect(company).toBeDisabled()
+    await writeFile(join(root, 'apply-company'), '')
+    await expect(auth).toBeEnabled()
+
+    await auth.click()
+    await expect(page.getByText('请在本机 Terminal 完成公司认证', { exact: true }).first()).toBeVisible()
+    await expect(stop).toBeEnabled()
+    await stop.click()
+    await expect(page.getByRole('button', { name: '连接网络', exact: true })).toBeEnabled()
+
+    await personal.check()
+    await page.getByRole('button', { name: '连接网络', exact: true }).click()
+    await expect(company).toBeEnabled()
+    await expect(personal).toBeDisabled()
+    await company.click()
+    const exit = page.getByRole('button', { name: '验证恢复并退出', exact: true })
+    await expect(company).toBeDisabled()
+    await expect(exit).toBeEnabled()
+    const closed = application.waitForEvent('close')
+    await exit.click()
+    await closed
+
+    const requests = (await readFile(join(root, 'accepted.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+    expect(requests.map(({ kind, run_ref }) => [kind, run_ref])).toEqual([
+      ['channels_set', 'fixture-run-1'],
+      ['channels_set', 'fixture-run-1'],
+      ['channels_set', 'fixture-run-1'],
+      ['auth_begin', 'fixture-run-1'],
+      ['takeover_stop', 'fixture-run-1'],
+      ['takeover_start', 'fixture-run-1'],
+      ['channels_set', 'fixture-run-2'],
+      ['exit_restore', 'fixture-run-2'],
+    ])
+    expect(requests.filter(request => request.kind === 'channels_set').map(request => request.channels)).toEqual([
+      { company: true, personal: true },
+      { company: false, personal: true },
+      { company: true, personal: true },
+      { company: true, personal: true },
+    ])
+  } finally {
+    // Always retire this isolated UI, including if its error dialog opens.
+    if (mainProcess.exitCode === null && mainProcess.signalCode === null) {
+      const closed = application.waitForEvent('close')
+      mainProcess.kill('SIGKILL')
+      await closed
+    }
+    await rm(root, { recursive: true, force: true })
   }
 })
 

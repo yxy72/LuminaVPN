@@ -25,6 +25,11 @@ type macRunStop interface {
 	Close() error
 }
 
+type macRunCompanyControl interface {
+	SetMacCompany(context.Context, string, uint64, bool, bool) error
+	AuthenticateMacCompany(context.Context, string, string, uint64) error
+}
+
 type macRunReport struct {
 	present, stop, reported bool
 	path                    string
@@ -101,7 +106,9 @@ func (n *macNetwork) observe(profile string) {
 	}
 	identityChanged := next.present != n.current.present || (next.present &&
 		(next.path != n.current.path || (next.identity != nil || n.current.identity != nil) && !next.sameRun(n.current)))
-	if identityChanged || n.current.stop != next.stop || n.current.status.Phase != next.status.Phase {
+	if identityChanged || n.current.stop != next.stop || n.current.status.Phase != next.status.Phase ||
+		n.current.status.ChannelGeneration != next.status.ChannelGeneration || n.current.status.AppliedGeneration != next.status.AppliedGeneration ||
+		n.current.status.DarwinCompanyControl != next.status.DarwinCompanyControl {
 		n.revision++
 	}
 	if identityChanged {
@@ -125,11 +132,20 @@ func validMacNetworkMutation(m p.Mutation) bool {
 		return m.Start != nil
 	case p.AuthBegin:
 		return m.BeginAuth != nil
+	case p.ChannelsSet:
+		return m.RunRef != "" && m.Channels != nil
 	case p.TakeoverStop, p.ExitRestore:
 		return m.RunRef != ""
 	default:
 		return false
 	}
+}
+
+func macCompanyEligible(r macRunReport) bool {
+	s := r.status
+	return r.reported && r.identity != nil && !r.stop && s.TakeoverActive && s.DarwinCompanyControl &&
+		s.ChannelGeneration != 0 && s.ChannelGeneration == s.AppliedGeneration &&
+		s.DesiredChannels != nil && s.AppliedChannels != nil && *s.DesiredChannels == *s.AppliedChannels
 }
 
 func savedMacDesired(r macRunReport) p.DesiredChannels {
@@ -186,8 +202,9 @@ func (w *localWorkspace) networkSnapshot(ctx context.Context) (p.Snapshot, error
 		Revision: n.revision, RunRef: n.runRef, OperationID: w.activeID,
 		Desired: desired,
 		Company: savedMacChannel(r, "company", desired.Company), Personal: savedMacChannel(r, "personal", desired.Personal),
-		RecoveryRequired: n.lost.present || r.present && !n.restored() && !n.stoppedReport(),
-		Restored:         n.restored(),
+		RecoveryRequired:  n.lost.present || r.present && !n.restored() && !n.stoppedReport(),
+		Restored:          n.restored(),
+		MacCompanyControl: w.activeID == "" && macCompanyEligible(r),
 	}
 	switch {
 	case s.Restored:
@@ -196,7 +213,7 @@ func (w *localWorkspace) networkSnapshot(ctx context.Context) (p.Snapshot, error
 		s.TakeoverState = "unconfirmed"
 	case r.present:
 		if phase := oneOf(r.status.Phase, "", "prepared", "preparing", "connecting", "reconnecting", "starting",
-			"ready", "degraded", "authentication_required", "company_unavailable", "personal_unavailable",
+			"ready", "managed", "degraded", "authentication_required", "company_unavailable", "personal_unavailable",
 			"network_unavailable", "stopping", "stopped", "recovery_failed"); phase != "" {
 			s.TakeoverState = phase + "_reported"
 		} else {
@@ -205,7 +222,7 @@ func (w *localWorkspace) networkSnapshot(ctx context.Context) (p.Snapshot, error
 	}
 	if w.activeID != "" {
 		switch operation := w.records[w.activeID].operation; operation.Kind {
-		case p.TakeoverStart, p.TakeoverStop, p.ExitRestore, p.AuthBegin:
+		case p.TakeoverStart, p.TakeoverStop, p.ExitRestore, p.AuthBegin, p.ChannelsSet:
 			s.TakeoverState = operation.Phase
 		}
 	}
@@ -226,17 +243,28 @@ func (w *localWorkspace) submitNetwork(ctx context.Context, m p.Mutation) (p.Ope
 	digest := sha256.Sum256(raw)
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if previous, found, err := w.checkSubmitLocked(m.RequestID, digest); found || err != nil {
+	active := w.records[w.activeID]
+	stop := m.Kind == p.TakeoverStop || m.Kind == p.ExitRestore
+	priority := stop && w.activeCancel != nil &&
+		active.operation.RunRef == m.RunRef && m.RunRef != "" &&
+		(active.operation.Kind == p.ChannelsSet || active.operation.Kind == p.AuthBegin)
+	previous, found, err := w.checkSubmitLocked(m.RequestID, digest)
+	var busy *Error
+	if found || err != nil && (!priority || !errors.As(err, &busy) || busy.Code != "PROFILE_BUSY") {
 		return previous, err
 	}
 	n := w.network
 	n.observe(w.commands.Profile)
-	if m.ExpectedRevision != n.revision || m.RunRef != n.runRef {
+	idleAuth := m.Kind == p.AuthBegin && m.RunRef == ""
+	// STOP keeps its exact run binding when a Company operation completes
+	// between the renderer's snapshot and submission.
+	if (m.ExpectedRevision != n.revision && (!stop || m.ExpectedRevision == 0 || m.ExpectedRevision > n.revision)) ||
+		(!idleAuth && m.RunRef != n.runRef) {
 		return p.Operation{}, &Error{Code: "REVISION_CONFLICT", Message: "The local run changed. Refresh its state before retrying.", Retryable: true}
 	}
 	var target macRunStop
 	var phase string
-	if m.Kind == p.TakeoverStart || m.Kind == p.AuthBegin {
+	if m.Kind == p.TakeoverStart || idleAuth {
 		if n.lost.present || n.current.present && !n.stoppedReport() && !n.restored() {
 			return p.Operation{}, unavailable("RECOVERY_REQUIRED", "The previous run's state must be resolved before starting.")
 		}
@@ -245,6 +273,16 @@ func (w *localWorkspace) submitNetwork(ctx context.Context, m p.Mutation) (p.Ope
 			phase = "authenticating"
 		}
 	} else {
+		if m.Kind == p.ChannelsSet || m.Kind == p.AuthBegin {
+			if !macCompanyEligible(n.current) {
+				return p.Operation{}, unavailable("MAC_COMPANY_UNAVAILABLE", "The selected run does not support changing the company channel.")
+			}
+			current := n.current.status.AppliedChannels
+			if m.Kind == p.ChannelsSet && (m.Channels.Personal != current.Personal || m.Channels.Company == current.Company) ||
+				m.Kind == p.AuthBegin && !current.Company {
+				return p.Operation{}, unavailable("INVALID_PARAMS", "This operation may only change the current company channel.")
+			}
+		}
 		// Resolve and retain the exact run before dispatch. A changed profile
 		// pointer must not authorize STOP or recovery for a newer run.
 		target, err = n.bind(ctx, w.commands.Profile)
@@ -255,11 +293,20 @@ func (w *localWorkspace) submitNetwork(ctx context.Context, m p.Mutation) (p.Ope
 			err = errors.New("bound run changed")
 		}
 		if err != nil {
-			return p.Operation{}, unavailable("RUN_UNCONFIRMED", "The selected run could not be bound for recovery.")
+			return p.Operation{}, unavailable("RUN_UNCONFIRMED", "The selected run could not be bound.")
 		}
 		phase = "waiting_for_stop_report"
 		if m.Kind == p.ExitRestore {
 			phase = "recovering"
+		} else if m.Kind == p.ChannelsSet || m.Kind == p.AuthBegin {
+			if _, ok := target.(macRunCompanyControl); !ok {
+				_ = target.Close()
+				return p.Operation{}, unavailable("MAC_COMPANY_UNAVAILABLE", "The selected run cannot change the company channel.")
+			}
+			phase = "applying_company"
+			if m.Kind == p.AuthBegin {
+				phase = "authenticating"
+			}
 		}
 	}
 	if err := ctx.Err(); err != nil {
@@ -269,31 +316,45 @@ func (w *localWorkspace) submitNetwork(ctx context.Context, m p.Mutation) (p.Ope
 		return p.Operation{}, err
 	}
 	n.revision++
+	var prior <-chan struct{}
+	if priority {
+		prior = active.done
+		w.activeCancel()
+	}
 	op := w.enqueueLocked(m.RequestID, digest, m.Kind, phase, m.RunRef, n.revision)
-	go w.executeNetwork(m, target, n.current)
+	job, cancel := context.WithCancel(w.ctx)
+	w.activeCancel = cancel
+	go w.executeNetwork(job, cancel, m, target, n.current, prior)
 	return op, nil
 }
 
-func (w *localWorkspace) executeNetwork(m p.Mutation, target macRunStop, bound macRunReport) {
-	if target != nil {
-		defer target.Close()
-	}
+func (w *localWorkspace) executeNetwork(job context.Context, done context.CancelFunc, m p.Mutation, target macRunStop, bound macRunReport, prior <-chan struct{}) {
+	defer done()
 	var err error
 	var phase, failureCode string
 	switch m.Kind {
 	case p.TakeoverStart:
-		ctx, cancel := context.WithTimeout(w.ctx, 8*time.Minute)
+		ctx, cancel := context.WithTimeout(job, 8*time.Minute)
 		intent := policy.ChannelIntent{Company: m.Start.Channels.Company, Personal: m.Start.Channels.Personal}
 		err = w.network.start(ctx, w.commands.Profile, w.commands.Runtime, time.Duration(m.Start.ValidationSeconds)*time.Second, intent)
 		cancel()
 		phase, failureCode = "ready_reported", "MAC_START_FAILED"
 	case p.AuthBegin:
-		ctx, cancel := context.WithTimeout(w.ctx, 6*time.Minute)
-		err = w.network.auth(ctx, w.commands.Profile, w.commands.Runtime)
+		ctx, cancel := context.WithTimeout(job, 6*time.Minute)
+		if target == nil {
+			err = w.network.auth(ctx, w.commands.Profile, w.commands.Runtime)
+		} else {
+			err = target.(macRunCompanyControl).AuthenticateMacCompany(ctx, w.commands.Profile, w.commands.Runtime, bound.status.AppliedGeneration)
+		}
 		cancel()
 		phase, failureCode = "authenticated", "MAC_AUTH_FAILED"
+	case p.ChannelsSet:
+		ctx, cancel := context.WithTimeout(job, 4*time.Minute)
+		err = target.(macRunCompanyControl).SetMacCompany(ctx, m.RequestID, bound.status.AppliedGeneration, m.Channels.Company, m.Channels.Personal)
+		cancel()
+		phase, failureCode = "company_applied", "MAC_COMPANY_UNCONFIRMED"
 	case p.TakeoverStop:
-		ctx, cancel := context.WithTimeout(w.ctx, 20*time.Second)
+		ctx, cancel := context.WithTimeout(job, 20*time.Second)
 		err = target.Request(ctx)
 		if err == nil {
 			err = target.WaitForStoppedReport(ctx)
@@ -301,10 +362,26 @@ func (w *localWorkspace) executeNetwork(m p.Mutation, target macRunStop, bound m
 		cancel()
 		phase, failureCode = "stopped_reported", "MAC_STOP_UNCONFIRMED"
 	case p.ExitRestore:
-		ctx, cancel := context.WithTimeout(w.ctx, 4*time.Minute)
-		err = target.RecoverVerified(ctx)
+		ctx, cancel := context.WithTimeout(job, 4*time.Minute)
+		if prior != nil {
+			err = target.Request(ctx)
+		}
+		if err == nil {
+			err = target.RecoverVerified(ctx)
+		}
 		cancel()
 		phase, failureCode = "restored", "MAC_RECOVERY_UNCONFIRMED"
+	}
+	// A priority stop publishes its fence immediately, but the workspace
+	// remains occupied until the canceled action has released its target.
+	if prior != nil {
+		<-prior
+	}
+	if target != nil {
+		_ = target.Close()
+	}
+	if err == nil && job.Err() != nil {
+		err = job.Err()
 	}
 
 	w.mu.Lock()

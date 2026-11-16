@@ -17,22 +17,24 @@ import (
 // localWorkspace serializes local desktop operations on macOS. Workspace edits
 // and network controls share a queue, but have separate authorization paths.
 type localWorkspace struct {
-	mu       sync.Mutex
-	ctx      context.Context
-	cancel   context.CancelFunc
-	closed   bool
-	commands app.DesktopCommands
-	profile  string
-	active   chan struct{}
-	activeID string
-	order    []string
-	records  map[string]localWorkspaceRecord
-	network  *macNetwork
+	mu           sync.Mutex
+	ctx          context.Context
+	cancel       context.CancelFunc
+	closed       bool
+	commands     app.DesktopCommands
+	profile      string
+	active       chan struct{}
+	activeID     string
+	activeCancel context.CancelFunc
+	order        []string
+	records      map[string]localWorkspaceRecord
+	network      *macNetwork
 }
 
 type localWorkspaceRecord struct {
 	operation p.Operation
 	digest    [sha256.Size]byte
+	done      chan struct{}
 }
 
 func (d *Desktop) EnableLocalWorkspace(ctx context.Context) {
@@ -119,8 +121,8 @@ func (w *localWorkspace) enqueueLocked(id string, digest [sha256.Size]byte, kind
 	now := time.Now().UTC()
 	op := p.Operation{ID: id, RequestID: id, ProfileID: w.profile, Kind: kind, Phase: phase, RunRef: runRef, Revision: revision, Created: now, Updated: now}
 	w.order = append(w.order, id)
-	w.records[id] = localWorkspaceRecord{operation: op, digest: digest}
 	w.active = make(chan struct{})
+	w.records[id] = localWorkspaceRecord{operation: op, digest: digest, done: w.active}
 	w.activeID = id
 	return op
 }
@@ -150,6 +152,8 @@ func (w *localWorkspace) execute(id string, work p.WorkspacePayload) {
 
 func (w *localWorkspace) completeLocked(id string, record localWorkspaceRecord) {
 	w.records[id] = record
-	close(w.active)
-	w.active, w.activeID = nil, ""
+	close(record.done)
+	if w.activeID == id {
+		w.active, w.activeID, w.activeCancel = nil, "", nil
+	}
 }
