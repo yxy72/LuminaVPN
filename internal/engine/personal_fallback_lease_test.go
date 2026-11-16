@@ -10,7 +10,8 @@ import (
 )
 
 func TestAutomaticFallbackLeaseUsesObservationRevisionAndBoundsCutoff(t *testing.T) {
-	deadline := time.Now().Add(15 * time.Second)
+	const proofLifetime = 15 * time.Second
+	deadline := time.Now().Add(proofLifetime)
 	observed := fallbackLeaseState{Revision: "old", NowMS: 7000}
 	calls := 0
 	readback, err := setFallbackLease(t.Context(), openFallbackLease, deadline, func(ctx context.Context, method string, input, output any) error {
@@ -28,7 +29,7 @@ func TestAutomaticFallbackLeaseUsesObservationRevisionAndBoundsCutoff(t *testing
 		case 2:
 			req := input.(fallbackLeaseUpdate)
 			if method != "PUT" || req.Revision != observed.Revision || req.Operation != openFallbackLease ||
-				req.DeadlineMS <= observed.NowMS || req.DeadlineMS >= 22000 {
+				req.DeadlineMS <= observed.NowMS || req.DeadlineMS > observed.NowMS+proofLifetime.Milliseconds() {
 				t.Fatalf("unexpected lease request %+v", req)
 			}
 			*reply = fallbackLeaseState{Revision: "new", NowMS: 7100, Active: true, DeadlineMS: req.DeadlineMS}
