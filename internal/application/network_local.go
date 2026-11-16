@@ -414,7 +414,7 @@ func (w *localWorkspace) executeNetwork(job context.Context, done context.Cancel
 		intent := policy.ChannelIntent{Company: m.Start.Channels.Company, Personal: m.Start.Channels.Personal, Environment: string(environment)}
 		err = w.network.start(ctx, w.commands.Profile, w.commands.Runtime, time.Duration(m.Start.ValidationSeconds)*time.Second, intent)
 		cancel()
-		phase, failureCode = "ready_reported", "MAC_START_FAILED"
+		phase, failureCode = "managed_reported", "MAC_START_FAILED"
 	case p.AuthBegin:
 		ctx, cancel := context.WithTimeout(job, 6*time.Minute)
 		if target == nil {

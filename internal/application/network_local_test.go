@@ -373,7 +373,7 @@ func TestMacNetworkUsesNativeLifecycleForBoundRun(t *testing.T) {
 	_, err = macCall(t, d, "workspace.submit", map[string]any{"profile_id": idle.ProfileID, "action": "sync", "request_id": "busy-sync"})
 	macErrorCode(t, err, "PROFILE_BUSY")
 	close(release)
-	if op := macCompleted(t, d, "start"); op.Error != nil || op.Phase != "ready_reported" || op.Restored {
+	if op := macCompleted(t, d, "start"); op.Error != nil || op.Phase != "managed_reported" || op.Restored {
 		t.Fatal(op)
 	}
 
@@ -594,7 +594,7 @@ func TestMacStartupChannelsAndAuthenticationUseSeparateOperations(t *testing.T) 
 	if _, err := macCall(t, d, "service.submit", resume); err != nil {
 		t.Fatal(err)
 	}
-	if completed := macCompleted(t, d, "start-authorized"); completed.Error != nil || completed.Phase != "ready_reported" {
+	if completed := macCompleted(t, d, "start-authorized"); completed.Error != nil || completed.Phase != "managed_reported" {
 		t.Fatal(completed)
 	}
 	active := makeMacReport(t, "ready")
@@ -617,7 +617,7 @@ func TestMacStartupEnvironmentFlowsIntoTheNativeIntent(t *testing.T) {
 		t.Run(string(tt.wire), func(t *testing.T) {
 			d, current := macBackendFixture(t)
 			expected := policy.ChannelIntent{Personal: true, Environment: tt.want}
-			ready := makeMacReport(t, "ready")
+			ready := makeMacReport(t, "managed")
 			ready.status.DesiredChannels, ready.status.AppliedChannels = &expected, &expected
 			ready.status.TakeoverActive = true
 			ready.status.ChannelGeneration, ready.status.AppliedGeneration = 1, 1
@@ -634,7 +634,7 @@ func TestMacStartupEnvironmentFlowsIntoTheNativeIntent(t *testing.T) {
 			if _, err := macCall(t, d, "service.submit", m); err != nil {
 				t.Fatal(err)
 			}
-			if start := macCompleted(t, d, "startup"); start.Error != nil || start.Phase != "ready_reported" {
+			if start := macCompleted(t, d, "startup"); start.Error != nil || start.Phase != "managed_reported" {
 				t.Fatal(start)
 			}
 			want := tt.wire
@@ -642,7 +642,7 @@ func TestMacStartupEnvironmentFlowsIntoTheNativeIntent(t *testing.T) {
 				want = p.EnvironmentShared
 			}
 			got := macSnapshot(t, d)
-			if got.MacEnvironment == nil || got.MacEnvironment.Selected != want || got.MacEnvironment.Applied != want {
+			if got.TakeoverState != "managed_reported" || got.MacEnvironment == nil || got.MacEnvironment.Selected != want || got.MacEnvironment.Applied != want {
 				t.Fatal(got)
 			}
 		})

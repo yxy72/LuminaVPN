@@ -3,13 +3,16 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
+	"time"
 
 	"netlaunch/internal/auth"
 	"netlaunch/internal/policy"
 	"netlaunch/internal/securefile"
+	"netlaunch/internal/selector"
 )
 
 // Verify only resources this run could own. Evidence of a released VPN still
@@ -151,20 +154,74 @@ func darwinCoreConfig(m Manifest, nodes []policy.Node, secret string, company *c
 	return config, nil
 }
 
-func applyDarwinTakeover(run string, intent policy.ChannelIntent) error {
+func darwinStartupIntentMatches(s State, intent policy.ChannelIntent) bool {
+	return s.Manifest.Mode != "" && !s.TakeoverActive && s.ChannelGeneration != 0 &&
+		s.AppliedGeneration == 0 && s.AppliedChannels == nil && s.DesiredChannels != nil &&
+		*s.DesiredChannels == intent && s.Manifest.InitialChannels() == intent
+}
+
+func markDarwinBaseApplied(s *State, intent policy.ChannelIntent, companyControl, personalControl bool, now time.Time) error {
+	if !darwinStartupIntentMatches(*s, intent) {
+		return errors.New("macOS startup intent changed during takeover")
+	}
+	personal := "PHYSICAL"
+	if intent.Personal {
+		personal = selector.Reject
+	}
+	if s.Personal != personal || systemBaseReadyAt(*s, now).IsZero() {
+		return errors.New("macOS managed base routing has not been verified")
+	}
+	s.AppliedChannels = &intent
+	s.AppliedGeneration = s.ChannelGeneration
+	s.TakeoverActive = true
+	if companyControl {
+		s.DarwinCompany = &darwinCompanyControl{}
+	}
+	if personalControl {
+		s.DarwinPersonal = &darwinPersonalControl{}
+	}
+	if intent.Personal {
+		s.Channels["personal"] = ChannelHealth{
+			ChannelStatus: ChannelStatus{State: "unknown", Reason: "probe_incomplete", NextAction: "wait_for_selection"},
+			Network:       s.Manifest.Network, Node: selector.Reject,
+		}
+	}
+	desktopPhase(s, now)
+	return nil
+}
+
+func applyDarwinTakeover(ctx context.Context, run string, intent policy.ChannelIntent, companyControl, personalControl bool) error {
 	return update(run, func(s *State) error {
+		if err := checkDarwinCompanyOwner(run, *s); err != nil {
+			return err
+		}
+		if !darwinStartupIntentMatches(*s, intent) {
+			return errors.New("macOS startup intent changed during takeover")
+		}
+		if err := verifyDarwinPersonalResolverOwnership(*s); err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		personal := "PHYSICAL"
+		if intent.Personal {
+			personal = selector.Reject
+		}
+		if err := selectPersonalContext(ctx, run, personal); err != nil {
+			return err
+		}
+		if !intent.Company {
+			if err := selectCoreGroupContext(ctx, run, "CORP", selector.Reject); err != nil {
+				return err
+			}
+		}
 		if err := guard(run, s); err != nil {
 			return err
 		}
-		if currentIntent(*s) != intent || s.Manifest.InitialChannels() != intent {
-			return errors.New("macOS startup intent changed during takeover")
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-		if !intent.Personal && s.Personal != "PHYSICAL" {
-			return errors.New("macOS personal direct has not been confirmed")
-		}
-		s.AppliedChannels = &intent
-		s.AppliedGeneration = s.ChannelGeneration
-		s.TakeoverActive = true
-		return nil
+		return markDarwinBaseApplied(s, intent, companyControl, personalControl, time.Now())
 	})
 }

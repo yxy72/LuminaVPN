@@ -383,8 +383,13 @@ func testDarwinFakeIPContinuity(t *testing.T, executable string, preservesPool b
 	}
 
 	open(false)
-	choose("P001")
 	first, denied := lookup(alpha), lookup(company)
+	// Before any candidate is chosen, the base path is usable and neither
+	// the unverified personal target nor the disabled company target can dial.
+	request(lookup(direct), "physical")
+	request(first, "")
+	request(denied, "")
+	choose("P001")
 	request(first, "personal")
 	seenProxy(alpha)
 	request(denied, "")

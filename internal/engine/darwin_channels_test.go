@@ -393,3 +393,55 @@ func checkDarwinCompanyDNSGate(t *testing.T, config map[string]any) {
 		t.Fatal("fixture did not observe the physical resolver")
 	}
 }
+
+func TestDarwinManagedBaseStartsWithPersonalClosedUntilSystemProof(t *testing.T) {
+	now := time.Now()
+	for _, mode := range []RunMode{Daily, Validation} {
+		for _, company := range []bool{false, true} {
+			intent := policy.ChannelIntent{Personal: true, Company: company, Environment: "office"}
+			s := healthyState(now)
+			s.Manifest.Mode, s.Manifest.Channels, s.DesiredChannels = mode, &intent, &intent
+			s.ChannelGeneration, s.Phase, s.LastReady, s.Personal = 1, "connecting", time.Time{}, selector.Reject
+			for name, h := range s.Channels {
+				h.ProbeScope, h.PathState = "system_tun", "verified"
+				s.Channels[name] = h
+			}
+			personal, direct, corp := s.Channels["personal"], s.Channels["direct"], s.Channels["company"]
+			delete(s.Channels, "personal")
+			delete(s.Channels, "direct")
+			if err := markDarwinBaseApplied(&s, intent, company, true, now); err == nil || s.TakeoverActive {
+				t.Fatal("base started without a direct TUN proof")
+			}
+			s.Channels["direct"] = direct
+			delete(s.Channels, "company")
+			if company {
+				if err := markDarwinBaseApplied(&s, intent, company, true, now); err == nil || s.TakeoverActive {
+					t.Fatal("base started without requested Company proof")
+				}
+				s.Channels["company"] = corp
+			}
+			s.Personal = "PHYSICAL"
+			if err := markDarwinBaseApplied(&s, intent, company, true, now); err == nil || s.TakeoverActive {
+				t.Fatal("base started with unverified personal direct")
+			}
+			s.Personal = selector.Reject
+			if err := markDarwinBaseApplied(&s, intent, company, true, now); err != nil {
+				t.Fatal(err)
+			}
+			status := publicStatus(s, now)
+			if !status.TakeoverActive || status.Phase != "managed" || status.Lifecycle != "running" ||
+				status.AppliedGeneration != 1 || *status.AppliedChannels != intent ||
+				status.Personal != selector.Reject || status.PersonalFallback ||
+				status.Channels["personal"].State != "unknown" || !status.LastReady.IsZero() ||
+				status.DarwinCompanyControl != company || !status.DarwinPersonalControl {
+				t.Fatal("managed base misstated readiness", status)
+			}
+			s.Personal = personal.Node
+			s.Channels["personal"] = personal
+			desktopPhase(&s, now)
+			if got := publicStatus(s, now); got.Phase != "ready" || got.LastReady.IsZero() {
+				t.Fatal("full scoped system proof did not advance managed to ready", got)
+			}
+		}
+	}
+}

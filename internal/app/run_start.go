@@ -46,6 +46,24 @@ func StartMacNetworkWithIntent(ctx context.Context, profile, bundle string, vali
 	return c.startProfileContext(ctx, o)
 }
 
+func macStartupReportAccepted(s engine.Status, expected *policy.ChannelIntent, now time.Time) bool {
+	if expected == nil {
+		return s.Phase == "ready"
+	}
+	if (s.Phase != "managed" && s.Phase != "ready" && s.Phase != "degraded") ||
+		s.Lifecycle != "running" || !s.TakeoverActive || s.ChannelGeneration == 0 ||
+		s.AppliedGeneration != s.ChannelGeneration || s.DesiredChannels == nil || s.AppliedChannels == nil ||
+		*s.DesiredChannels != *expected || *s.AppliedChannels != *expected {
+		return false
+	}
+	s = engine.RefreshStatus(s, now)
+	verified := func(channel string) bool {
+		h := s.Channels[channel]
+		return h.State == "ready" && h.ProbeScope == "system_tun" && h.PathState == "verified"
+	}
+	return verified("direct") && (!expected.Company || verified("company"))
+}
+
 // A launch response can fail after the native system has accepted the request.
 // Stop is committed to the original run before returning from unsettled startup.
 func launchPreparedRun(ctx context.Context, stop *RunStop, launch func(context.Context, string, string) error, status func(string) (engine.Status, error), timeout, interval time.Duration, expected *policy.ChannelIntent) (s engine.Status, resultErr error) {
@@ -86,14 +104,11 @@ func launchPreparedRun(ctx context.Context, stop *RunStop, launch func(context.C
 			if err := stop.check(wait); err != nil {
 				return s, err
 			}
+			if macStartupReportAccepted(observed, expected, time.Now()) {
+				finished = true
+				return observed, nil
+			}
 			switch observed.Phase {
-			case "ready":
-				if expected == nil || observed.TakeoverActive && observed.ChannelGeneration != 0 &&
-					observed.AppliedGeneration == observed.ChannelGeneration && observed.DesiredChannels != nil &&
-					observed.AppliedChannels != nil && *observed.DesiredChannels == *expected && *observed.AppliedChannels == *expected {
-					finished = true
-					return observed, nil
-				}
 			case "stopped":
 				finished = true
 				if engine.NeedsAuthentication(observed) {

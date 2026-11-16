@@ -38,7 +38,7 @@ export function macOperationText(operation: ServiceOperation): string {
     applying_company: '正在应用公司 VPN', company_applied: '公司 VPN 已应用',
     applying_personal: '正在应用个人代理', personal_applied: '个人代理已应用',
     waiting_for_stop_report: '等待停止报告', recovering: '等待管理员恢复',
-    ready_reported: '已收到运行报告', stopped_reported: '已收到停止报告',
+    managed_reported: '网络接管已确认', ready_reported: '已收到运行报告', stopped_reported: '已收到停止报告',
     restored: '管理员恢复已确认', completed: '已完成', failed: '未完成', cancelled: '已取消',
   }
   return `${actions[operation.kind] ?? '操作'} · ${progress[operation.phase] ?? '待确认'}`

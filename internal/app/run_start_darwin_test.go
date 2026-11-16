@@ -115,8 +115,10 @@ func TestMacStartupReadinessRequiresTheExactAppliedEnvironment(t *testing.T) {
 	ready, err := launchPreparedRun(t.Context(), stop, func(context.Context, string, string) error { return nil },
 		func(string) (engine.Status, error) {
 			calls++
-			s := engine.Status{Phase: "ready", TakeoverActive: true, DesiredChannels: &expected,
-				AppliedChannels: &expected, ChannelGeneration: 1, AppliedGeneration: 1}
+			s := engine.Status{Phase: "ready", Lifecycle: "running", TakeoverActive: true, DesiredChannels: &expected,
+				AppliedChannels: &expected, ChannelGeneration: 1, AppliedGeneration: 1,
+				Channels: map[string]engine.ChannelStatus{"direct": {State: "ready", PathState: "verified", ProbeScope: "system_tun", CheckedAt: time.Now()}},
+			}
 			switch calls {
 			case 1:
 				s.AppliedChannels = &wrong
@@ -129,6 +131,48 @@ func TestMacStartupReadinessRequiresTheExactAppliedEnvironment(t *testing.T) {
 		t.Fatalf("startup used a wrong or unsettled environment report: phase=%s checks=%d err=%v", ready.Phase, calls, err)
 	}
 	requireNoStopMarker(t, first)
+}
+
+func TestMacManagedStartupWaitsForVerifiedBaseAndLeavesPersonalPending(t *testing.T) {
+	_, run, _ := macStopFixture(t)
+	stop, err := bindRunStop(t.Context(), options{run: run})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop.Close()
+	intent := policy.ChannelIntent{Company: true, Personal: true}
+	calls := 0
+	observed, err := launchPreparedRun(t.Context(), stop, func(context.Context, string, string) error { return nil }, func(got string) (engine.Status, error) {
+		if got != run {
+			t.Fatal("startup read an unbound run")
+		}
+		calls++
+		scope := engine.ChannelStatus{State: "ready", PathState: "verified", ProbeScope: "system_tun", CheckedAt: time.Now()}
+		out := engine.Status{Phase: "managed", Lifecycle: "running", TakeoverActive: true,
+			DesiredChannels: &intent, AppliedChannels: &intent, ChannelGeneration: 1, AppliedGeneration: 1,
+			Personal: "REJECT", Channels: map[string]engine.ChannelStatus{
+				"direct": scope, "company": scope, "personal": {State: "unknown", Reason: "probe_incomplete"},
+			},
+		}
+		switch calls {
+		case 1:
+			delete(out.Channels, "company")
+		case 2:
+			scope.ProbeScope = "mixed_ingress"
+			out.Channels["direct"] = scope
+		case 3:
+			scope.CheckedAt = scope.CheckedAt.Add(-3 * time.Minute)
+			out.Channels["direct"] = scope
+		}
+		return out, nil
+	}, time.Second, time.Millisecond, &intent)
+	if err != nil || calls != 4 || observed.Phase != "managed" || observed.Personal != "REJECT" {
+		t.Fatalf("unexpected proof or managed result: checks=%d phase=%s route=%s err=%v", calls, observed.Phase, observed.Personal, err)
+	}
+	if macStartupReportAccepted(observed, nil, time.Now()) {
+		t.Fatal("legacy startup accepted a managed report")
+	}
+	requireNoStopMarker(t, run)
 }
 
 func TestMacLaunchEnvironmentSelectsExistingCoreTrafficAndResolverOverrides(t *testing.T) {

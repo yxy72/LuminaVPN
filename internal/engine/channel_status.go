@@ -228,13 +228,24 @@ func systemReadyAt(s State, now time.Time) time.Time {
 			return time.Time{}
 		}
 	}
+	return requiredSystemPathsAt(s, now, false)
+}
+
+// The base platform and any selected Company channel must be proven before a
+// managed Mac run can remain active while personal selection is still closed.
+func systemBaseReadyAt(s State, now time.Time) time.Time {
+	return requiredSystemPathsAt(s, now, true)
+}
+
+func requiredSystemPathsAt(s State, now time.Time, baseOnly bool) time.Time {
+	intent := currentIntent(s)
 	var oldest time.Time
 	for _, name := range []string{"company", "personal", "direct"} {
-		if name == "company" && !intent.Company || name == "personal" && !intent.Personal {
+		if name == "company" && !intent.Company || name == "personal" && (baseOnly || !intent.Personal) {
 			continue
 		}
 		h := channelView(s, name, now)
-		if h.State != "ready" || h.ProbeScope != "system_tun" {
+		if h.State != "ready" || h.ProbeScope != "system_tun" || baseOnly && h.PathState != "verified" {
 			return time.Time{}
 		}
 		if oldest.IsZero() || h.CheckedAt.Before(oldest) {

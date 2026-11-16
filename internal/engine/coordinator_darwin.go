@@ -287,7 +287,7 @@ func serve(run string) (returned error) {
 		return e
 	}
 	selection := selector.New(names)
-	if intent.Personal {
+	if !managed && intent.Personal {
 		if e = wait(ctx, run, 45*time.Second, func(ctx context.Context) error {
 			if e := choose(ctx, run, selection, verification); e != nil {
 				return e
@@ -318,13 +318,8 @@ func serve(run string) (returned error) {
 	if e = takeoverDNS(run); e != nil {
 		return e
 	}
-	if managed {
-		if e = applyDarwinTakeover(run, intent); e != nil {
-			return e
-		}
-	}
 	if e = wait(ctx, run, 60*time.Second, func(ctx context.Context) error {
-		if intent.Personal {
+		if !managed && intent.Personal {
 			if e := ensurePersonalSelection(ctx, run, selection, verification); e != nil {
 				return e
 			}
@@ -338,6 +333,13 @@ func serve(run string) (returned error) {
 		ready, err := checkSystemChannels(ctx, run, systemChecks, selection, boundChecks.open, false)
 		if err != nil {
 			return err
+		}
+		if managed {
+			observed, err := load(run)
+			if err != nil {
+				return err
+			}
+			ready = !systemBaseReadyAt(observed, time.Now()).IsZero()
 		}
 		if !ready {
 			// A partial scan is expected. Refresh caches only after a full
@@ -354,19 +356,8 @@ func serve(run string) (returned error) {
 	}); e != nil {
 		return e
 	}
-	if managed && (company != nil || len(frozenNodes) != 0) {
-		if e = update(run, func(s *State) error {
-			if err := checkDarwinCompanyOwner(run, *s); err != nil {
-				return err
-			}
-			if company != nil {
-				s.DarwinCompany = &darwinCompanyControl{}
-			}
-			if len(frozenNodes) != 0 {
-				s.DarwinPersonal = &darwinPersonalControl{}
-			}
-			return nil
-		}); e != nil {
+	if managed {
+		if e = applyDarwinTakeover(ctx, run, intent, company != nil, len(frozenNodes) != 0); e != nil {
 			return e
 		}
 	}

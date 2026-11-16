@@ -193,6 +193,7 @@ export function ClientWorkspace({ page, api, refreshInventory, nodes, subscripti
     if (macosClient && next.phase === 'authenticated') return next.run_ref ? '本次运行的公司会话已更新。' : '公司认证已完成，可以连接网络。'
     if (macosClient && next.phase === 'company_applied') return '公司 VPN 设置已应用到本次运行。'
     if (macosClient && next.phase === 'personal_applied') return '个人代理设置已应用到本次运行。'
+    if (macosClient && next.phase === 'managed_reported') return '网络接管已启动，通道验证结果在总览更新。'
     if (macosClient && next.phase === 'ready_reported') return '已收到运行报告，可在总览查看检查结果。'
     if (macosClient && next.phase === 'stopped_reported') return '已收到停止报告。管理员恢复仍待确认。'
     return '操作完成。'
