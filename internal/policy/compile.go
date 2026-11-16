@@ -19,6 +19,19 @@ func Compile(c Config, nodes []Node, b Binding, secret string) (map[string]any, 
 }
 
 func CompileWithIntent(c Config, nodes []Node, b Binding, secret string, intent ChannelIntent) (map[string]any, error) {
+	return compile(c, nodes, b, secret, intent, false)
+}
+
+// CompilePersonalFallback leaves PERSONAL at REJECT for the desktop to grant
+// temporary direct access. The same selector controls personal traffic and its DNS.
+func CompilePersonalFallback(c Config, nodes []Node, b Binding, secret string, intent ChannelIntent) (map[string]any, error) {
+	if !intent.Personal {
+		return nil, errors.New("temporary fallback requires enabled personal intent")
+	}
+	return compile(c, nodes, b, secret, intent, true)
+}
+
+func compile(c Config, nodes []Node, b Binding, secret string, intent ChannelIntent, personalFallback bool) (map[string]any, error) {
 	if err := c.ValidateForIntent(intent); err != nil {
 		return nil, err
 	}
@@ -54,38 +67,42 @@ func CompileWithIntent(c Config, nodes []Node, b Binding, secret string, intent 
 		rules = append(rules, r.CoreRule())
 	}
 	dnsPolicy := map[string]any{}
-	for i, ch := range []Channel{c.Company, c.Personal} {
-		servers := []string{}
-		for _, d := range ch.DNS {
-			if i == 0 {
-				servers = append(servers, "tcp://"+d+":53#CORP")
-			} else {
-				servers = append(servers, d+"#PERSONAL")
-			}
+	corporate := []string{}
+	for _, server := range c.Company.DNS {
+		corporate = append(corporate, "tcp://"+server+":53#CORP")
+	}
+	if !intent.Company {
+		corporate = []string{"rcode://refused"}
+	}
+	for _, domain := range c.Company.Domains {
+		dnsPolicy[domain] = corporate
+	}
+	direct := []string{}
+	for _, server := range c.DirectDNS {
+		direct = append(direct, "udp://"+server+"#PHYSICAL")
+	}
+	personalDNS, rejectedDNS := []string{}, []string{}
+	for _, server := range c.Personal.DNS {
+		personalDNS = append(personalDNS, server+"#PERSONAL")
+		rejectedDNS = append(rejectedDNS, server+"#REJECT")
+	}
+	switch {
+	case personalFallback:
+		personalDNS = make([]string, 0, len(c.DirectDNS))
+		for _, server := range c.DirectDNS {
+			personalDNS = append(personalDNS, "udp://"+server+"#PERSONAL")
 		}
-		for _, h := range ch.Domains {
-			dnsPolicy[h] = servers
-		}
+	case !intent.Personal:
+		personalDNS = direct
+	}
+	for _, domain := range c.Personal.Domains {
+		dnsPolicy[domain] = personalDNS
 	}
 	// Pin local health targets before subscription rules, including direct probes.
-	direct := []string{}
-	for _, d := range c.DirectDNS {
-		direct = append(direct, "udp://"+d+"#PHYSICAL")
-	}
-	if !intent.Personal {
-		for _, domain := range c.Personal.Domains {
-			dnsPolicy[domain] = append([]string(nil), direct...)
-		}
-	}
 	for _, probe := range c.Probes {
 		if probe.Channel == "direct" {
 			u, _ := url.Parse(probe.URL)
 			dnsPolicy[u.Hostname()] = direct
-		}
-	}
-	if !intent.Company {
-		for _, domain := range c.Company.Domains {
-			dnsPolicy[domain] = []string{"rcode://refused"}
 		}
 	}
 	// Exact company/local targets above win. Ordered local rules precede
@@ -123,23 +140,14 @@ func CompileWithIntent(c Config, nodes []Node, b Binding, secret string, intent 
 		if exists && !(index < len(overrides) && !c.IsCompany(r.Value)) {
 			continue
 		}
-		servers := []string{}
-		if best.target == "direct" {
-			servers = direct
-		} else {
-			group := "PERSONAL"
-			if best.target == "reject" {
-				group = "REJECT"
-			}
-			if best.target == "personal" && !intent.Personal {
-				servers = append([]string(nil), direct...)
-			} else {
-				for _, d := range c.Personal.DNS {
-					servers = append(servers, d+"#"+group)
-				}
-			}
+		switch best.target {
+		case "direct":
+			dnsPolicy[key] = direct
+		case "reject":
+			dnsPolicy[key] = rejectedDNS
+		case "personal":
+			dnsPolicy[key] = personalDNS
 		}
-		dnsPolicy[key] = servers
 	}
 	// Exact personal DNS entries must follow the same first-match environment
 	// override as the traffic rules, even when that override is a suffix.
@@ -151,30 +159,20 @@ func CompileWithIntent(c Config, nodes []Node, b Binding, secret string, intent 
 					continue
 				}
 				if r.Target == "direct" {
-					dnsPolicy[domain] = append([]string(nil), direct...)
-				} else if !intent.Personal {
-					dnsPolicy[domain] = append([]string(nil), direct...)
+					dnsPolicy[domain] = direct
 				} else {
-					servers := []string{}
-					for _, server := range c.Personal.DNS {
-						servers = append(servers, server+"#PERSONAL")
-					}
-					dnsPolicy[domain] = servers
+					dnsPolicy[domain] = personalDNS
 				}
 				break
 			}
 		}
 	}
-	if !intent.Personal {
-		for domain, raw := range dnsPolicy {
-			for _, server := range raw.([]string) {
-				if strings.HasSuffix(server, "#PERSONAL") {
-					dnsPolicy[domain] = append([]string(nil), direct...)
-					break
-				}
-			}
-		}
+	if !intent.Personal || personalFallback {
 		personal = []string{"REJECT", "PHYSICAL"}
+	}
+	personalGroup := map[string]any{"name": "PERSONAL", "type": "select", "proxies": personal}
+	if personalFallback {
+		personalGroup["lumina-fallback-lease"] = true
 	}
 	corp := []string{"REJECT", "CORP-BOUND"}
 	if !intent.Company {
@@ -187,6 +185,6 @@ func CompileWithIntent(c Config, nodes []Node, b Binding, secret string, intent 
 		"geo-auto-update": false, "sniffer": map[string]any{"enable": false}, "profile": map[string]any{"store-selected": false, "store-fake-ip": false},
 		"tun":     map[string]any{"enable": false, "device": b.TUN, "stack": "gvisor", "auto-route": true, "auto-detect-interface": false, "dns-hijack": []string{"any:53", "tcp://any:53"}},
 		"dns":     map[string]any{"enable": true, "listen": fmt.Sprintf("127.0.0.1:%d", c.Ports.DNS), "ipv6": false, "enhanced-mode": "fake-ip", "fake-ip-range": "198.19.0.1/16", "use-hosts": false, "use-system-hosts": false, "nameserver": direct, "direct-nameserver": direct, "direct-nameserver-follow-policy": true, "nameserver-policy": dnsPolicy, "fallback": []string{}, "proxy-server-nameserver": direct},
-		"proxies": proxies, "proxy-groups": []any{map[string]any{"name": "CORP", "type": "select", "proxies": corp}, map[string]any{"name": "PERSONAL", "type": "select", "proxies": personal}}, "rules": rules,
+		"proxies": proxies, "proxy-groups": []any{map[string]any{"name": "CORP", "type": "select", "proxies": corp}, personalGroup}, "rules": rules,
 	}, nil
 }
