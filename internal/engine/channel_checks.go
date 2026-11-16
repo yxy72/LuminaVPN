@@ -11,77 +11,132 @@ import (
 	"netlaunch/internal/selector"
 )
 
-// A batch aggregates every configured target before publishing channel health.
-// One successful target cannot erase another target's failure in that channel.
-func checkSystemChannels(ctx context.Context, run string, probes []policy.Probe, selection *selector.Policy, authorized, skipCompany bool) (bool, error) {
+var errProbeScopeChanged = errors.New("probe scope changed")
+
+// Only scoped system TUN observations are published as system health.
+func checkSystemChannels(ctx context.Context, run string, schedule *probeSchedule, selection *selector.Policy, authorized, skipCompany bool) (bool, error) {
 	before, err := load(run)
 	if err != nil {
 		return false, err
 	}
+	if err = guard(run, &before); err != nil {
+		return false, err
+	}
+	node := selection.Current
+	scope := scopeForProbes(before, node)
+	selected := make([]policy.Probe, 0, len(before.Manifest.Config.Probes))
+	for _, p := range before.Manifest.Config.Probes {
+		if (!authorized || skipCompany) && p.Channel == "company" || node == selector.Reject && p.Channel == "personal" {
+			continue
+		}
+		selected = append(selected, p)
+	}
+	schedule.bind(scope, selected)
+	if !schedule.due(time.Now()) {
+		return !systemReadyAt(before, time.Now()).IsZero(), ctx.Err()
+	}
+	if err = schedule.advance(ctx, func(work context.Context, p policy.Probe) error { return probe(work, run, p, node, nil) }); err != nil {
+		return false, err
+	}
+	latest, err := load(run)
+	if err != nil {
+		return false, err
+	}
+	if err = guard(run, &latest); err != nil {
+		return false, err
+	}
+	if scopeForProbes(latest, node) != scope || latest.Personal != before.Personal {
+		schedule.reset()
+		return false, nil
+	}
+	now := time.Now()
 	checks := map[string]ChannelHealth{}
-	if selection.Current == selector.Reject {
+	var personalFailure error
+	for _, channel := range []string{"company", "personal", "direct"} {
+		status, failure := schedule.aggregate(channel, "system_tun", now)
+		checks[channel] = ChannelHealth{
+			ChannelStatus: status, Network: before.Manifest.Network, Generation: before.VPN.Generation, Node: node,
+		}
+		if channel == "personal" {
+			personalFailure = failure
+		}
+	}
+	if node == selector.Reject {
 		// A deliberately closed ingress cannot verify the system path. Preserve
 		// its actionable failure instead of replacing a service error with the
 		// connection failure caused by our own REJECT gate.
 		h := before.Channels["personal"]
-		h.ChannelStatus = channelView(before, "personal", time.Now())
+		h.ChannelStatus = channelView(before, "personal", now)
 		if h.State == "ready" {
 			h.ChannelStatus = ChannelStatus{State: "unavailable", Reason: "no_verified_node", NextAction: "wait_for_selection"}
 		}
 		h.Node = selector.Reject
 		checks["personal"] = h
 	}
-	selected := []policy.Probe{}
-	for _, p := range probes {
-		if skipCompany && p.Channel == "company" || selection.Current == selector.Reject && p.Channel == "personal" {
-			continue
-		}
-		selected = append(selected, p)
-	}
-	observations := runProbeBatch(ctx, selected, 6*time.Second, 4, func(work context.Context, p policy.Probe) error { return probe(work, run, p, false) })
-	if ctx.Err() != nil {
-		return false, ctx.Err()
-	}
-	var personalFailure error
-	for _, observation := range observations {
-		p, failure := observation.probe, observation.err
-		h := checks[p.Channel]
-		h.Network = before.Manifest.Network
-		h.Generation = before.VPN.Generation
-		h.Node = selection.Current
-		h.ChannelStatus = observeChannel(h.ChannelStatus, failure, observation.checked, p)
-		h.ProbeScope = "system_tun"
-		if failure != nil && p.Channel == "personal" && (personalFailure == nil || nodeProbeFailure(failure)) {
-			personalFailure = failure
-		}
-		checks[p.Channel] = h
-	}
+	recordedNode := before.Personal
 	if personalFailure != nil {
-		if err := rejectPersonal(run, selection, selection.Current, personalFailure); err != nil {
+		if err := ctx.Err(); err != nil {
 			return false, err
 		}
+		if err := rejectPersonal(run, selection, node, personalFailure, "system_tun"); err != nil {
+			return false, err
+		}
+		recordedNode = selector.Reject
+		schedule.reset()
 		h := checks["personal"]
 		h.Node = selector.Reject
 		checks["personal"] = h
 	}
 	if !authorized || skipCompany {
 		h := checks["company"]
-		h.State, h.Reason, h.NextAction = "unavailable", "company_authorization_unavailable", "wait_for_reconnect"
+		h.ChannelStatus = ChannelStatus{
+			State: "unavailable", Reason: "company_authorization_unavailable", NextAction: "wait_for_reconnect", CheckedAt: now,
+		}
+		if before.VPN.Bootstrap && !skipCompany {
+			h.State, h.Reason, h.NextAction = "unknown", "probe_incomplete", "wait_for_probe"
+		}
 		checks["company"] = h
 	}
-	ready := true
-	for _, name := range []string{"company", "personal", "direct"} {
-		ready = ready && checks[name].State == "ready"
-	}
+	ready := false
 	err = update(run, func(s *State) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err := guard(run, s); err != nil {
 			return err
 		}
-		if s.Manifest.Network != before.Manifest.Network || s.VPN.Generation != before.VPN.Generation {
-			return errors.New("network generation changed during system checks")
+		if scopeForProbes(*s, node) != scope || s.Personal != recordedNode {
+			return errProbeScopeChanged
 		}
 		s.Channels = checks
+		checked := systemReadyAt(*s, time.Now())
+		ready = !checked.IsZero()
+		if !s.TakeoverActive {
+			if ready {
+				s.Phase, s.LastReady, s.Error = "ready", checked, ""
+			} else if s.Phase == "ready" {
+				s.Phase = "degraded"
+			}
+		}
 		return nil
 	})
+	if errors.Is(err, errProbeScopeChanged) {
+		schedule.reset()
+		return false, nil
+	}
 	return ready, err
+}
+
+func systemReadyAt(s State, now time.Time) time.Time {
+	var oldest time.Time
+	for _, name := range []string{"company", "personal", "direct"} {
+		h := channelView(s, name, now)
+		if h.State != "ready" || h.ProbeScope != "system_tun" {
+			return time.Time{}
+		}
+		if oldest.IsZero() || h.CheckedAt.Before(oldest) {
+			oldest = h.CheckedAt
+		}
+	}
+	return oldest
 }

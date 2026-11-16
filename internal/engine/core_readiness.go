@@ -101,32 +101,43 @@ func applyPersonalSamplesWith(parent context.Context, run string, p *selector.Po
 	if parent.Err() != nil {
 		return parent.Err()
 	}
-	ctx, cancel := context.WithTimeout(parent, 6*time.Second)
-	defer cancel()
 	s, e := load(run)
 	if e != nil {
 		return e
 	}
+	return applyPersonalChoice(parent, p, decide,
+		func(ctx context.Context, node string) error { return selectPersonalContext(ctx, run, node) },
+		func(ctx context.Context) error {
+			client := personalProbeClient(net.JoinHostPort("127.0.0.1", strconv.Itoa(s.Manifest.Config.Ports.Proxy)))
+			defer client.CloseIdleConnections()
+			return verifyPersonalSelection(ctx, client, s.Manifest.Config.Probes)
+		},
+		func(fn func(*State) error) error { return update(run, fn) },
+	)
+}
+
+func applyPersonalChoice(parent context.Context, p *selector.Policy, decide func(time.Time) (string, string), selectNode func(context.Context, string) error, verify func(context.Context) error, updateState func(func(*State) error) error) error {
+	ctx, cancel := context.WithTimeout(parent, 6*time.Second)
+	defer cancel()
 	node, _ := decide(time.Now())
-	if e = selectPersonalContext(ctx, run, node); e != nil {
+	if e := selectNode(ctx, node); e != nil {
 		return e
 	}
 	if node != selector.Reject {
-		client := personalProbeClient(net.JoinHostPort("127.0.0.1", strconv.Itoa(s.Manifest.Config.Ports.Proxy)))
-		probeErr := verifyPersonalSelection(ctx, client, s.Manifest.Config.Probes)
-		client.CloseIdleConnections()
-		if probeErr != nil {
-			if ctx.Err() != nil {
-				if parent.Err() != nil {
-					return parent.Err()
-				}
+		if probeErr := verify(ctx); probeErr != nil {
+			if parent.Err() != nil {
+				return parent.Err()
+			}
+			expired := ctx.Err() != nil
+			// An unverified selection must be closed even if its probe budget expired.
+			if err := selectNode(context.Background(), selector.Reject); err != nil {
+				return err
+			}
+			if expired {
 				// The selected ingress is unverified. Close it without inventing a
 				// failed node observation or putting that node into recovery cooldown.
-				if err := selectPersonal(run, selector.Reject); err != nil {
-					return err
-				}
 				p.Commit(selector.Reject, time.Now())
-				return update(run, func(s *State) error {
+				return updateState(func(s *State) error {
 					s.Personal = selector.Reject
 					s.Error = "personal_verification_timeout"
 					personalUnavailable(s, "verification_budget_expired")
@@ -136,11 +147,12 @@ func applyPersonalSamplesWith(parent context.Context, run string, p *selector.Po
 					return nil
 				})
 			}
-			return rejectPersonal(run, p, node, probeErr)
+			return recordPersonalRejection(p, node, probeErr, "mixed_ingress", updateState)
 		}
+		p.ConfirmService(node)
 	}
 	p.Commit(node, time.Now())
-	return update(run, func(s *State) error {
+	return updateState(func(s *State) error {
 		s.Personal = node
 		if node == selector.Reject {
 			personalUnavailable(s, "no_verified_node")
@@ -152,21 +164,28 @@ func applyPersonalSamplesWith(parent context.Context, run string, p *selector.Po
 	})
 }
 
-func rejectPersonal(run string, p *selector.Policy, node string, failure error) error {
+func rejectPersonal(run string, p *selector.Policy, node string, failure error, scope string) error {
 	if e := selectPersonal(run, selector.Reject); e != nil {
 		return e
 	}
+	return recordPersonalRejection(p, node, failure, scope, func(fn func(*State) error) error { return update(run, fn) })
+}
+
+func recordPersonalRejection(p *selector.Policy, node string, failure error, scope string, updateState func(func(*State) error) error) error {
+	checked := time.Now()
 	if nodeProbeFailure(failure) {
-		p.ReportFailure(node, time.Now())
+		p.ReportFailure(node, checked)
+	} else if probeReason(failure) == "http_status_rejected" {
+		p.ReportServiceRejection(node, checked)
 	}
-	p.Commit(selector.Reject, time.Now())
-	return update(run, func(s *State) error {
+	p.Commit(selector.Reject, checked)
+	return updateState(func(s *State) error {
 		s.Personal = selector.Reject
 		s.Error = failure.Error()
 		personalUnavailable(s, probeReason(failure))
 		h := s.Channels["personal"]
-		h.ChannelStatus = observeChannel(ChannelStatus{}, failure, time.Now(), policy.Probe{Channel: "personal"})
-		h.ProbeScope = "mixed_ingress"
+		h.ChannelStatus = observeChannel(ChannelStatus{}, failure, checked, policy.Probe{Channel: "personal"})
+		h.ProbeScope = scope
 		s.Channels["personal"] = h
 		if s.Phase == "ready" {
 			s.Phase = "degraded"

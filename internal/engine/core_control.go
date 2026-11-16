@@ -15,8 +15,9 @@ import (
 	"net/http"
 	"net/url"
 	"netlaunch/internal/companyproxy"
-	"netlaunch/internal/platform"
+	"netlaunch/internal/lease"
 	"netlaunch/internal/policy"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -110,7 +111,7 @@ func selectCoreGroupContext(ctx context.Context, run, group, node string) error 
 	return nil
 }
 
-func probe(ctx context.Context, run string, p policy.Probe, bound bool, companyDial ...companyproxy.Dial) (result error) {
+func probe(ctx context.Context, run string, p policy.Probe, node string, companyDial companyproxy.Dial) (result error) {
 	defer func() {
 		if result != nil {
 			result = describeProbeFailure(p, result)
@@ -118,6 +119,9 @@ func probe(ctx context.Context, run string, p policy.Probe, bound bool, companyD
 	}()
 	s, e := load(run)
 	if e != nil {
+		return e
+	}
+	if e := guard(run, &s); e != nil {
 		return e
 	}
 	u, e := url.Parse(p.URL)
@@ -132,21 +136,9 @@ func probe(ctx context.Context, run string, p policy.Probe, bound bool, companyD
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	var c net.Conn
-	if bound && len(companyDial) > 0 {
+	if companyDial != nil {
 		number, _ := strconv.Atoi(port)
-		c, e = companyDial[0](ctx, host, number)
-	} else if bound {
-		ip := ""
-		for _, l := range s.Leases {
-			if l.Domain == host && time.Now().Before(l.ExpiresAt) {
-				ip = l.IP
-				break
-			}
-		}
-		if ip == "" {
-			return errors.New("probe has no current company lease")
-		}
-		c, e = platform.BoundDial(s.VPN.Interface)(ctx, "tcp4", net.JoinHostPort(ip, port))
+		c, e = companyDial(ctx, host, number)
 	} else {
 		d := net.Dialer{Timeout: 4 * time.Second}
 		c, e = d.DialContext(ctx, "tcp4", net.JoinHostPort(host, port))
@@ -166,7 +158,7 @@ func probe(ctx context.Context, run string, p policy.Probe, bound bool, companyD
 	if e = secure.HandshakeContext(ctx); e != nil {
 		return tlsProbeFailure(e)
 	}
-	if !bound {
+	if companyDial == nil {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -192,7 +184,7 @@ func probe(ctx context.Context, run string, p policy.Probe, bound bool, companyD
 			if strings.Trim(string(row.Metadata.SourcePort), "\"") == source && row.Metadata.Type == "Tun" {
 				for _, chain := range row.Chains {
 					if chain == expected {
-						found = true
+						found = p.Channel != "personal" || slices.Contains(row.Chains, node)
 					}
 				}
 			}
@@ -216,45 +208,143 @@ func probe(ctx context.Context, run string, p policy.Probe, bound bool, companyD
 	return checkProbeStatus(p, response.StatusCode)
 }
 
-func openCompany(ctx context.Context, run string, company *companyRuntime) error {
-	ctx, cancel := context.WithTimeout(ctx, 6*time.Second)
-	defer cancel()
-	if e := company.ready(); e != nil {
-		return e
+type companyProbeSchedule struct {
+	*probeSchedule
+	session *lease.Session
+	open    bool
+}
+
+func newCompanyProbeSchedule() *companyProbeSchedule {
+	return &companyProbeSchedule{probeSchedule: newProbeSchedule()}
+}
+
+func (checks *companyProbeSchedule) close(run string) error {
+	if !checks.open {
+		return nil
+	}
+	if err := update(run, func(s *State) error {
+		work, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := selectCoreGroupContext(work, run, "CORP", "REJECT"); err != nil {
+			return err
+		}
+		delete(s.Channels, "company")
+		return nil
+	}); err != nil {
+		return &terminalReadinessError{err}
+	}
+	checks.open = false
+	return nil
+}
+
+// Step the company-bound ingress independently of system-TUN checks. Pending
+// evidence keeps CORP closed and lets startup or the normal loop advance.
+func openCompany(ctx context.Context, run string, company *companyRuntime, checks *companyProbeSchedule) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if err := company.ready(); err != nil {
+		checks.reset()
+		if closeErr := checks.close(run); closeErr != nil {
+			return false, closeErr
+		}
+		return false, err
 	}
 	s, e := load(run)
 	if e != nil {
-		return e
+		return false, e
 	}
-	generation := s.VPN.Generation
+	if e = guard(run, &s); e != nil {
+		return false, e
+	}
+	session, generation := company.current()
+	if session == nil || generation != s.VPN.Generation {
+		checks.reset()
+		if err := checks.close(run); err != nil {
+			return false, err
+		}
+		return false, errProbeScopeChanged
+	}
+	if session != checks.session {
+		checks.reset()
+		checks.session = session
+	}
+	scope := scopeForProbes(s, "")
 	probes := []policy.Probe{}
 	for _, p := range s.Manifest.Config.Probes {
 		if p.Channel == "company" {
 			probes = append(probes, p)
 		}
 	}
-	for _, observation := range runProbeBatch(ctx, probes, 6*time.Second, 4, func(work context.Context, p policy.Probe) error { return probe(work, run, p, true, company.dial) }) {
-		if observation.err != nil {
-			return observation.err
+	checks.bind(scope, probes)
+	prior, _ := checks.aggregate("company", "company_bound", time.Now())
+	if prior.State != "ready" {
+		if e := checks.close(run); e != nil {
+			return false, e
 		}
 	}
-	return update(run, func(s *State) error {
+	stepped := checks.due(time.Now())
+	if e := checks.advance(ctx, func(work context.Context, p policy.Probe) error { return probe(work, run, p, "", company.dial) }); e != nil {
+		return false, e
+	}
+	status, failure := checks.aggregate("company", "company_bound", time.Now())
+	if status.State != "ready" {
+		if e := checks.close(run); e != nil {
+			return false, e
+		}
+		if !checks.due(time.Now().Add(2 * time.Second)) {
+			checks.next = time.Now().Add(2 * time.Second)
+		}
+		if failure != nil {
+			return false, failure
+		}
+		return false, errors.New("company probe evidence incomplete")
+	}
+	if checks.open && !stepped && s.Phase != "company_unavailable" {
+		return false, nil
+	}
+	opened := !checks.open || s.Phase == "company_unavailable"
+	e = update(run, func(s *State) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if e := guard(run, s); e != nil {
 			return e
 		}
-		if s.VPN.Generation != generation || !validVPN(*s) || company.ready() != nil {
+		current, currentGeneration := company.current()
+		if scopeForProbes(*s, "") != scope || current != session || currentGeneration != generation || !validVPN(*s) || company.ready() != nil {
 			return errors.New("VPN changed during readiness probe")
+		}
+		if h, _ := checks.aggregate("company", "company_bound", time.Now()); h.State != "ready" {
+			return errors.New("company probe evidence expired before opening")
 		}
 		for _, a := range s.Leases {
 			if time.Now().After(a.ExpiresAt) {
 				return errors.New("company lease expired before opening")
 			}
 		}
-		return apiContext(ctx, run, "PUT", "/proxies/CORP", map[string]string{"name": "CORP-BOUND"}, nil)
+		work, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		if err := selectCoreGroupContext(work, run, "CORP", "CORP-BOUND"); err != nil {
+			return err
+		}
+		if opened {
+			delete(s.Channels, "company")
+		}
+		if s.Phase == "company_unavailable" {
+			s.Phase = "reconnecting"
+		}
+		return nil
 	})
+	// A failed or interrupted write may have been delivered. Treat it as open
+	// until the independent recovery path or a verified close proves otherwise.
+	checks.open = true
+	if e != nil {
+		if closeErr := checks.close(run); closeErr != nil {
+			return false, closeErr
+		}
+	}
+	return opened && e == nil, e
 }
 
 func leaseExpired(s State) bool {

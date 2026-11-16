@@ -104,7 +104,7 @@ func (c CLI) Run(args []string) error {
 	fs.IntVar(&opts.index, "index", -1, "internal child journal index")
 	fs.BoolVar(&opts.force, "force", false, "refresh the local VPN session")
 	fs.BoolVar(&opts.prepareOnly, "prepare-only", false, "up: stage a private run without administrator authorization or network changes")
-	fs.DurationVar(&opts.validationTimeout, "validation-timeout", 0, "up: hard deadline, required in Windows validation builds (1s through 45m)")
+	fs.DurationVar(&opts.validationTimeout, "validation-timeout", 0, "up: hard deadline on macOS or in Windows validation builds (1s through 45m)")
 	fs.DurationVar(&opts.sessionTimeout, "session-timeout", 0, "up: Windows home preview session limit (default 8h, maximum 12h)")
 	if e = fs.Parse(args[1:]); e != nil {
 		return e
@@ -652,8 +652,13 @@ func validateLaunchOptions(o *options, command string) error {
 	if o.prepareOnly && command != "up" {
 		return errors.New("--prepare-only is only valid with up")
 	}
-	if o.validationTimeout != 0 && (command != "up" || !platform.WindowsValidationBuild) {
-		return errors.New("--validation-timeout requires up in a windows_validation build")
+	if o.validationTimeout != 0 {
+		if command != "up" || (runtime.GOOS != "darwin" && !platform.WindowsValidationBuild) {
+			return errors.New("--validation-timeout requires up on macOS or in a windows_validation build")
+		}
+		if o.validationTimeout < time.Second || o.validationTimeout > 45*time.Minute {
+			return errors.New("validation timeout must be between 1s and 45m")
+		}
 	}
 	if command == "up" && platform.WindowsValidationBuild && (o.validationTimeout < time.Second || o.validationTimeout > 45*time.Minute) {
 		return errors.New("Windows validation requires an explicit --validation-timeout between 1s and 45m")

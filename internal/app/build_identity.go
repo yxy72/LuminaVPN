@@ -55,6 +55,7 @@ func describeClientBuild(info buildinfo.Info, target string, home, validation, c
 		b.Mode = "macos_experimental"
 		b.Capabilities.NativeLifecycle, b.Capabilities.Experimental = true, true
 		b.Capabilities.CompanyEgressGuard = "scoped_routes_and_bound_sockets"
+		b.Capabilities.ValidationMaximumSeconds = 45 * 60
 	case "windows":
 		switch {
 		case client && (home || validation):

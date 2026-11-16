@@ -15,10 +15,11 @@ type Options struct {
 func Defaults() Options { return Options{150, 3, 60 * time.Second, 10 * time.Second, 2} }
 
 type health struct {
-	Successes int
-	FailedAt  time.Time
-	Observed  time.Time
-	Latency   int
+	Successes         int
+	FailedAt          time.Time
+	Observed          time.Time
+	Latency           int
+	ServiceRejectedAt time.Time
 }
 type Policy struct {
 	Nodes         []string
@@ -41,9 +42,25 @@ func New(nodes []string) *Policy {
 func (p *Policy) ReportFailure(node string, now time.Time) {
 	for _, n := range p.Nodes {
 		if n == node {
-			p.health[node] = health{FailedAt: now}
+			p.health[node] = health{FailedAt: now, ServiceRejectedAt: p.health[node].ServiceRejectedAt}
 			return
 		}
+	}
+}
+
+// ReportServiceRejection defers a node after an actual probe reached the target
+// but received an unacceptable status. Path samples still describe reachability.
+func (p *Policy) ReportServiceRejection(node string, now time.Time) {
+	if h, ok := p.health[node]; ok {
+		h.ServiceRejectedAt = now
+		p.health[node] = h
+	}
+}
+
+func (p *Policy) ConfirmService(node string) {
+	if h, ok := p.health[node]; ok && !h.ServiceRejectedAt.IsZero() {
+		h.ServiceRejectedAt = time.Time{}
+		p.health[node] = h
 	}
 }
 
@@ -104,6 +121,8 @@ func (p *Policy) DecideTimedSamples(now time.Time, samples map[string]TimedSampl
 func (p *Policy) decideSamples(now time.Time, latency map[string]int, finished map[string]time.Time) (string, string) {
 	best := ""
 	bestMS := int(^uint(0) >> 1)
+	retry := ""
+	var oldestRejection time.Time
 	for _, n := range p.Nodes {
 		h := p.health[n]
 		ms, measured := latency[n]
@@ -124,7 +143,16 @@ func (p *Policy) decideSamples(now time.Time, latency map[string]int, finished m
 		ms = h.Latency
 		fresh := !h.Observed.IsZero() && !now.Before(h.Observed) && now.Sub(h.Observed) < 45*time.Second
 		eligible := fresh && ms >= 0 && (h.FailedAt.IsZero() || (h.Successes >= p.Options.RecoverySuccesses && now.Sub(h.FailedAt) >= p.Options.RecoveryHold))
-		if eligible && ms < bestMS {
+		if !eligible {
+			continue
+		}
+		if !h.ServiceRejectedAt.IsZero() {
+			if now.Sub(h.ServiceRejectedAt) >= p.Options.RecoveryHold && (retry == "" || h.ServiceRejectedAt.Before(oldestRejection)) {
+				retry, oldestRejection = n, h.ServiceRejectedAt
+			}
+			continue
+		}
+		if ms < bestMS {
 			best = n
 			bestMS = ms
 		}
@@ -132,11 +160,16 @@ func (p *Policy) decideSamples(now time.Time, latency map[string]int, finished m
 	if best == "" {
 		p.proposal = ""
 		p.confirmations = 0
+		// Leave a usable alternative in place. When none is available, retry
+		// in rejection order so faster rejects cannot starve the remaining pool.
+		if retry != "" {
+			return retry, "retry_service_verification"
+		}
 		return Reject, "no_healthy_node"
 	}
 	current := p.health[p.Current]
 	currentMS := current.Latency
-	healthy := !current.Observed.IsZero() && !now.Before(current.Observed) && now.Sub(current.Observed) < 45*time.Second && (current.FailedAt.IsZero() || (current.Successes >= p.Options.RecoverySuccesses && now.Sub(current.FailedAt) >= p.Options.RecoveryHold))
+	healthy := current.ServiceRejectedAt.IsZero() && !current.Observed.IsZero() && !now.Before(current.Observed) && now.Sub(current.Observed) < 45*time.Second && (current.FailedAt.IsZero() || (current.Successes >= p.Options.RecoverySuccesses && now.Sub(current.FailedAt) >= p.Options.RecoveryHold))
 	if p.Current == Reject || !healthy || currentMS < 0 {
 		p.proposal = ""
 		p.confirmations = 0

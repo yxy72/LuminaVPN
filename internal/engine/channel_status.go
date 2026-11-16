@@ -47,6 +47,10 @@ func observeChannel(previous ChannelStatus, failure error, checked time.Time, p 
 			next.NextAction = "check_service_expectation"
 		}
 	}
+	return mergeChannelStatus(previous, next)
+}
+
+func mergeChannelStatus(previous, next ChannelStatus) ChannelStatus {
 	if previous.State == "" {
 		return next
 	}
@@ -72,7 +76,7 @@ func mergeEvidence(a, b, success string) string {
 }
 
 func ageProbeEvidence(h ChannelStatus, now time.Time) ChannelStatus {
-	if h.CheckedAt.IsZero() || now.Before(h.CheckedAt) || now.Sub(h.CheckedAt) > 90*time.Second {
+	if h.CheckedAt.IsZero() || now.Before(h.CheckedAt) || now.Sub(h.CheckedAt) > probeEvidenceTTL {
 		if h.PathState != "" {
 			h.PathState = "unknown"
 		}
@@ -177,7 +181,10 @@ func channelView(s State, name string, now time.Time) ChannelStatus {
 	if h.Network != s.Manifest.Network {
 		return unknown("network_changed")
 	}
-	if out.CheckedAt.IsZero() || now.Before(out.CheckedAt) || now.Sub(out.CheckedAt) > 90*time.Second {
+	if out.State == "unknown" && out.CheckedAt.IsZero() && (out.Reason == "probe_incomplete" || out.Reason == "probe_missing") {
+		return out
+	}
+	if out.CheckedAt.IsZero() || now.Before(out.CheckedAt) || now.Sub(out.CheckedAt) > probeEvidenceTTL {
 		return unknown("check_expired")
 	}
 	if s.Manifest.Mode != "" && out.State == "ready" && h.ProbeScope != "system_tun" {

@@ -48,6 +48,9 @@ func initialize(run string) (State, error) {
 	if e != nil {
 		return State{}, e
 	}
+	if e := validateDarwinRunStart(m, time.Now()); e != nil {
+		return State{}, e
+	}
 	if _, e = os.Lstat(private(run)); !errors.Is(e, os.ErrNotExist) {
 		return State{}, errors.New("run already used")
 	}
@@ -100,10 +103,17 @@ func serve(run string) (returned error) {
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	defer cancel()
+	if deadline := darwinRunDeadline(s.Manifest); !deadline.IsZero() {
+		var cancelDeadline context.CancelFunc
+		ctx, cancelDeadline = context.WithDeadline(ctx, deadline)
+		defer cancelDeadline()
+	}
 	defer func() {
 		cancel()
 		reason := "coordinator_exit"
-		if errors.Is(returned, errVPNAuthenticationRequired) {
+		if deadline := darwinRunDeadline(s.Manifest); !deadline.IsZero() && !time.Now().Before(deadline) {
+			reason = "validation_deadline"
+		} else if errors.Is(returned, errVPNAuthenticationRequired) {
 			reason = "authentication_required"
 		}
 		if returned != nil {
@@ -255,7 +265,11 @@ func serve(run string) (returned error) {
 	}); e != nil {
 		return e
 	}
-	if e = openCompany(ctx, run, company); e != nil {
+	boundChecks, systemChecks := newCompanyProbeSchedule(), newProbeSchedule()
+	if e = wait(ctx, run, 45*time.Second, func(ctx context.Context) error {
+		_, err := openCompany(ctx, run, company, boundChecks)
+		return err
+	}); e != nil {
 		return e
 	}
 	names := []string{}
@@ -296,18 +310,22 @@ func serve(run string) (returned error) {
 		if e := ensurePersonalSelection(ctx, run, selection); e != nil {
 			return e
 		}
-		if e := openCompany(ctx, run, company); e != nil {
+		if _, e := openCompany(ctx, run, company, boundChecks); e != nil {
 			return e
 		}
-		ready, err := checkSystemChannels(ctx, run, s.Manifest.Config.Probes, selection, company.ready() == nil, false)
+		next := systemChecks.next
+		ready, err := checkSystemChannels(ctx, run, systemChecks, selection, boundChecks.open, false)
 		if err != nil {
 			return err
 		}
 		if !ready {
-			// Preserve the native startup retry's DNS cache refresh.
-			_ = apiContext(ctx, run, "POST", "/cache/dns/flush", nil, nil)
-			if ctx.Err() == nil {
-				platform.FlushDNS()
+			// A partial scan is expected. Refresh caches only after a full
+			// unsuccessful scan, before trying it again.
+			if !systemChecks.next.IsZero() && !systemChecks.next.Equal(next) {
+				_ = apiContext(ctx, run, "POST", "/cache/dns/flush", nil, nil)
+				if ctx.Err() == nil {
+					platform.FlushDNS()
+				}
 			}
 			return errors.New("system channel verification failed")
 		}
@@ -315,13 +333,9 @@ func serve(run string) (returned error) {
 	}); e != nil {
 		return e
 	}
-	if e = update(run, func(s *State) error { s.Phase = "ready"; s.LastReady = time.Now(); s.Error = ""; return nil }); e != nil {
-		return e
-	}
 	sampling := &personalSampling{}
 	defer sampling.close()
-	lastHealth, lastProbe := time.Now(), time.Now()
-	lastGeneration := ""
+	lastHealth := time.Now()
 	lastResumeRequest := ""
 	retry := &vpnRetry{}
 	disconnected := false
@@ -344,6 +358,8 @@ func serve(run string) (returned error) {
 			return e
 		}
 		if current.VPN.WakeEpoch != "" && current.VPN.WakeEpoch != epoch && lastResumeRequest != epoch {
+			boundChecks.reset()
+			systemChecks.reset()
 			company.revoke()
 			if e = gate(run); e != nil {
 				return e
@@ -371,7 +387,7 @@ func serve(run string) (returned error) {
 			lastResumeRequest = epoch
 			retry.NetworkChanged(time.Now())
 			selection = selector.New(names)
-			lastHealth, lastProbe = time.Time{}, time.Time{}
+			lastHealth = time.Time{}
 			continue
 		}
 		ok, e := alive(coreChild)
@@ -381,6 +397,8 @@ func serve(run string) (returned error) {
 		observed, e := platform.Discover()
 		if e != nil {
 			networkUnavailable = true
+			boundChecks.reset()
+			systemChecks.reset()
 			company.revoke()
 			_ = gate(run)
 			_ = update(run, func(s *State) error {
@@ -393,6 +411,8 @@ func serve(run string) (returned error) {
 			continue
 		}
 		if observed != network || networkUnavailable {
+			boundChecks.reset()
+			systemChecks.reset()
 			company.revoke()
 			_ = gate(run)
 			_ = selectPersonal(run, selector.Reject)
@@ -482,6 +502,8 @@ func serve(run string) (returned error) {
 			}
 		}
 		if !vpnAlive && !disconnected {
+			boundChecks.reset()
+			systemChecks.reset()
 			if e = stopVPN(run, company); e != nil {
 				return e
 			}
@@ -508,20 +530,31 @@ func serve(run string) (returned error) {
 			continue // reload the newly journalled attempt and its generation
 		}
 		retry.Ready(time.Now(), vpnAlive && company.ready() == nil)
-		refresh := current.VPN.Generation != lastGeneration || channelView(current, "company", time.Now()).State != "ready" || company.ready() != nil
-		for _, a := range current.Leases {
-			if time.Until(a.ExpiresAt) < 15*time.Second {
-				refresh = true
+		if vpnAlive && !retry.AuthenticationRequired {
+			for _, lease := range current.Leases {
+				if time.Until(lease.ExpiresAt) < 15*time.Second {
+					boundChecks.next = time.Time{}
+					break
+				}
 			}
-		}
-		if vpnAlive && !retry.AuthenticationRequired && refresh {
-			if e = openCompany(ctx, run, company); e != nil {
-				_ = gate(run)
-				_ = update(run, func(s *State) error { s.Phase = "company_unavailable"; return nil })
-			} else {
-				lastGeneration = current.VPN.Generation
-				lastProbe = time.Time{}
+			opened, err := openCompany(ctx, run, company, boundChecks)
+			var terminal *terminalReadinessError
+			if errors.As(err, &terminal) {
+				return err
 			}
+			if opened {
+				systemChecks.reset()
+			} else if err != nil && current.Phase != "company_unavailable" {
+				_ = update(run, func(s *State) error {
+					if err := guard(run, s); err != nil {
+						return err
+					}
+					s.Phase = "company_unavailable"
+					return nil
+				})
+			}
+		} else if err := boundChecks.close(run); err != nil {
+			return err
 		}
 		if time.Since(lastHealth) > 15*time.Second {
 			done, err := sampling.refresh(ctx, run, selection)
@@ -532,25 +565,12 @@ func serve(run string) (returned error) {
 				lastHealth = time.Now()
 			}
 		}
-		if time.Since(lastProbe) > 30*time.Second {
-			ready, err := checkSystemChannels(ctx, run, current.Manifest.Config.Probes, selection, company.ready() == nil, retry.AuthenticationRequired || !vpnAlive)
-			if err != nil {
-				return err
-			}
-			if selection.Current == selector.Reject {
-				lastHealth = time.Time{}
-			}
-			_ = update(run, func(s *State) error {
-				if ready {
-					s.Phase = "ready"
-					s.LastReady = time.Now()
-					s.Error = ""
-				} else if s.Phase != "authentication_required" && s.Phase != "reconnecting" {
-					s.Phase = "degraded"
-				}
-				return nil
-			})
-			lastProbe = time.Now()
+		wasSelected := selection.Current != selector.Reject
+		if _, err := checkSystemChannels(ctx, run, systemChecks, selection, boundChecks.open, retry.AuthenticationRequired || !vpnAlive); err != nil {
+			return err
+		}
+		if wasSelected && selection.Current == selector.Reject {
+			lastHealth = time.Time{}
 		}
 		time.Sleep(time.Second)
 	}
@@ -639,8 +659,11 @@ func watch(run string) error {
 		if _, e = os.Stat(filepath.Join(run, "STOP")); e == nil {
 			reason = "user_stop"
 		}
+		if deadline := darwinRunDeadline(s.Manifest); reason == "" && !deadline.IsZero() && !time.Now().Before(deadline) {
+			reason = "validation_deadline"
+		}
 		id, _ := platform.Process(s.Runner.PID)
-		if id.PID == 0 || id.Birth != s.Runner.Birth || id.Command != s.Runner.Command {
+		if reason == "" && (id.PID == 0 || id.Birth != s.Runner.Birth || id.Command != s.Runner.Command) {
 			reason = "coordinator_exited"
 		}
 		epoch, e := platform.WakeEpoch()

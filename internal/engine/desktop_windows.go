@@ -239,7 +239,11 @@ func runDesktopWindows(ctx context.Context, run string, children *windowsChildre
 	var latest []independentSample
 	var gen personalroute.Generation
 	var health *independentScheduler
-	var lastSystemCheck time.Time
+	boundChecks, systemChecks := newCompanyProbeSchedule(), newProbeSchedule()
+	resetProbes := func() {
+		boundChecks.reset()
+		systemChecks.reset()
+	}
 	coverageReason := "independent_health_not_configured"
 	sampledAt := map[string]time.Time{}
 	nextCompanyIngress := time.Now().Add(5 * time.Second)
@@ -291,6 +295,7 @@ func runDesktopWindows(ctx context.Context, run string, children *windowsChildre
 		}
 		select {
 		case <-company.done:
+			resetProbes()
 			if e = stopVPN(run, children, company); e != nil {
 				return e
 			}
@@ -306,6 +311,7 @@ func runDesktopWindows(ctx context.Context, run string, children *windowsChildre
 		}
 		wanted := currentIntent(s)
 		if s.ChannelGeneration != applied {
+			resetProbes()
 			companyChanged := wanted.Company != intent.Company
 			personalChanged := wanted.Personal != intent.Personal || wanted.Environment != intent.Environment
 			if wanted.Company && company.authority == nil {
@@ -375,6 +381,7 @@ func runDesktopWindows(ctx context.Context, run string, children *windowsChildre
 		changed := networkErr == nil && (!winnet.SameAdapter(observed.Adapter, s.Windows.Physical.Adapter) || observed.Address != s.Windows.Physical.Address || observed.Gateway != s.Windows.Physical.Gateway)
 		resumed := !awake || epoch != s.Windows.Epoch
 		if networkErr != nil || changed || resumed {
+			resetProbes()
 			company.revoke()
 			_ = gate(run)
 			_ = selectPersonal(run, selector.Reject)
@@ -425,6 +432,7 @@ func runDesktopWindows(ctx context.Context, run string, children *windowsChildre
 				return e
 			}
 		}
+		companyOpen := false
 		if intent.Company && !companyIssue {
 			fresh, authErr := refreshProtectedAuth(run, s)
 			if fresh {
@@ -486,9 +494,15 @@ func runDesktopWindows(ctx context.Context, run string, children *windowsChildre
 					s.Error = "authentication_required"
 					return nil
 				})
-			} else if running && company.ready() == nil {
-				if e = openCompany(ctx, run, company); e != nil {
-					_ = gate(run)
+			} else if running {
+				opened, err := openCompany(ctx, run, company, boundChecks)
+				var terminal *terminalReadinessError
+				if errors.As(err, &terminal) {
+					return err
+				}
+				companyOpen = err == nil && boundChecks.open
+				if opened {
+					systemChecks.reset()
 				}
 			}
 			retry.Ready(time.Now(), running && company.ready() == nil)
@@ -514,6 +528,8 @@ func runDesktopWindows(ctx context.Context, run string, children *windowsChildre
 					coverageReason = result.CoverageReason
 					decision := fallbackDecisionWithCoverage(intent, nodes, gen, latest, time.Now(), coverageReason)
 					if decision.DirectAllowed != direct {
+						resetProbes()
+						companyOpen = false
 						direct = decision.DirectAllowed
 						if e = reloadDesktop(ctx, run, s, nodes, secret, company, direct); e != nil {
 							return e
@@ -548,6 +564,8 @@ func runDesktopWindows(ctx context.Context, run string, children *windowsChildre
 			}
 		}
 		if direct && intent.Personal && !fallbackDecisionWithCoverage(intent, nodes, gen, latest, time.Now(), coverageReason).DirectAllowed {
+			resetProbes()
+			companyOpen = false
 			direct = false
 			if e = reloadDesktop(ctx, run, s, nodes, secret, company, false); e != nil {
 				return e
@@ -556,15 +574,17 @@ func runDesktopWindows(ctx context.Context, run string, children *windowsChildre
 				return e
 			}
 		}
-		if time.Since(lastSystemCheck) > 30*time.Second {
-			checks := selection
-			if direct {
-				checks = selector.New(nil)
+		checks := selection
+		if direct {
+			checks = selector.New(nil)
+		}
+		if !companyOpen {
+			if err := boundChecks.close(run); err != nil {
+				return err
 			}
-			if _, e = checkSystemChannels(ctx, run, s.Manifest.Config.Probes, checks, company.ready() == nil, !intent.Company || companyIssue || retry.AuthenticationRequired || companyTerminal != ""); e != nil {
-				return e
-			}
-			lastSystemCheck = time.Now()
+		}
+		if _, e = checkSystemChannels(ctx, run, systemChecks, checks, companyOpen, !intent.Company || companyIssue || retry.AuthenticationRequired || companyTerminal != ""); e != nil {
+			return e
 		}
 		if e = update(run, func(s *State) error {
 			if intent.Company && companyTerminal != "" {

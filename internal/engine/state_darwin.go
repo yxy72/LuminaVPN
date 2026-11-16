@@ -103,6 +103,31 @@ func guard(run string, s *State) error {
 	if _, e := os.Stat(filepath.Join(run, "STOP")); e == nil || s.Phase == "stopping" || s.Phase == "stopped" || s.Phase == "recovery_failed" {
 		return errors.New("stop requested")
 	}
+	if deadline := darwinRunDeadline(s.Manifest); !deadline.IsZero() && !time.Now().Before(deadline) {
+		return errDarwinValidationExpired
+	}
+	return nil
+}
+
+var errDarwinValidationExpired = errors.New("macOS validation deadline reached")
+
+func darwinRunDeadline(m Manifest) time.Time {
+	if m.ValidationTimeout == 0 {
+		return time.Time{}
+	}
+	return m.Created.Add(m.ValidationTimeout)
+}
+
+func validateDarwinRunStart(m Manifest, now time.Time) error {
+	if m.ValidationTimeout == 0 {
+		return nil
+	}
+	if m.ValidationTimeout < time.Second || m.ValidationTimeout > 45*time.Minute || m.Created.IsZero() || m.Created.After(now) {
+		return errors.New("invalid macOS validation deadline")
+	}
+	if !now.Before(darwinRunDeadline(m)) {
+		return errDarwinValidationExpired
+	}
 	return nil
 }
 func legacyPulse(run string) error {
@@ -150,6 +175,9 @@ func Launch(action, run string) error {
 	if action == "serve" {
 		m, e := ReadManifest(run)
 		if e != nil {
+			return e
+		}
+		if e := validateDarwinRunStart(m, time.Now()); e != nil {
 			return e
 		}
 		self = m.Executable

@@ -808,7 +808,11 @@ func runFrozen(run string) (returned error) {
 	}); e != nil {
 		return e
 	}
-	if e = openCompany(ctx, run, company); e != nil {
+	boundChecks, systemChecks := newCompanyProbeSchedule(), newProbeSchedule()
+	if e = wait(ctx, run, 45*time.Second, func(ctx context.Context) error {
+		_, err := openCompany(ctx, run, company, boundChecks)
+		return err
+	}); e != nil {
 		company.diagnostic("bootstrap_bound", e)
 		return e
 	}
@@ -838,10 +842,10 @@ func runFrozen(run string) (returned error) {
 		if e := ensurePersonalSelection(ctx, run, selection); e != nil {
 			return e
 		}
-		if e := openCompany(ctx, run, company); e != nil {
+		if _, e := openCompany(ctx, run, company, boundChecks); e != nil {
 			return e
 		}
-		ready, err := checkSystemChannels(ctx, run, s.Manifest.Config.Probes, selection, company.ready() == nil, false)
+		ready, err := checkSystemChannels(ctx, run, systemChecks, selection, boundChecks.open, false)
 		if err != nil {
 			return err
 		}
@@ -852,18 +856,14 @@ func runFrozen(run string) (returned error) {
 	}); e != nil {
 		return e
 	}
-	if e = update(run, func(s *State) error { s.Phase = "ready"; s.LastReady = time.Now(); return nil }); e != nil {
-		return e
-	}
-	return windowsLoop(ctx, run, children, company, coreChild, nodes, secret, selection, names)
+	return windowsLoop(ctx, run, children, company, coreChild, nodes, secret, selection, names, boundChecks, systemChecks)
 }
-func windowsLoop(ctx context.Context, run string, g *windowsChildren, company *companyRuntime, core Child, nodes []policy.Node, secret string, selection *selector.Policy, names []string) error {
+func windowsLoop(ctx context.Context, run string, g *windowsChildren, company *companyRuntime, core Child, nodes []policy.Node, secret string, selection *selector.Policy, names []string, boundChecks *companyProbeSchedule, systemChecks *probeSchedule) error {
 	sampling := &personalSampling{}
 	defer sampling.close()
-	lastHealth, lastProbe := time.Now(), time.Now()
+	lastHealth := time.Now()
 	disconnected := false
 	retry := &vpnRetry{}
-	openedGeneration := ""
 	for ctx.Err() == nil {
 		if err := pulse(run); err != nil {
 			return err
@@ -888,6 +888,8 @@ func windowsLoop(ctx context.Context, run string, g *windowsChildren, company *c
 		changed := networkErr == nil && (!winnet.SameAdapter(observed.Adapter, s.Windows.Physical.Adapter) || observed.Address != s.Windows.Physical.Address || observed.Gateway != s.Windows.Physical.Gateway)
 		resume := !awake || epoch != s.Windows.Epoch
 		if networkErr != nil || resume || changed {
+			boundChecks.reset()
+			systemChecks.reset()
 			company.revoke()
 			_ = gate(run)
 			_ = selectPersonal(run, selector.Reject)
@@ -947,7 +949,7 @@ func windowsLoop(ctx context.Context, run string, g *windowsChildren, company *c
 				}
 			}
 			selection = selector.New(names)
-			lastHealth, lastProbe = time.Time{}, time.Time{}
+			lastHealth = time.Time{}
 		}
 		s, e = load(run)
 		if e != nil {
@@ -982,6 +984,8 @@ func windowsLoop(ctx context.Context, run string, g *windowsChildren, company *c
 			}
 		}
 		if !vpnAlive && !disconnected {
+			boundChecks.reset()
+			systemChecks.reset()
 			if e = stopVPN(run, g, company); e != nil {
 				return e
 			}
@@ -1016,15 +1020,26 @@ func windowsLoop(ctx context.Context, run string, g *windowsChildren, company *c
 			continue
 		}
 		retry.Ready(time.Now(), vpnAlive && company.ready() == nil)
-		if vpnAlive && !retry.AuthenticationRequired && (channelView(s, "company", time.Now()).State != "ready" || s.VPN.Generation != openedGeneration || company.ready() != nil) {
-			if e = openCompany(ctx, run, company); e != nil {
-				company.diagnostic("runtime_bound", e)
-				_ = gate(run)
-				_ = update(run, func(s *State) error { s.Phase = "company_unavailable"; return nil })
-			} else {
-				openedGeneration = s.VPN.Generation
-				lastProbe = time.Time{}
+		if vpnAlive && !retry.AuthenticationRequired {
+			opened, err := openCompany(ctx, run, company, boundChecks)
+			var terminal *terminalReadinessError
+			if errors.As(err, &terminal) {
+				return err
 			}
+			if opened {
+				systemChecks.reset()
+			} else if err != nil && s.Phase != "company_unavailable" {
+				company.diagnostic("runtime_bound", err)
+				_ = update(run, func(s *State) error {
+					if err := guard(run, s); err != nil {
+						return err
+					}
+					s.Phase = "company_unavailable"
+					return nil
+				})
+			}
+		} else if err := boundChecks.close(run); err != nil {
+			return err
 		}
 		if time.Since(lastHealth) > 15*time.Second {
 			done, err := sampling.refresh(ctx, run, selection)
@@ -1035,25 +1050,12 @@ func windowsLoop(ctx context.Context, run string, g *windowsChildren, company *c
 				lastHealth = time.Now()
 			}
 		}
-		if time.Since(lastProbe) > 30*time.Second {
-			ready, err := checkSystemChannels(ctx, run, s.Manifest.Config.Probes, selection, company.ready() == nil, retry.AuthenticationRequired || !vpnAlive)
-			if err != nil {
-				return err
-			}
-			if selection.Current == selector.Reject {
-				lastHealth = time.Time{}
-			}
-			_ = update(run, func(s *State) error {
-				if ready {
-					s.Phase = "ready"
-					s.LastReady = time.Now()
-					s.Error = ""
-				} else if s.Phase != "authentication_required" && s.Phase != "reconnecting" {
-					s.Phase = "degraded"
-				}
-				return nil
-			})
-			lastProbe = time.Now()
+		wasSelected := selection.Current != selector.Reject
+		if _, err := checkSystemChannels(ctx, run, systemChecks, selection, boundChecks.open, retry.AuthenticationRequired || !vpnAlive); err != nil {
+			return err
+		}
+		if wasSelected && selection.Current == selector.Reject {
+			lastHealth = time.Time{}
 		}
 		time.Sleep(time.Second)
 	}
