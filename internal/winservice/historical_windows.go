@@ -22,22 +22,26 @@ func verifyHistoricalPreparationRole(profile, runRef, instance, runID, lifecycle
 	if err != nil {
 		return false, err
 	}
-	if !releaseText.MatchString(runRef) || !releaseText.MatchString(instance) || !engineRunID.MatchString(runID) || !digestText.MatchString(lifecycleSHA) || (expectedSpecDigest != "" && !digestText.MatchString(expectedSpecDigest)) || current.ServiceInstance != instance {
-		return false, errors.New("invalid historical preparation identity")
-	}
 	base, err := windows.KnownFolderPath(windows.FOLDERID_ProgramData, windows.KF_FLAG_DEFAULT)
 	if err != nil {
 		return false, err
 	}
-	root := filepath.Join(base, "LuminaVPN", "ServiceState")
-	if err = (WindowsProtectedFiles{Root: root}).validatePath(root); err != nil {
+	files := installedStateFiles{root: filepath.Join(base, "LuminaVPN", "ServiceState")}
+	return verifyHistoricalPreparationState(files, current, profile, runRef, instance, runID, lifecycleSHA, expectedSpecDigest)
+}
+
+func verifyHistoricalPreparationState(files installedStateFiles, current Binding, profile, runRef, instance, runID, lifecycleSHA, expectedSpecDigest string) (bool, error) {
+	if !releaseText.MatchString(runRef) || !releaseText.MatchString(instance) || !engineRunID.MatchString(runID) || !digestText.MatchString(lifecycleSHA) || (expectedSpecDigest != "" && !digestText.MatchString(expectedSpecDigest)) || current.ProfileID != profile || current.ServiceInstance != instance {
+		return false, errors.New("invalid historical preparation identity")
+	}
+	root := files.root
+	if err := (WindowsProtectedFiles{Root: root}).validatePath(root); err != nil {
 		return false, err
 	}
 	entries, err := os.ReadDir(root)
 	if err != nil || len(entries) > 8192 {
 		return false, errors.New("historical restoration census unavailable")
 	}
-	files := installedStateFiles{root: root}
 	for _, entry := range entries {
 		if !strings.HasPrefix(entry.Name(), "restoration-") || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
