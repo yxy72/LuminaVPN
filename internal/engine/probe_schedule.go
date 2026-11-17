@@ -10,7 +10,10 @@ import (
 	"netlaunch/internal/policy"
 )
 
-const probeEvidenceTTL = 90 * time.Second
+const (
+	probeEvidenceTTL        = 90 * time.Second
+	defaultProbeParallelism = 4
+)
 
 // One schedule belongs to one coordinator and one ingress. A snapshot cannot
 // be applied after the network, VPN, selected node or applied intent changes.
@@ -65,8 +68,12 @@ type probeSchedule struct {
 }
 
 func newProbeSchedule() *probeSchedule {
+	return newProbeScheduleWithCapacity(defaultProbeParallelism)
+}
+
+func newProbeScheduleWithCapacity(capacity int) *probeSchedule {
 	return &probeSchedule{
-		busy: make(map[int]bool), done: make(chan probeResult, 4), parallel: 4,
+		busy: make(map[int]bool), done: make(chan probeResult, capacity), parallel: defaultProbeParallelism,
 		sliceBudget: 6 * time.Second, targetBudget: 5 * time.Second,
 	}
 }

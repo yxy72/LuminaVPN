@@ -14,11 +14,15 @@ import (
 
 func TestPersonalVerificationCoversAcceptedProbeList(t *testing.T) {
 	for _, tc := range []struct {
-		name              string
-		count, wantSlices int
+		name                            string
+		count, wantSlices, wantParallel int
+		budget, delay                   time.Duration
 	}{
-		{"small-list-selects-early", 5, 2},
-		{"thirteen-probes-reach-the-tail", 13, 4},
+		{"small-list-selects-early", 5, 2, 4, time.Second, 0},
+		// Scale the 18-second mixed budget and a successful 4.6-second
+		// response by the same factor: three waves fit, four exceed it.
+		{"thirteen-slow-probes-fit-the-budget", 13, 3, 5, 450 * time.Millisecond, 115 * time.Millisecond},
+		{"large-list-keeps-bounded-parallelism", 49, 4, 16, time.Second, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			config := policy.Config{
@@ -36,13 +40,25 @@ func TestPersonalVerificationCoversAcceptedProbeList(t *testing.T) {
 			probes := personalTargets(config)
 			for _, ingress := range []string{candidateListener, "mixed_ingress"} {
 				t.Run(ingress, func(t *testing.T) {
-					schedule := newProbeSchedule()
-					schedule.bind(probeScope{node: "P001"}, probes)
+					schedule := newProbeScheduleWithCapacity(personalVerificationParallelLimit)
+					schedule.bindPersonalVerification(probeScope{node: "P001"}, probes)
+					if schedule.parallel != tc.wantParallel {
+						t.Fatalf("unexpected worker limit: %d", schedule.parallel)
+					}
 					var checked atomic.Int32
-					ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+					ctx, cancel := context.WithTimeout(t.Context(), tc.budget)
 					defer cancel()
 					for i := 1; i <= schedule.personalVerificationSliceLimit(); i++ {
-						if err := schedule.advance(ctx, func(context.Context, policy.Probe) error {
+						if err := schedule.advance(ctx, func(work context.Context, _ policy.Probe) error {
+							if tc.delay != 0 {
+								wait := time.NewTimer(tc.delay)
+								defer wait.Stop()
+								select {
+								case <-work.Done():
+									return work.Err()
+								case <-wait.C:
+								}
+							}
 							checked.Add(1)
 							return nil
 						}); err != nil {

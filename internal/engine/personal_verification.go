@@ -11,7 +11,18 @@ import (
 	"netlaunch/internal/selector"
 )
 
-const minimumPersonalVerificationSlices = 3
+const (
+	minimumPersonalVerificationSlices = 3
+	personalVerificationParallelLimit = 16
+)
+
+func (s *probeSchedule) bindPersonalVerification(scope probeScope, probes []policy.Probe) {
+	// Fit more targets into the existing verification window. Keep enough
+	// result slots for previous workers to drain even after a smaller rebind.
+	workers := (len(probes) + minimumPersonalVerificationSlices - 1) / minimumPersonalVerificationSlices
+	s.parallel = max(defaultProbeParallelism, min(workers, cap(s.done)))
+	s.bind(scope, probes)
+}
 
 func (s *probeSchedule) personalVerificationSliceLimit() int {
 	// Allow one complete pass even when the configured targets exceed the
@@ -40,7 +51,11 @@ func newPersonalVerification(m Manifest) (*personalVerification, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &personalVerification{ingress: ingress, candidate: newProbeSchedule(), mixed: newProbeSchedule()}, nil
+	return &personalVerification{
+		ingress:   ingress,
+		candidate: newProbeScheduleWithCapacity(personalVerificationParallelLimit),
+		mixed:     newProbeScheduleWithCapacity(personalVerificationParallelLimit),
+	}, nil
 }
 
 func personalTargets(c policy.Config) []policy.Probe {
@@ -101,7 +116,7 @@ func (v *personalVerification) advance(ctx context.Context, run string, before S
 		v.scope = scopeForProbes(before, node)
 		v.deadline = time.Now().Add(20 * time.Second)
 		v.slices = 0
-		v.candidate.bind(v.scope, probes)
+		v.candidate.bindPersonalVerification(v.scope, probes)
 		selectCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		err := selectCoreGroupContext(selectCtx, run, candidateGroup, node)
 		cancel()
@@ -223,7 +238,7 @@ func (v *personalVerification) confirmMixed(ctx context.Context, run string, bef
 	defer cancel()
 	scope := scopeForProbes(before, node)
 	v.mixed.reset()
-	v.mixed.bind(scope, probes)
+	v.mixed.bindPersonalVerification(scope, probes)
 	var failure error
 	for i := 0; i < v.mixed.personalVerificationSliceLimit() && work.Err() == nil; i++ {
 		if err := pulse(run); err != nil {
