@@ -17,6 +17,8 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/svc"
+	"golang.org/x/sys/windows/svc/mgr"
 	p "netlaunch/internal/serviceprotocol"
 )
 
@@ -487,45 +489,53 @@ func verifyPipeServer(handle windows.Handle, installation Installation) error {
 	if ok == 0 || pid == 0 {
 		return errors.New("pipe server identity unavailable")
 	}
-	process, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
-	if err != nil {
-		return err
-	}
-	defer windows.CloseHandle(process)
-	var token windows.Token
-	if err = windows.OpenProcessToken(process, windows.TOKEN_QUERY, &token); err != nil {
-		return err
-	}
-	defer token.Close()
-	user, err := token.GetTokenUser()
-	if err != nil || user.User.Sid.String() != "S-1-5-18" {
-		return errors.New("pipe server is not service executor")
-	}
-	serviceSID, _, _, err := windows.LookupSID("", "NT SERVICE\\"+ServiceName)
-	if err != nil {
-		return err
-	}
-	groups, err := token.GetTokenGroups()
-	if err != nil {
-		return err
-	}
-	found := false
-	for _, g := range groups.AllGroups() {
-		found = found || (g.Sid.Equals(serviceSID) && g.Attributes&windows.SE_GROUP_ENABLED != 0)
-	}
-	if !found {
-		return errors.New("pipe server service SID missing")
-	}
-	buf := make([]uint16, 32768)
-	size := uint32(len(buf))
-	if err = windows.QueryFullProcessImageName(process, 0, &buf[0], &size); err != nil {
-		return err
-	}
 	expected, err := installation.Executable(ServiceImage)
-	if err != nil || !strings.EqualFold(filepath.Clean(windows.UTF16ToString(buf[:size])), expected) {
-		return errors.New("pipe server image differs from protected release")
+	if err != nil {
+		return err
 	}
-	return nil
+	// The ordinary client can query the fixed SCM service without opening
+	// the LocalSystem process or its token. Match SCM to the kernel's PID
+	// for this pipe before sending any request.
+	manager, err := windows.OpenSCManager(nil, nil, windows.SC_MANAGER_CONNECT)
+	if err != nil {
+		return err
+	}
+	defer windows.CloseServiceHandle(manager)
+	name, _ := windows.UTF16PtrFromString(ServiceName)
+	service, err := windows.OpenService(manager, name, windows.SERVICE_QUERY_CONFIG|windows.SERVICE_QUERY_STATUS)
+	if err != nil {
+		return err
+	}
+	defer windows.CloseServiceHandle(service)
+	fixed := mgr.Service{Name: ServiceName, Handle: service}
+	return verifyPipeService(pid, expected, fixed.Query, fixed.Config)
+}
+
+func verifyPipeService(pid uint32, image string, status func() (svc.Status, error), config func() (mgr.Config, error)) error {
+	checkRunning := func() error {
+		current, err := status()
+		if err != nil {
+			return err
+		}
+		if current.State != svc.Running || pid == 0 || current.ProcessId != pid {
+			return errors.New("pipe server differs from the running fixed SCM service")
+		}
+		return nil
+	}
+	if err := checkRunning(); err != nil {
+		return err
+	}
+	configured, err := config()
+	if err != nil {
+		return err
+	}
+	binary, fixedEntry := strings.CutSuffix(configured.BinaryPathName, " "+string(CommandService))
+	if !fixedEntry || !strings.EqualFold(binary, windows.EscapeArg(image)) ||
+		(configured.ServiceStartName != "" && !strings.EqualFold(configured.ServiceStartName, "LocalSystem")) ||
+		configured.ServiceType != windows.SERVICE_WIN32_OWN_PROCESS || configured.SidType != windows.SERVICE_SID_TYPE_UNRESTRICTED {
+		return errors.New("fixed SCM service configuration differs from the protected release")
+	}
+	return checkRunning()
 }
 
 type WindowsProtectedFiles struct{ Root string }
