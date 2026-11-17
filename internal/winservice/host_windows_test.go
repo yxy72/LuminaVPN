@@ -5,11 +5,13 @@ package winservice
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"golang.org/x/sys/windows/svc"
+	p "netlaunch/internal/serviceprotocol"
 )
 
 func readServiceStatus(t *testing.T, ch <-chan svc.Status) svc.Status {
@@ -96,6 +98,56 @@ func TestSCMFailedOrExpiredFactoryNeverReportsRunning(t *testing.T) {
 					t.Fatal("unready host reported running")
 				}
 			default:
+			}
+		})
+	}
+}
+
+func TestRecoveryServiceReportsOnlyBoundedSCMFailureStages(t *testing.T) {
+	internalErr := errors.New("private path or other internal information")
+	proofErr := fmt.Errorf("private error context: %w", &p.Error{Code: "RESTORE_PROOF_INCOMPLETE", Message: "private error content"})
+	cases := []struct {
+		name                string
+		factory, validation error
+		restoration         error
+		want                uint32
+	}{
+		{name: "factory failure", factory: internalErr, want: recoveryExitFactory},
+		{name: "validation failure", validation: internalErr, want: recoveryExitValidation},
+		{name: "unclassified restoration failure", restoration: internalErr, want: recoveryExitRestore},
+		{name: "unknown typed restoration failure", restoration: &p.Error{Code: "PRIVATE_CODE"}, want: recoveryExitRestore},
+		{name: "strict proof failure", restoration: proofErr, want: recoveryExitProof},
+		{name: "restoration timeout", restoration: context.DeadlineExceeded, want: recoveryExitRestoreTimed},
+		{name: "missing acknowledgement", want: recoveryExitAcknowledgement},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, recovery := range []bool{false, true} {
+				statuses := make(chan svc.Status, 8)
+				requests := make(chan svc.ChangeRequest, 1)
+				if !recovery {
+					requests <- svc.ChangeRequest{Cmd: svc.Stop}
+				}
+				h := serviceHandler{
+					factory:      func() (*Host, error) { return &Host{}, tc.factory },
+					validate:     func(*Host) error { return tc.validation },
+					restore:      func(context.Context, *Host) error { return tc.restoration },
+					recoveryOnly: recovery,
+				}
+				specific, code := h.Execute(nil, requests, statuses)
+				if recovery {
+					if !specific || code != tc.want || recoveryServiceExitStage(code) == "unknown" {
+						t.Fatalf("recovery returned (%v, %d), want a known SCM exit code %d", specific, code, tc.want)
+					}
+				} else {
+					want := uint32(1)
+					if tc.want == recoveryExitAcknowledgement {
+						want = 0 // The main service does not write a recovery acknowledgement.
+					}
+					if specific || code != want {
+						t.Fatalf("main service returned (%v, %d), want (false, %d)", specific, code, want)
+					}
+				}
 			}
 		})
 	}

@@ -166,8 +166,12 @@ func PrepareServiceRun(in ServicePrepareInput, rt ServiceRuntime) (ServicePrepar
 	if err = securefile.Bytes(filepath.Join(run, "netlaunch.exe"), rt.Lifecycle); err != nil {
 		return ServicePrepared{}, err
 	}
+	runtimeRoot := filepath.Join(run, "runtime")
+	if err = securefile.Dir(runtimeRoot); err != nil {
+		return ServicePrepared{}, err
+	}
 	for _, entry := range rt.Manifest.Files {
-		path := filepath.Join(run, "runtime", filepath.FromSlash(entry.Path))
+		path := filepath.Join(runtimeRoot, filepath.FromSlash(entry.Path))
 		if err = securefile.Dir(filepath.Dir(path)); err != nil {
 			return ServicePrepared{}, err
 		}
@@ -175,10 +179,10 @@ func PrepareServiceRun(in ServicePrepareInput, rt ServiceRuntime) (ServicePrepar
 			return ServicePrepared{}, err
 		}
 	}
-	if err = securefile.Write(filepath.Join(run, "runtime", "manifest.json"), rt.Manifest); err != nil {
+	if err = securefile.Write(filepath.Join(runtimeRoot, "manifest.json"), rt.Manifest); err != nil {
 		return ServicePrepared{}, err
 	}
-	if _, err = runtimebundle.Verify(filepath.Join(run, "runtime")); err != nil {
+	if _, err = runtimebundle.Verify(runtimeRoot); err != nil {
 		return ServicePrepared{}, err
 	}
 	pending := in.Channels.Company

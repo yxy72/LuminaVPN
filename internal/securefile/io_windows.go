@@ -31,11 +31,24 @@ func ProfilePath() (string, error) {
 }
 
 func Dir(path string) error {
+	user, e := currentSID()
+	if e != nil {
+		return e
+	}
+	return dirAs(path, user, ProfilePath, privateDirAs)
+}
+
+func dirAs(path, user string, profilePath func() (string, error), makePrivate func(string, string) error) error {
 	p, e := cleanPath(path)
 	if e != nil {
 		return e
 	}
-	root, e := ProfilePath()
+	// Service-owned paths use the same protected-parent checks without
+	// resolving a desktop profile for the LocalSystem token.
+	if user == "S-1-5-18" {
+		return makePrivate(p, user)
+	}
+	root, e := profilePath()
 	if e != nil {
 		return e
 	}
@@ -44,11 +57,11 @@ func Dir(path string) error {
 		return e
 	}
 	if strings.HasPrefix(strings.ToLower(p), strings.ToLower(root)+`\`) {
-		if e = Dir(filepath.Dir(p)); e != nil {
+		if e = dirAs(filepath.Dir(p), user, profilePath, makePrivate); e != nil {
 			return e
 		}
 	}
-	return PrivateDir(p)
+	return makePrivate(p, user)
 }
 func CheckDir(path string) error { return CheckPrivate(path, true) }
 

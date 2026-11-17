@@ -5,6 +5,7 @@ package winservice
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -276,20 +277,24 @@ func fixedService(name string) (*mgr.Mgr, *mgr.Service, error) {
 	return manager, service, nil
 }
 func waitService(ctx context.Context, service *mgr.Service, state svc.State) error {
+	status, err := waitServiceState(ctx, service.Query, state)
+	if err == nil && state == svc.Stopped && (status.Win32ExitCode != 0 || status.ServiceSpecificExitCode != 0) {
+		return errors.New("SCM operation failed")
+	}
+	return err
+}
+func waitServiceState(ctx context.Context, query func() (svc.Status, error), state svc.State) (svc.Status, error) {
 	for {
-		status, err := service.Query()
+		status, err := query()
 		if err != nil {
-			return err
+			return svc.Status{}, err
 		}
 		if status.State == state {
-			if state == svc.Stopped && (status.Win32ExitCode != 0 || status.ServiceSpecificExitCode != 0) {
-				return errors.New("SCM operation failed")
-			}
-			return nil
+			return status, nil
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return svc.Status{}, ctx.Err()
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
@@ -387,41 +392,73 @@ func (s *windowsInstallSystem) RecoverExact(ctx context.Context) error {
 	if err = service.Start(nonce); err != nil {
 		return err
 	}
-	files := installedStateFiles{root: s.root}
-	for {
-		data, readErr := files.Read("recovery-ack.json")
-		if readErr == nil {
-			var acknowledgement recoveryAcknowledgement
-			if decodeState(data, &acknowledgement) == nil && acknowledgement.Version == 1 && acknowledgement.Nonce == nonce && acknowledgement.ProfileID == s.control.ProfileID && acknowledgement.Clean {
-				bindingData, err := files.Read(filepath.Join("bindings", s.control.ProfileID+".json"))
-				if err != nil {
-					return err
-				}
-				var binding Binding
-				if decodeState(bindingData, &binding) != nil || binding.RunRef != "" || binding.LastRestorationID != acknowledgement.RestorationID {
-					return errors.New("recovery acknowledgement has no matching publication")
-				}
-				receipt, err := readRestoration(files, binding.LastRestorationID)
-				if err != nil || !sameEnrollment(receipt.Enrollment, binding) {
-					return errors.New("recovery acknowledgement lacks strict proof")
-				}
-				if err = waitService(ctx, service, svc.Stopped); err != nil {
-					return err
-				}
-				s.binding = binding
-				s.recoveryNonce = nonce
-				return nil
-			}
-		}
-		if readErr != nil && !errors.Is(readErr, errProtectedStateMissing) {
-			return readErr
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(100 * time.Millisecond):
-		}
+	binding, err := waitForRecoveryResult(ctx, service.Query, installedStateFiles{root: s.root}, s.control.ProfileID, nonce)
+	if err != nil {
+		return err
 	}
+	s.binding = binding
+	s.recoveryNonce = nonce
+	return nil
+}
+
+type recoveryServiceFailure struct {
+	win32                  uint32
+	specific               uint32
+	missingAcknowledgement bool
+}
+
+func (e recoveryServiceFailure) Error() string {
+	if e.missingAcknowledgement {
+		return "Windows recovery service stopped without a current acknowledgement"
+	}
+	stage := "unknown"
+	if e.win32 == uint32(windows.ERROR_SERVICE_SPECIFIC_ERROR) {
+		stage = recoveryServiceExitStage(e.specific)
+	}
+	return fmt.Sprintf("Windows recovery service failed (stage=%s, win32=%d, service=%d)", stage, e.win32, e.specific)
+}
+
+// RecoveryCommandDiagnostic exposes only fixed text and numeric SCM exit codes.
+// Other command errors may contain protected paths or run identities.
+func RecoveryCommandDiagnostic(err error) string {
+	var failure recoveryServiceFailure
+	if errors.As(err, &failure) {
+		return failure.Error()
+	}
+	return ""
+}
+
+func waitForRecoveryResult(ctx context.Context, query func() (svc.Status, error), files protectedStateFiles, profileID, nonce string) (Binding, error) {
+	status, err := waitServiceState(ctx, query, svc.Stopped)
+	if err != nil {
+		return Binding{}, err
+	}
+	if status.Win32ExitCode != 0 || status.ServiceSpecificExitCode != 0 {
+		return Binding{}, recoveryServiceFailure{win32: status.Win32ExitCode, specific: status.ServiceSpecificExitCode}
+	}
+	// The recovery handler publishes its acknowledgement before it reports
+	// SERVICE_STOPPED. Reading afterwards also covers a fast start and exit.
+	data, err := files.Read("recovery-ack.json")
+	if err != nil && !errors.Is(err, errProtectedStateMissing) {
+		return Binding{}, err
+	}
+	var acknowledgement recoveryAcknowledgement
+	if err != nil || decodeState(data, &acknowledgement) != nil || acknowledgement.Version != 1 || acknowledgement.Nonce != nonce || acknowledgement.ProfileID != profileID || !acknowledgement.Clean {
+		return Binding{}, recoveryServiceFailure{missingAcknowledgement: true}
+	}
+	bindingData, err := files.Read(filepath.Join("bindings", profileID+".json"))
+	if err != nil {
+		return Binding{}, err
+	}
+	var binding Binding
+	if decodeState(bindingData, &binding) != nil || binding.RunRef != "" || binding.LastRestorationID != acknowledgement.RestorationID {
+		return Binding{}, errors.New("recovery acknowledgement has no matching publication")
+	}
+	receipt, err := readRestoration(files, binding.LastRestorationID)
+	if err != nil || !sameEnrollment(receipt.Enrollment, binding) {
+		return Binding{}, errors.New("recovery acknowledgement lacks strict proof")
+	}
+	return binding, nil
 }
 func (s *windowsInstallSystem) DeleteServices() error {
 	return s.deleteJournalServices()

@@ -100,9 +100,17 @@ func (c CLI) RunContext(ctx context.Context, args []string) error {
 	if args[0] == "config" || args[0] == "rules" {
 		return c.maintenance(args)
 	}
-	profile, e := DefaultProfile()
-	if e != nil {
-		return e
+	var profile string
+	switch args[0] {
+	case "_serve", "_run", "_watch", "_recover", "_recover-verified", "_hook", "_child":
+		// Frozen lifecycle processes use their bound run and may run as
+		// LocalSystem, which has no LuminaVPN desktop profile.
+	default:
+		var err error
+		profile, err = DefaultProfile()
+		if err != nil {
+			return err
+		}
 	}
 	executable, e := os.Executable()
 	if e != nil {

@@ -43,7 +43,13 @@ func main() {
 		}
 	}
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "The protected Windows service is unavailable.")
+		diagnostic := "The protected Windows service is unavailable."
+		if command == winservice.CommandRecover {
+			if recovery := winservice.RecoveryCommandDiagnostic(err); recovery != "" {
+				diagnostic = recovery
+			}
+		}
+		fmt.Fprintln(os.Stderr, diagnostic)
 		os.Exit(winservice.InstallerCommandExitCode(command, err))
 	}
 }

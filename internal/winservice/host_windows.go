@@ -5,10 +5,12 @@ package winservice
 import (
 	"context"
 	"errors"
-	"golang.org/x/sys/windows/svc"
 	"os"
 	"strings"
 	"time"
+
+	"golang.org/x/sys/windows/svc"
+	p "netlaunch/internal/serviceprotocol"
 )
 
 type Host struct {
@@ -61,6 +63,103 @@ func RunConfiguredRecoveryService(factory func() (*Host, error)) error {
 	return svc.Run(RecoveryServiceName, &serviceHandler{factory: factory, recoveryOnly: true})
 }
 
+// These service-specific SCM exit codes contain only fixed stages. Windows
+// records them even when the service exits before it can write protected state.
+const (
+	recoveryExitFactory              uint32 = 201
+	recoveryExitValidation           uint32 = 202
+	recoveryExitInitializationTimed  uint32 = 203
+	recoveryExitControlsClosed       uint32 = 204
+	recoveryExitRestore              uint32 = 205
+	recoveryExitRestoreTimed         uint32 = 206
+	recoveryExitAcknowledgement      uint32 = 207
+	recoveryExitOwnership            uint32 = 211
+	recoveryExitAccess               uint32 = 212
+	recoveryExitEnrollment           uint32 = 213
+	recoveryExitHelper               uint32 = 214
+	recoveryExitHelperResponse       uint32 = 215
+	recoveryExitProof                uint32 = 216
+	recoveryExitEmptyStateProof      uint32 = 217
+	recoveryExitPreparedIdentity     uint32 = 218
+	recoveryExitAuthenticationWorker uint32 = 219
+	recoveryExitUserWorker           uint32 = 220
+)
+
+func recoveryServiceExitStage(code uint32) string {
+	switch code {
+	case recoveryExitFactory:
+		return "host_factory"
+	case recoveryExitValidation:
+		return "host_validation"
+	case recoveryExitInitializationTimed:
+		return "initialization_timeout"
+	case recoveryExitControlsClosed:
+		return "controls_closed"
+	case recoveryExitRestore:
+		return "restoration"
+	case recoveryExitRestoreTimed:
+		return "restoration_timeout"
+	case recoveryExitAcknowledgement:
+		return "acknowledgement"
+	case recoveryExitOwnership:
+		return "restoration_ownership"
+	case recoveryExitAccess:
+		return "restoration_access"
+	case recoveryExitEnrollment:
+		return "restoration_enrollment"
+	case recoveryExitHelper:
+		return "restoration_helper"
+	case recoveryExitHelperResponse:
+		return "restoration_helper_response"
+	case recoveryExitProof:
+		return "restoration_proof"
+	case recoveryExitEmptyStateProof:
+		return "restoration_empty_state_proof"
+	case recoveryExitPreparedIdentity:
+		return "restoration_prepared_identity"
+	case recoveryExitAuthenticationWorker:
+		return "restoration_authentication_worker"
+	case recoveryExitUserWorker:
+		return "restoration_user_worker"
+	default:
+		return "unknown"
+	}
+}
+
+func recoveryRestoreExitCode(err error) uint32 {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return recoveryExitRestoreTimed
+	}
+	var failure *p.Error
+	if !errors.As(err, &failure) || failure == nil {
+		return recoveryExitRestore
+	}
+	switch failure.Code {
+	case "OWNERSHIP_UNAVAILABLE":
+		return recoveryExitOwnership
+	case "ACCESS_DENIED":
+		return recoveryExitAccess
+	case "ENROLLMENT_PERSISTENCE_FAILED":
+		return recoveryExitEnrollment
+	case "FIXED_HELPER_FAILED":
+		return recoveryExitHelper
+	case "INVALID_HELPER_RESPONSE":
+		return recoveryExitHelperResponse
+	case "RESTORE_INCOMPLETE", "RESTORE_PROOF_INCOMPLETE":
+		return recoveryExitProof
+	case "EMPTY_STATE_PROOF_UNAVAILABLE":
+		return recoveryExitEmptyStateProof
+	case "PREPARED_IDENTITY_UNAVAILABLE":
+		return recoveryExitPreparedIdentity
+	case "AUTH_WORKER_EXIT_UNCONFIRMED":
+		return recoveryExitAuthenticationWorker
+	case "USER_WORKER_EXIT_UNCONFIRMED":
+		return recoveryExitUserWorker
+	default:
+		return recoveryExitRestore
+	}
+}
+
 type serviceHandler struct {
 	factory      func() (*Host, error)
 	validate     func(*Host) error
@@ -69,6 +168,13 @@ type serviceHandler struct {
 	ticks        <-chan time.Time
 	initExpired  <-chan time.Time
 	recoveryOnly bool
+}
+
+func (h *serviceHandler) failure(recoveryCode uint32) (bool, uint32) {
+	if h.recoveryOnly {
+		return true, recoveryCode
+	}
+	return false, 1
 }
 
 func (h *serviceHandler) Execute(args []string, requests <-chan svc.ChangeRequest, status chan<- svc.Status) (bool, uint32) {
@@ -103,20 +209,25 @@ func (h *serviceHandler) Execute(args []string, requests <-chan svc.ChangeReques
 		restore = func(ctx context.Context, host *Host) error { return host.Broker.Shutdown(ctx) }
 	}
 	type prepared struct {
-		host *Host
-		err  error
+		host        *Host
+		failureCode uint32
 	}
 	preparedCh := make(chan prepared, 1)
 	go func() {
 		if h.factory == nil {
-			preparedCh <- prepared{err: errors.New("BACKEND_UNAVAILABLE")}
+			preparedCh <- prepared{failureCode: recoveryExitFactory}
 			return
 		}
 		host, err := h.factory()
-		if err == nil {
-			err = validate(host)
+		if err != nil {
+			preparedCh <- prepared{failureCode: recoveryExitFactory}
+			return
 		}
-		preparedCh <- prepared{host, err}
+		if err = validate(host); err != nil {
+			preparedCh <- prepared{failureCode: recoveryExitValidation}
+			return
+		}
+		preparedCh <- prepared{host: host}
 	}()
 	var host *Host
 	stopping := false
@@ -124,19 +235,19 @@ func (h *serviceHandler) Execute(args []string, requests <-chan svc.ChangeReques
 	for initializing {
 		select {
 		case result := <-preparedCh:
-			if result.err != nil {
-				return false, 1
+			if result.failureCode != 0 {
+				return h.failure(result.failureCode)
 			}
 			host = result.host
 			initializing = false
 		case <-expired:
-			return false, 1
+			return h.failure(recoveryExitInitializationTimed)
 		case <-ticks:
 			current.CheckPoint++
 			status <- current
 		case request, ok := <-requests:
 			if !ok {
-				return false, 1
+				return h.failure(recoveryExitControlsClosed)
 			}
 			switch request.Cmd {
 			case svc.Stop, svc.Shutdown:
@@ -156,7 +267,7 @@ func (h *serviceHandler) Execute(args []string, requests <-chan svc.ChangeReques
 		select {
 		case request, ok := <-requests:
 			if !ok {
-				return false, 1
+				return h.failure(recoveryExitControlsClosed)
 			}
 			if request.Cmd == svc.Stop || request.Cmd == svc.Shutdown {
 				stopping = true
@@ -177,22 +288,25 @@ func (h *serviceHandler) Execute(args []string, requests <-chan svc.ChangeReques
 			case err := <-restored:
 				cancel()
 				if err != nil {
+					if h.recoveryOnly {
+						return true, recoveryRestoreExitCode(err)
+					}
 					return false, 1
 				}
 				if h.recoveryOnly && writeRecoveryAcknowledgement(host, args) != nil {
-					return false, 1
+					return h.failure(recoveryExitAcknowledgement)
 				}
 				return false, 0
 			case <-restoreCtx.Done():
 				cancel()
-				return false, 1
+				return h.failure(recoveryExitRestoreTimed)
 			case <-ticks:
 				current.CheckPoint++
 				status <- current
 			case request, ok := <-requests:
 				if !ok {
 					cancel()
-					return false, 1
+					return h.failure(recoveryExitControlsClosed)
 				}
 				if request.Cmd == svc.Interrogate {
 					status <- current

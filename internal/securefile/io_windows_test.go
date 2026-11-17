@@ -4,6 +4,7 @@ package securefile
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -12,6 +13,25 @@ import (
 	"sync"
 	"testing"
 )
+
+func TestLocalSystemDirectoryDoesNotResolveDesktopProfile(t *testing.T) {
+	path := `C:\ProgramData\LuminaVPN\ServiceState\runs\example`
+	profileError := errors.New("native desktop user SID required")
+	resolveProfile := func() (string, error) { return "", profileError }
+	privateError := errors.New("private parent rejected")
+	makePrivate := func(got, sid string) error {
+		if got != path || sid != "S-1-5-18" {
+			t.Fatalf("unexpected private directory request: %s %s", got, sid)
+		}
+		return privateError
+	}
+	if err := dirAs(path, "S-1-5-18", resolveProfile, makePrivate); !errors.Is(err, privateError) {
+		t.Fatalf("LocalSystem did not reach protected directory checks: %v", err)
+	}
+	if err := dirAs(path, "S-1-5-21-1", resolveProfile, makePrivate); !errors.Is(err, profileError) {
+		t.Fatalf("a desktop profile error was ignored: %v", err)
+	}
+}
 
 func TestAtomicRenameVariablePathLengths(t *testing.T) {
 	dir := filepath.Join(tree(t), "rename")
