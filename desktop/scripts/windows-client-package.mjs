@@ -101,6 +101,25 @@ export function installerInclude(releaseID, { bootstrapSource, bootstrapSHA256, 
   StrCpy $oldStartMenuLink "$SMPROGRAMS\\LuminaVPN.lnk"
   StrCpy $newStartMenuLink "$SMPROGRAMS\\LuminaVPN.lnk"
 !macroend
+!macro customCheckAppRunning
+  ; The builder's default check can stop every process under the install root,
+  ; including the fixed service and an old uninstaller running in place.
+  \${nsProcess::FindProcess} "LuminaVPN.exe" $R0
+  \${If} $R0 == 0
+    DetailPrint "Close LuminaVPN before starting installation or removal."
+    \${IfNot} \${Silent}
+      MessageBox MB_OK|MB_ICONEXCLAMATION "Close LuminaVPN before starting installation or removal."
+    \${EndIf}
+    SetErrorLevel 27
+    Quit
+  \${EndIf}
+  \${If} $R0 != 603 ; nsProcess explicitly found no matching process.
+    DetailPrint "Could not verify that LuminaVPN is closed."
+    SetErrorLevel 28
+    Quit
+  \${EndIf}
+  ClearErrors
+!macroend
 !macro customInit
   \${IfNot} \${RunningX64}
     SetErrorLevel 20
@@ -160,8 +179,15 @@ export function installerInclude(releaseID, { bootstrapSource, bootstrapSHA256, 
     Quit
   \${EndIf}
   \${If} $R0 != 0
-    DetailPrint "The previous uninstaller did not confirm recovery; upgrade stopped."
-    SetErrorLevel 25
+    DetailPrint "The previous uninstaller did not confirm recovery (exit $R0); upgrade stopped."
+    \${If} $R0 >= 120
+    \${AndIf} $R0 <= 138
+      ; Separate the old helper's fixed native stage from this package's own.
+      IntOp $R0 $R0 + 100
+      SetErrorLevel $R0
+    \${Else}
+      SetErrorLevel 25
+    \${EndIf}
     Quit
   \${EndIf}
 !macroend
@@ -261,7 +287,8 @@ export function restrictWindowsUninstallUtilities(source) {
   IfFileExists "$PROGRAMFILES64\\LuminaVPN\\Uninstall LuminaVPN.exe" 0 lumina_no_old_uninstaller
   ; Legacy in-place uninstallers cannot atomically rename their own image.
   ; These fixed Lumina packages disable DELETE_APP_DATA_ON_UNINSTALL.
-  ExecWait '"$PROGRAMFILES64\\LuminaVPN\\Uninstall LuminaVPN.exe" /S /KEEP_APP_DATA /allusers --keep-shortcuts _?=$PROGRAMFILES64\\LuminaVPN' $R0
+  !insertmacro customCheckAppRunning
+  Call LuminaRunPreviousUninstaller
   lumina_no_old_uninstaller:
   \${If} \${Errors}
     StrCpy $R0 2
@@ -272,6 +299,81 @@ export function restrictWindowsUninstallUtilities(source) {
     Return
   \${EndIf}
   Call LuminaCheckUpgradeRemainder
+FunctionEnd
+
+Function LuminaRunPreviousUninstaller
+  Push $0
+  Push $1
+  Push $2
+  Push $3
+  Push $4
+  ; Preserve the exact inherited process value. A null pointer represents an
+  ; absent variable, not an existing empty value. No persistent policy is set.
+  StrCpy $3 0
+  System::Call '$SYSDIR\\kernel32.dll::GetEnvironmentVariableW(w "PSExecutionPolicyPreference", p 0, i 0)i.r1 ?e'
+  Pop $2
+  \${If} $1 == 0
+    \${If} $2 != 203 ; ERROR_ENVVAR_NOT_FOUND
+      Goto lumina_previous_environment_failed
+    \${EndIf}
+  \${Else}
+    \${If} $1 > 32768
+      Goto lumina_previous_environment_failed
+    \${EndIf}
+    IntOp $0 $1 * 2
+    System::Alloc $0
+    Pop $3
+    \${If} $3 == 0
+      Goto lumina_previous_environment_failed
+    \${EndIf}
+    System::Call '$SYSDIR\\kernel32.dll::SetLastError(i 0)'
+    System::Call '$SYSDIR\\kernel32.dll::GetEnvironmentVariableW(w "PSExecutionPolicyPreference", p $3, i r1)i.r2 ?e'
+    Pop $4
+    IntOp $0 $1 - 1 ; Successful read excludes the terminating null.
+    \${If} $2 != $0
+      Goto lumina_previous_environment_failed
+    \${EndIf}
+    \${If} $2 == 0
+    \${AndIf} $4 != 0
+      Goto lumina_previous_environment_failed
+    \${EndIf}
+  \${EndIf}
+  ; Released uninstallers already select their exact-name fallback for this
+  ; process preference. A path-prefix check could terminate the child itself.
+  System::Call '$SYSDIR\\kernel32.dll::SetEnvironmentVariableW(w "PSExecutionPolicyPreference", w "Restricted")i.r2'
+  \${If} $2 == 0
+    Goto lumina_previous_environment_failed
+  \${EndIf}
+  StrCpy $4 0
+  ClearErrors
+  ExecWait '"$PROGRAMFILES64\\LuminaVPN\\Uninstall LuminaVPN.exe" /S /KEEP_APP_DATA /allusers --keep-shortcuts _?=$PROGRAMFILES64\\LuminaVPN' $R0
+  IfErrors 0 +2
+  StrCpy $4 1
+  System::Call '$SYSDIR\\kernel32.dll::SetEnvironmentVariableW(w "PSExecutionPolicyPreference", p $3)i.r2'
+  \${If} $2 == 0
+    Goto lumina_previous_environment_failed
+  \${EndIf}
+  \${If} $3 != 0
+    System::Free $3
+  \${EndIf}
+  \${If} $4 == 0
+    ClearErrors
+  \${Else}
+    SetErrors
+  \${EndIf}
+  Pop $4
+  Pop $3
+  Pop $2
+  Pop $1
+  Pop $0
+  Return
+  lumina_previous_environment_failed:
+  \${If} $3 != 0
+    System::Free $3
+  \${EndIf}
+  DetailPrint "Could not preserve the previous uninstaller's process environment; upgrade stopped."
+  SetErrorLevel 29
+  Quit
 FunctionEnd
 
 Function LuminaCheckUpgradeRemainder

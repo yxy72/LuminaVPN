@@ -100,6 +100,7 @@ test('generated installer retains files unless the fixed recovery verb succeeds'
   assert.match(include, /!macro customInit[\s\S]*Call LuminaPrepareBootstrap[\s\S]*--print-install-plan[\s\S]*PREFLIGHT_REJECTED[\s\S]*!macroend/)
   assert.ok(!include.includes('RMDir') && !include.includes('Delete '))
   assert.match(include, /!macro LuminaRequireUninstallSuccess[\s\S]*\$\{Errors\}[\s\S]*SetErrorLevel 24[\s\S]*Quit[\s\S]*\$R0 != 0[\s\S]*SetErrorLevel 25/)
+  assert.match(include, /\$R0 >= 120\s+\$\{AndIf\} \$R0 <= 138[\s\S]*?IntOp \$R0 \$R0 \+ 100\s+SetErrorLevel \$R0\s+\$\{Else\}\s+SetErrorLevel 25/)
   for (const invalid of ['../escape', 'x'.repeat(64), 'a'.repeat(63)]) {
     assert.throws(() => installerInclude(invalid)); assert.throws(() => recoveryEntry(invalid))
   }
@@ -121,10 +122,10 @@ test('silent installer failures have distinct bounded native and NSIS stage code
   }
   const staticCodes = [...owners.keys()].map(Number)
   const directCodes = [...include.matchAll(/SetErrorLevel (\d+)/g)].map(m => Number(m[1]))
-  assert.deepEqual(directCodes, [20, 21, 22, 23, 24, 25])
+  assert.deepEqual(directCodes, [27, 28, 20, 21, 22, 23, 24, 25])
   const directoryCodes = [...source.matchAll(/StrCpy \$LuminaDirectoryFailureBase (\d+)/g)].flatMap(m => [Number(m[1]), Number(m[1]) + 1])
   assert.deepEqual(directoryCodes, [55, 56, 61, 62, 57, 58, 59, 60])
-  const allCodes = [...staticCodes, ...directCodes, ...directoryCodes, 26]
+  const allCodes = [...staticCodes, ...directCodes, ...directoryCodes, 26, 29]
   assert.equal(new Set(allCodes).size, allCodes.length)
   assert.ok(allCodes.every(code => code >= 20 && code <= 99))
   assert.match(source, /Call \$\{P\}LuminaCloseBootstrap[\s\S]*SetErrorLevel \$LuminaFailureCode\s+Quit/)
@@ -197,11 +198,18 @@ test('fixed registry claims bracket legacy uninstall and registration without mu
   const old = /^Function uninstallOldVersion\n([\s\S]*?)^FunctionEnd$/m.exec(utility)?.[1]
   assert.ok(old && !/ReadReg|readReg|PLUGINSDIR|CopyFiles|copyFile/.test(old))
   assert.ok(!/GetInQuotes|GetFileParent/.test(utility), 'unused registry command parsers must not survive the native warning gate')
-  assert.deepEqual([...old.matchAll(/ExecWait '([^'\r\n]+)'/g)].map(match => match[1]),
+  const previous = /^Function LuminaRunPreviousUninstaller\n([\s\S]*?)^FunctionEnd$/m.exec(utility)?.[1]
+  assert.ok(previous && !/ReadReg|readReg|PLUGINSDIR|CopyFiles|copyFile|nsExec|cmd\.exe/.test(previous))
+  assert.deepEqual([...previous.matchAll(/ExecWait '([^'\r\n]+)'/g)].map(match => match[1]),
     ['"$PROGRAMFILES64\\LuminaVPN\\Uninstall LuminaVPN.exe" /S /KEEP_APP_DATA /allusers --keep-shortcuts _?=$PROGRAMFILES64\\LuminaVPN'])
-  assert.ok(old.indexOf('ExecWait') < old.indexOf('Call LuminaCheckUpgradeRemainder'))
+  assert.match(old, /IfFileExists[^\n]*\s+;[^\n]*\s+;[^\n]*\s+!insertmacro customCheckAppRunning\s+Call LuminaRunPreviousUninstaller/)
+  assert.ok(old.indexOf('Call LuminaRunPreviousUninstaller') < old.indexOf('Call LuminaCheckUpgradeRemainder'))
   assert.match(old, /\$\{Errors\}\s+StrCpy \$R0 2\s+SetErrors\s+Return/)
   assert.match(old, /\$R0 != 0\s+Return[\s\S]*Call LuminaCheckUpgradeRemainder/)
+  assert.match(previous, /StrCpy \$3 0[\s\S]*?GetEnvironmentVariableW\(w "PSExecutionPolicyPreference", p 0, i 0\)[^\n]*\?e'\s+Pop \$2\s+\$\{If\} \$1 == 0\s+\$\{If\} \$2 != 203/)
+  assert.match(previous, /IntOp \$0 \$1 \* 2\s+System::Alloc \$0\s+Pop \$3[\s\S]*?GetEnvironmentVariableW\(w "PSExecutionPolicyPreference", p \$3, i r1\)[\s\S]*?IntOp \$0 \$1 - 1/)
+  assert.match(previous, /SetEnvironmentVariableW\(w "PSExecutionPolicyPreference", w "Restricted"\)[\s\S]*?ExecWait[^\n]+\s+IfErrors 0 \+2\s+StrCpy \$4 1\s+System::Call '[^'\n]+SetEnvironmentVariableW\(w "PSExecutionPolicyPreference", p \$3\)/)
+  assert.match(previous, /\$\{If\} \$4 == 0\s+ClearErrors\s+\$\{Else\}\s+SetErrors[\s\S]*?lumina_previous_environment_failed:[\s\S]*?SetErrorLevel 29\s+Quit/)
   const remainder = /^Function LuminaCheckUpgradeRemainder\n([\s\S]*?)^FunctionEnd$/m.exec(utility)?.[1]
   assert.ok(remainder && !/^\s*(?:Exec|RMDir|Delete|CopyFiles|ReadReg)/m.test(remainder))
   assert.ok(remainder.includes('IntOp $0 $0 & 0x410') && remainder.includes('IntOp $2 $2 & 0x410'))
@@ -220,6 +228,23 @@ test('fixed registry claims bracket legacy uninstall and registration without mu
   assert.throws(() => restrictWindowsUninstallUtilities(utilitySource.replace('Function uninstallOldVersion', 'Function unknown')), /changed/)
   assert.throws(() => restrictWindowsUninstaller(uninstallerSource.replace('MenuDirectory', 'UnknownDirectory')), /changed/)
   assert.throws(() => restrictWindowsUninstaller(uninstallerSource.replace('"${UNINSTALL_FILENAME}" 0 +2', '"changed" 0 +2')), /changed/)
+})
+
+test('the pinned NSIS install and uninstall templates use a non-terminating exact-name GUI guard', async t => {
+  const f = await fixture(t), prepared = await prepareWindowsClientPackage(f)
+  const templateRoot = join(dirname(createRequire(import.meta.url).resolve('app-builder-lib/package.json')), 'templates/nsis')
+  const checkTemplate = await readFile(join(templateRoot, 'include/allowOnlyOneInstallerInstance.nsh'), 'utf8')
+  const install = await readFile(join(prepared.outputRoot, 'nsis-overrides/installSection.nsh'), 'utf8')
+  const uninstall = await readFile(join(prepared.outputRoot, 'nsis-overrides/uninstaller.nsh'), 'utf8')
+  const include = await readFile(prepared.includePath, 'utf8')
+  const guard = /^!macro customCheckAppRunning\n([\s\S]*?)^!macroend$/m.exec(include)?.[1]
+  assert.ok(guard)
+  assert.match(checkTemplate, /!macro CHECK_APP_RUNNING[\s\S]*?!ifmacrodef customCheckAppRunning\s+!insertmacro customCheckAppRunning\s+!else\s+!insertmacro IS_POWERSHELL_AVAILABLE\s+!insertmacro _CHECK_APP_RUNNING/)
+  assert.ok(install.indexOf('!insertmacro CHECK_APP_RUNNING') < install.indexOf('!insertmacro uninstallOldVersion SHELL_CONTEXT'))
+  assert.ok(uninstall.indexOf('!insertmacro CHECK_APP_RUNNING') < uninstall.indexOf('!insertmacro customUnInstall\n'))
+  assert.match(guard, /\$\{nsProcess::FindProcess\} "LuminaVPN\.exe" \$R0\s+\$\{If\} \$R0 == 0[\s\S]*?SetErrorLevel 27\s+Quit/)
+  assert.match(guard, /\$\{If\} \$R0 != 603[^\n]*\s+DetailPrint[^\n]+\s+SetErrorLevel 28\s+Quit/)
+  assert.doesNotMatch(guard, /(?:KillProcess|CloseProcess|taskkill|Stop-Process|nsExec|ExecWait)/)
 })
 
 test('protected bootstrap source uses exclusive files and locks the verified image through the fixed action', async () => {
