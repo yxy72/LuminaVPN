@@ -43,17 +43,20 @@ func TestNodeControlCannotUseBusinessNamesOrResolver(t *testing.T) {
 }
 func TestMixedSubscriptionReportsEveryOmission(t *testing.T) {
 	data := []byte(`proxies:
-- {type: vless, server: node.example.com, port: 443, uuid: private-value, tls: true, dialer-proxy: CORP}
+- {name: "🇸🇬 provider-private-label", type: vless, server: node.example.com, port: 443, uuid: private-value, tls: true, dialer-proxy: CORP}
 - {type: hysteria2, server: node2.example.com, port: 443, password: private-value, skip-cert-verify: true}
-- {type: ss, server: 203.0.113.7, port: 443, password: private-value}
-- {type: vless, server: 203.0.113.8, port: 443, uuid: private-value, tls: true}
+- {name: "🇯🇵 unsupported", type: ss, server: 203.0.113.7, port: 443, password: private-value}
+- {name: "🇺🇸 provider-private-label", type: vless, server: 203.0.113.8, port: 443, uuid: private-value, tls: true}
 `)
-	n, issues, e := ImportSupportedNodes(data)
+	n, issues, regions, e := ImportSupportedNodeInventory(data)
 	if e != nil {
 		t.Fatal(e)
 	}
 	if len(n) != 2 || len(issues) != 2 || issues[0].Index != 2 || issues[1].Index != 3 || n[1]["name"] != "P002" {
 		t.Fatal("mixed import accounting differs")
+	}
+	if len(regions) != 2 || regions[0] != "SG" || regions[1] != "US" || n[0]["name"] != "P001" {
+		t.Fatal("node regions diverged from normalized inventory")
 	}
 	if _, ok := n[0]["dialer-proxy"]; ok {
 		t.Fatal("inherited routing chain")

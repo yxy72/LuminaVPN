@@ -100,7 +100,7 @@ async function checkWindowsTrayLifecycle(application: ElectronApplication, page:
   // single-instance message restores the existing window and bridge session.
   execFileSync(executable, ['--user-data-dir=' + userData], { env, windowsHide: true, timeout: 8000, stdio: 'pipe' })
   await expect.poll(() => application.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().map(window => ({ id: window.id, visible: window.isVisible() })))).toEqual([{ id: original[0], visible: true }])
-  await expect(page.getByText('控制接口可用', { exact: true }).first()).toBeVisible()
+  await expect(page.getByText('控制接口可用', { exact: true }).or(page.locator('summary[aria-label="工作空间状态"]')).first()).toBeVisible()
   expect((await page.evaluate(() => window.lumina.hello())).session_id).toBe(session)
   expect(processExists(bridgePID)).toBe(true)
 }
@@ -113,7 +113,10 @@ test('desktop reads real fixtures, protects IPC and ages evidence', async () => 
   const policy = JSON.parse(await readFile(resolve('../examples/policy.json'), 'utf8'))
   policy.personal_rules = Array.from({ length: 151 }, (_, i) => ({ type: 'DOMAIN', value: `fixture-${i}.example.org`, target: 'personal' }))
   await writeFile(join(profile, 'policy.json'), JSON.stringify(policy), { mode: 0o600 })
-  await writeFile(join(profile, 'nodes.json'), JSON.stringify([{ type: 'vless', server: '203.0.113.77', port: 443, uuid: 'desktop-secret-canary', tls: true }]), { mode: 0o600 })
+  const fixtureNodes = Array.from({ length: 46 }, (_, index) => ({
+    type: 'vless', server: `203.0.113.${77 + index}`, port: 443, uuid: 'desktop-secret-canary', tls: true,
+  }))
+  await writeFile(join(profile, 'nodes.json'), JSON.stringify(fixtureNodes), { mode: 0o600 })
   await protectFixtureObjects(root, [root, profile, join(profile, 'policy.json'), join(profile, 'nodes.json')])
   await writeFile(join(userData, 'preferences.json'), JSON.stringify({ profile, closeNoticeSeen: true }))
   const env: Record<string, string> = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)); delete env.ELECTRON_RUN_AS_NODE; delete env.NODE_OPTIONS
@@ -123,7 +126,7 @@ test('desktop reads real fixtures, protects IPC and ages evidence', async () => 
     await application.context().route(/^https?:\/\//, route => route.abort())
     const page = await application.firstWindow(), errors: string[] = []
     page.on('pageerror', error => errors.push(error.message))
-    await expect(page.getByText('控制接口可用', { exact: true }).first()).toBeVisible()
+    await expect(page.getByText('控制接口可用', { exact: true }).or(page.locator('summary[aria-label="工作空间状态"]')).first()).toBeVisible()
     expect(await page.evaluate(() => typeof (window as any).require)).toBe('undefined')
     const { capabilities } = await page.evaluate(() => window.lumina.hello())
     const macWorkspace = process.platform === 'darwin'
@@ -158,6 +161,7 @@ test('desktop reads real fixtures, protects IPC and ages evidence', async () => 
         } catch (error) { return error instanceof Error ? error.message : String(error) }
       }, snapshot)
       expect(denied).toBe('CLIENT_UNAVAILABLE')
+      await page.getByText('连接选项', { exact: true }).click()
       await page.getByLabel('运行模式').selectOption('validation')
       await page.getByLabel('验证时长（秒）').fill('2701')
       await expect(connect).toBeDisabled()
@@ -168,8 +172,27 @@ test('desktop reads real fixtures, protects IPC and ages evidence', async () => 
     } else {
       await expect(connect).toBeDisabled()
     }
+    if (macWorkspace) {
+      const status = page.locator('summary[aria-label="工作空间状态"]')
+      await expect(status).toHaveCount(1)
+      await status.click()
+      await expect(page.getByRole('button', { name: '刷新工作空间', exact: true })).toBeVisible()
+      await status.press('Escape')
+      await expect(page.getByRole('button', { name: '刷新工作空间', exact: true })).toHaveCount(0)
+      await page.screenshot({ path: join(root, 'overview-compact.png') })
+    }
     await page.getByRole('button', { name: /代理节点/ }).click()
     await expect(page.getByText('P001', { exact: true }).first()).toBeVisible()
+    if (macWorkspace) {
+      const inventory = page.getByRole('region', { name: '本机节点库存' })
+      expect(await inventory.evaluate(element => element.scrollHeight > element.clientHeight)).toBe(true)
+      const search = page.getByRole('searchbox', { name: '搜索本页节点' })
+      await search.fill('P046')
+      await expect(inventory.getByText('P046')).toBeVisible()
+      await expect(inventory.getByText('P001')).toHaveCount(0)
+      await search.clear()
+      await page.screenshot({ path: join(root, 'node-inventory.png') })
+    }
     expect(await page.evaluate(() => document.body.innerText)).not.toContain('desktop-secret-canary')
     expect(await page.evaluate(() => document.body.innerText)).not.toContain('203.0.113.77')
     const config = await page.evaluate(() => window.lumina.getConfig({ offset: 100, limit: 100 }))
@@ -177,14 +200,31 @@ test('desktop reads real fixtures, protects IPC and ages evidence', async () => 
     await page.getByRole('button', { name: /分流规则/ }).click()
     await expect(page.getByRole('heading', { level: 1, name: macWorkspace ? '白名单与覆盖规则' : '每个目的地，都有自己的路。' })).toBeVisible()
     if (macWorkspace) {
-      const draft = page.getByLabel('高级策略 JSON')
-      await expect(draft).toHaveValue(/fixture-0\.example\.org/)
-      const edited = { ...policy, ports: { ...policy.ports, proxy: 19090 } }
-      await draft.fill(JSON.stringify(edited))
-      await page.getByRole('button', { name: '应用配置', exact: true }).click()
-      await expect(page.getByText(/配置操作已完成/)).toBeVisible()
-      expect(JSON.parse(await readFile(join(profile, 'policy.json'), 'utf8')).ports.proxy).toBe(19090)
+      const companyDomains = page.getByLabel(/公司精确域名/)
+      const original = await companyDomains.inputValue()
+      await companyDomains.evaluate((field: HTMLTextAreaElement) => { field.focus(); field.setSelectionRange(field.value.length, field.value.length) })
+      await companyDomains.press('Enter')
+      await expect(companyDomains).toHaveValue(original + '\n')
+      await companyDomains.fill(original + '\nextra.corp.example.com')
+      const save = page.getByRole('button', { name: '保存配置', exact: true })
+      await expect(save).toBeEnabled()
+      expect(JSON.parse(await readFile(join(profile, 'policy.json'), 'utf8')).company.domains).not.toContain('extra.corp.example.com')
+      await save.click()
+      await expect(page.getByText('配置操作已完成。下次连接使用已保存的规则。')).toBeVisible()
+      expect(JSON.parse(await readFile(join(profile, 'policy.json'), 'utf8')).company.domains).toContain('extra.corp.example.com')
+      await page.screenshot({ path: join(root, 'whitelist-editor.png') })
+      const rules = page.getByRole('region', { name: '已保存规则列表' })
+      expect(await rules.evaluate(element => element.scrollHeight > element.clientHeight)).toBe(true)
       await page.getByRole('button', { name: '工作空间设置', exact: true }).click()
+      await page.getByText('高级策略与版本历史', { exact: true }).click()
+      const draft = page.getByLabel('高级策略 JSON')
+      await expect(draft).toHaveValue(/extra\.corp\.example\.com/)
+      const edited = JSON.parse(await draft.inputValue())
+      edited.ports.proxy = 19090
+      await draft.fill(JSON.stringify(edited))
+      await save.click()
+      await expect(page.getByText('配置操作已完成。下次连接使用已保存的规则。')).toBeVisible()
+      expect(JSON.parse(await readFile(join(profile, 'policy.json'), 'utf8')).ports.proxy).toBe(19090)
       await expect(page.getByRole('button', { name: '选择本机配置目录', exact: true })).toBeVisible()
       await expect(page.getByRole('button', { name: '恢复默认配置目录', exact: true })).toHaveCount(0)
     }
@@ -203,8 +243,18 @@ test('desktop reads real fixtures, protects IPC and ages evidence', async () => 
     savedFixture = true
     await protectFixtureObjects(root, [run, join(run, 'status.json'), join(profile, 'current.json')])
     await page.getByRole('button', { name: /^总览/ }).click()
-    await expect(page.getByRole('heading', { name: '最近检查已通过' })).toBeVisible()
-    expect(await page.evaluate(() => window.lumina.listNodes())).toMatchObject({ selection_scope: 'not_compared', items: [{ selected: false }] })
+    if (macClient) {
+      await expect(page.getByRole('heading', { name: '网络接管' })).toBeVisible()
+      await expect(page.getByRole('heading', { name: '最近检查已通过' })).toHaveCount(0)
+      await page.getByRole('button', { name: /诊断与恢复/ }).click()
+      await page.getByText('本机保存的探针记录', { exact: true }).click()
+    } else {
+      await expect(page.getByRole('heading', { name: '最近检查已通过' })).toBeVisible()
+    }
+    const inventory = await page.evaluate(() => window.lumina.listNodes())
+    expect(inventory.selection_scope).toBe('not_compared')
+    expect(inventory.items).toHaveLength(46)
+    expect(inventory.items.every(node => !node.selected)).toBe(true)
     const switchResult = await page.evaluate(async () => { try { await window.lumina.chooseProfile(); return 'unexpected' } catch { return 'blocked' } })
     expect(switchResult).toBe('blocked')
     await page.clock.install({ time: new Date(now) }); await page.clock.fastForward(91000)
@@ -447,7 +497,9 @@ test('macOS switches only Company on the bound run and can interrupt it to resto
     await expect(stop).toBeEnabled()
     await writeFile(join(root, 'apply-company'), '')
     await expect(company).toBeChecked()
+    await page.locator('summary[aria-label="工作空间状态"]').click()
     await expect(page.getByText('公司 VPN 设置已应用到本次运行。')).toBeVisible()
+    await page.locator('summary[aria-label="工作空间状态"]').press('Escape')
     await expect(personal).toBeDisabled()
     await expect(auth).toBeEnabled()
 
@@ -457,7 +509,7 @@ test('macOS switches only Company on the bound run and can interrupt it to resto
     await writeFile(join(root, 'apply-company'), '')
     await expect(company).not.toBeChecked()
     await expect(auth).toBeDisabled()
-    await expect(page.getByText(/公司：报告已阻断/)).toBeVisible()
+    await expect(page.getByRole('list', { name: '三路出口' }).getByRole('listitem').filter({ hasText: '公司 VPN' })).toContainText('报告已阻断')
     await company.click()
     await expect(company).toBeDisabled()
     await writeFile(join(root, 'apply-company'), '')
@@ -512,11 +564,12 @@ test('macOS switches Personal on the bound run started with both channels off', 
     const personal = page.getByRole('checkbox', { name: '开启个人代理', exact: true })
     const connect = page.getByRole('button', { name: '连接网络', exact: true })
     const stop = page.getByRole('button', { name: '请求停止', exact: true })
+    const personalRoute = page.getByRole('list', { name: '三路出口' }).getByRole('listitem').filter({ hasText: '个人代理' })
     const exit = page.getByRole('button', { name: '验证恢复并退出', exact: true })
     await expect(company).not.toBeChecked()
     await expect(personal).not.toBeChecked()
     await connect.click()
-    await expect(page.getByText(/个人：报告走直连/)).toBeVisible()
+    await expect(personalRoute).toContainText('直连')
     await expect(personal).toBeEnabled()
 
     await company.click()
@@ -539,22 +592,24 @@ test('macOS switches Personal on the bound run started with both channels off', 
 
     await personal.click()
     await expect(page.getByText('正在切换本次运行的个人代理', { exact: true })).toBeVisible()
-    await expect(page.getByText(/个人：等待本次切换报告/)).toBeVisible()
+    await expect(personalRoute).toContainText('等待切换结果')
     await expect(personal).not.toBeChecked()
     await expect(company).toBeChecked()
     await expect(stop).toBeEnabled()
     await writeFile(join(root, 'apply-personal'), '')
     await expect(personal).toBeChecked()
+    await page.locator('summary[aria-label="工作空间状态"]').click()
     await expect(page.getByText('个人代理设置已应用到本次运行。')).toBeVisible()
-    await expect(page.getByText(/个人：已请求代理/)).toBeVisible()
-    await expect(page.getByText(/个人：报告走直连/)).toHaveCount(0)
+    await page.locator('summary[aria-label="工作空间状态"]').press('Escape')
+    await expect(personalRoute).toContainText('已请求代理')
+    await expect(personalRoute).not.toContainText('直连')
 
     await personal.click()
     await expect(personal).toBeDisabled()
-    await expect(page.getByText(/个人：等待本次切换报告/)).toBeVisible()
+    await expect(personalRoute).toContainText('等待切换结果')
     await writeFile(join(root, 'apply-personal'), '')
     await expect(personal).not.toBeChecked()
-    await expect(page.getByText(/个人：报告走直连/)).toBeVisible()
+    await expect(personalRoute).toContainText('直连')
     await expect(company).toBeChecked()
 
     await personal.click()
@@ -562,7 +617,7 @@ test('macOS switches Personal on the bound run started with both channels off', 
     await stop.click()
     await expect(connect).toBeEnabled()
     await connect.click()
-    await expect(page.getByText(/个人：报告走直连/)).toBeVisible()
+    await expect(personalRoute).toContainText('直连')
     await personal.click()
     await expect(page.getByText('正在切换本次运行的个人代理', { exact: true })).toBeVisible()
     await expect(exit).toBeEnabled()
@@ -612,11 +667,13 @@ test('macOS sends a startup-only environment and waits for its applied report', 
   const { root, application, close } = await launchMacChannelFixture(true)
   try {
     const page = await application.firstWindow()
+    await page.getByText('连接选项', { exact: true }).click()
     const environment = page.getByRole('combobox', { name: '启动环境', exact: true })
     await expect(environment).toHaveValue('shared')
     await environment.selectOption('office')
     await page.getByRole('button', { name: '工作空间设置', exact: true }).click()
     await page.getByRole('button', { name: /^总览/ }).click()
+    await page.getByText('连接选项', { exact: true }).click()
     await expect(environment).toHaveValue('office')
     await page.getByLabel('运行模式').selectOption('validation')
     await page.getByLabel('验证时长（秒）').fill('45')
@@ -643,12 +700,13 @@ test('packaged preview uses fixed resources and reloads a crashed renderer', asy
   test.skip(process.platform !== 'darwin' && process.platform !== 'win32', 'A native Mac or Windows desktop package is required')
   // An explicit installed Windows executable must exist; do not silently skip
   // a misspelled path. Without it, test the ordinary electron-builder output.
-  const specified = process.platform === 'win32' ? process.env.LUMINA_TEST_WINDOWS_EXE : undefined
-  if (specified && !isAbsolute(specified)) throw new Error('LUMINA_TEST_WINDOWS_EXE must be an absolute executable path')
+  const executableVariable = process.platform === 'win32' ? 'LUMINA_TEST_WINDOWS_EXE' : 'LUMINA_TEST_MAC_EXE'
+  const specified = process.env[executableVariable]
+  if (specified && !isAbsolute(specified)) throw new Error(executableVariable + ' must be an absolute executable path')
   const executable = specified || resolve(process.platform === 'win32'
     ? '../.local/desktop-packages/win-unpacked/LuminaVPN.exe'
     : '../.local/desktop-packages/mac-arm64/LuminaVPN.app/Contents/MacOS/LuminaVPN')
-  if (specified && !existsSync(executable)) throw new Error('LUMINA_TEST_WINDOWS_EXE does not exist')
+  if (specified && !existsSync(executable)) throw new Error(executableVariable + ' does not exist')
   test.skip(!existsSync(executable), 'Build the native desktop preview package first')
   await mkdir(resolve('../.local'), { recursive: true })
   const userData = await mkdtemp(join(resolve('../.local'), 'packaged-e2e-中文 空格-'))
@@ -661,7 +719,7 @@ test('packaged preview uses fixed resources and reloads a crashed renderer', asy
   try {
     await application.context().route(/^https?:\/\//, route => route.abort())
     const page = await application.firstWindow()
-    await expect(page.getByText('控制接口可用', { exact: true }).first()).toBeVisible()
+    await expect(page.getByText('控制接口可用', { exact: true }).or(page.locator('summary[aria-label="工作空间状态"]')).first()).toBeVisible()
     const startupMs = Date.now() - began
     const layout = await application.evaluate(({ app }) => ({ packaged: app.isPackaged, resources: process.resourcesPath, appPath: app.getAppPath() }))
     expect(layout.packaged).toBe(true)
@@ -690,7 +748,7 @@ test('packaged preview uses fixed resources and reloads a crashed renderer', asy
     const replacement = application.waitForEvent('window')
     await application.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.forcefullyCrashRenderer())
     const recovered = await replacement
-    await expect(recovered.getByText('控制接口可用', { exact: true }).first()).toBeVisible()
+    await expect(recovered.getByText('控制接口可用', { exact: true }).or(recovered.locator('summary[aria-label="工作空间状态"]')).first()).toBeVisible()
     expect((await recovered.evaluate(() => window.lumina.getState())).runtime_liveness).toBe('not_checked')
     if (process.platform === 'win32') {
       bridgePID = await ownBridgePID(application, join(layout.resources, 'backend', 'netlaunch.exe'))

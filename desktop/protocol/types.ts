@@ -22,7 +22,7 @@ export interface Profile {
   node_count: number; revision: string | null; transaction_pending: boolean; issues: string[]; read_only: boolean
 }
 export interface Nodes {
-  items: { id: string; name: string; type: string; selected: boolean }[]; total: number; offset: number; limit: number
+  items: { id: string; name: string; type: string; region?: string; selected: boolean }[]; total: number; offset: number; limit: number
   inventory: string; selection_scope: string; latency: 'not_provided'
 }
 export interface Config {

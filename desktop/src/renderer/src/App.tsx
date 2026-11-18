@@ -1474,6 +1474,8 @@ export default function App() {
   const [notice, setNotice] = useState<string | null>(null);
   const environmentChecks = useRef(new EnvironmentChecks());
   const heading = useRef<HTMLElement>(null);
+  const pageScroll = useRef<HTMLDivElement>(null);
+  const [statusTarget, setStatusTarget] = useState<HTMLDivElement | null>(null);
   const pages: [Page, string, React.ElementType, string][] = [
     ["overview", "总览", LayoutGrid, "01"],
     ["nodes", "代理节点", Network, "02"],
@@ -1491,7 +1493,10 @@ export default function App() {
   const go = (next: Page) => {
     setPage(next);
     setNotice(null);
-    window.setTimeout(() => heading.current?.focus(), 0);
+    window.setTimeout(() => {
+      pageScroll.current?.scrollTo(0, 0);
+      heading.current?.focus({ preventScroll: true });
+    }, 0);
   };
   const refresh = () => {
     void app.refresh(true);
@@ -1608,15 +1613,16 @@ export default function App() {
                   `${platformNames[app.data.hello.build.os] ?? app.data.hello.build.os} · ${app.data.hello.build.arch}`)
                 : "本机工作空间"}
             </span>
-            <Badge tone={app.control === "available" ? "green" : ""} dot>
+            {workspaceMode && app.data.profile?.profile_id ? <div ref={setStatusTarget} /> : <Badge tone={app.control === "available" ? "green" : ""} dot>
               {app.control === "available"
                 ? "控制接口可用"
                 : app.control === "connecting"
                   ? "正在读取"
                   : "控制接口断开"}
-            </Badge>
+            </Badge>}
           </div>
         </div>
+        <div className="page-scroll" ref={pageScroll} tabIndex={0} role="region" aria-label={pageName}>
         <div className="page" key={workspaceMode ? "client-workspace" : page}>
           {(app.error || notice) && (
             <div className="control-banner" role="status">
@@ -1642,8 +1648,18 @@ export default function App() {
               )}
             </div>
           )}
-          {workspaceMode && window.lumina.client && app.data.profile?.profile_id && <ClientWorkspace key={app.data.profile.profile_id} profileID={app.data.profile.profile_id} page={page} windowsClient={windowsClient} macosClient={macosClient} configured={app.data.profile.configured && app.data.profile.policy_valid} validationOnly={app.data.hello?.capabilities.validation_only===true} api={window.lumina.client} refreshInventory={refresh} nodes={app.data.nodes} subscriptions={app.data.subscriptions} config={app.data.config} loadNodes={app.loadNodes} loadRules={app.loadRules} chooseProfile={()=>chooseProfile()} restoreDefaultProfile={()=>chooseProfile(true)} checking={checking} environmentCheck={environment} checkEnvironment={() => { void checkEnvironment() }} showRecovery={() => { void showRecovery() }} />}
-          {!windowsClient && page === "overview" && (
+          {workspaceMode && window.lumina.client && app.data.profile?.profile_id && <ClientWorkspace key={app.data.profile.profile_id} profileID={app.data.profile.profile_id} page={page} statusTarget={statusTarget} windowsClient={windowsClient} macosClient={macosClient} configured={app.data.profile.configured && app.data.profile.policy_valid} validationOnly={app.data.hello?.capabilities.validation_only===true} api={window.lumina.client} refreshInventory={refresh} nodes={app.data.nodes} savedNode={app.data.state?.run_ref ? app.data.state.status.personal : null} subscriptions={app.data.subscriptions} config={app.data.config} loadNodes={app.loadNodes} loadRules={app.loadRules} chooseProfile={()=>chooseProfile()} restoreDefaultProfile={()=>chooseProfile(true)} checking={checking} environmentCheck={environment} checkEnvironment={() => { void checkEnvironment() }} showRecovery={() => { void showRecovery() }} />}
+          {macosClient && page === "diagnostics" && app.data.state?.run_ref && (
+            <details className="client-card client-details">
+              <summary>本机保存的探针记录</summary>
+              <div className="channel-grid">
+                {(["company", "personal", "direct"] as ChannelName[]).map(name => (
+                  <ChannelCard key={name} name={name} channel={currentChannels(app.data.state, now)[name]} now={now} />
+                ))}
+              </div>
+            </details>
+          )}
+          {!workspaceMode && page === "overview" && (
             <Overview
               data={app.data}
               now={now}
@@ -1691,7 +1707,7 @@ export default function App() {
               chooseProfile={chooseProfile}
             />
           )}
-          <footer className="footerline">
+          {!workspaceMode && <footer className="footerline">
             <span>
               <i
                 className={`dot ${app.control === "available" ? "" : "dim"}`}
@@ -1701,7 +1717,8 @@ export default function App() {
                 : "控制接口未连接 · 保留最近的状态"}
             </span>
             <span>配置保存在本机 · Jade Workspace</span>
-          </footer>
+          </footer>}
+        </div>
         </div>
       </main>
       <div className="sr-only" role="status" aria-live="polite">

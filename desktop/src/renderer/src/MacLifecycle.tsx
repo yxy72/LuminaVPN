@@ -1,24 +1,12 @@
 import { useState } from 'react'
 import { isMacStartEnvironment } from '../../../protocol/client'
-import type { DesiredChannels, MacStartEnvironment, ServiceChannel, ServiceMutation, ServiceOperation, ServiceSnapshot } from '../../../protocol/client'
-import { ChannelProbeStatus } from './ChannelProbeStatus'
+import type { DesiredChannels, MacStartEnvironment, ServiceMutation, ServiceOperation, ServiceSnapshot } from '../../../protocol/client'
+import { ConnectionChannels } from './ChannelProbeStatus'
 
 type MacStart = Extract<ServiceMutation, { kind: 'takeover_start' }>['start']
 
 const environmentLabels: Record<MacStartEnvironment, string> = {
   shared: '共享基础规则', office: '办公', home: '家庭',
-}
-
-function reportedRoute(channel?: ServiceChannel): string {
-  switch (channel?.route) {
-    case 'blocked_reported': return '报告已阻断'
-    case 'vpn_reported': return '公司 VPN'
-    case 'personal_reported': return '个人代理节点'
-    case 'direct_reported':
-      if (channel.reason === 'all_candidates_failed') return '候选全部失败，临时直连'
-      return channel.reason === 'disabled_direct' ? '个人通道已关闭，走直连' : '物理网卡'
-    default: return '出口未确认'
-  }
 }
 
 const states: Record<string, string> = {
@@ -91,12 +79,12 @@ export function MacLifecycle({ snapshot, configured, busy, preemptible, desired,
   const status = waitingForEnvironment && (state === 'ready_reported' || state === 'managed_reported')
     ? '等待本次运行的环境应用报告'
     : states[state] ?? (snapshot ? '当前运行待确认' : '正在读取网络控制状态')
-  return <section className="client-card" aria-labelledby="mac-lifecycle-title">
+  return <section className="client-card connection-overview" aria-labelledby="mac-lifecycle-title">
     <h2 id="mac-lifecycle-title">网络接管</h2>
     <p role="status">{status}</p>
     {environmentReport && <p>已选择 {environmentLabels[environmentReport.selected]} ·
       已应用 {environmentReport.applied ? environmentLabels[environmentReport.applied] : '等待报告'}</p>}
-    <p>接管期间，关闭公司 VPN 会阻断公司目标，关闭个人代理后个人目标走直连。启动与验证恢复可能需要 macOS 管理员授权。</p>
+    <ConnectionChannels snapshot={snapshot} />
     <div className="client-actions">
       <label><input type="checkbox" checked={channels.company} disabled={!canConfigure && !canEditCompany}
         onChange={event => {
@@ -109,34 +97,29 @@ export function MacLifecycle({ snapshot, configured, busy, preemptible, desired,
           else setDesired({ ...desired, personal: event.target.checked })
         }} />开启个人代理</label>
     </div>
-    {showRun && <section aria-labelledby="mac-channel-evidence">
-      <h3 id="mac-channel-evidence">最近保存的系统检查</h3>
-      <ul>
-        <li>直连 · {reportedRoute(snapshot.direct)}<ChannelProbeStatus channel={snapshot.direct} /></li>
-        <li>公司 VPN · {reportedRoute(snapshot.company)}<ChannelProbeStatus channel={snapshot.company} /></li>
-        <li>个人代理 · {reportedRoute(snapshot.personal)}<ChannelProbeStatus channel={snapshot.personal} /></li>
-      </ul>
-    </section>}
     {showRun && !busy && !canEditPersonal && <p>当前运行无法切换个人代理，可在下次连接时调整。</p>}
     {!configured && <p>请先在工作空间设置中保存有效策略。</p>}
-    <div className="client-actions">
-      {mayStart && <label>启动环境<select value={environment} disabled={!canConfigure} onChange={event => {
-        if (isMacStartEnvironment(event.target.value)) setEnvironment(event.target.value)
-      }}>
-        <option value="shared">{environmentLabels.shared}</option>
-        <option value="office">{environmentLabels.office}</option>
-        <option value="home">{environmentLabels.home}</option>
-      </select></label>}
-      <label>运行模式<select value={mode} disabled={!canConfigure} onChange={event => setMode(event.target.value === 'validation' ? 'validation' : 'daily')}>
-        <option value="daily">日用连接</option>
-        <option value="validation">限时验证</option>
-      </select></label>
-      {mode === 'validation' && <label>验证时长（秒）<input type="number" min={1} max={2700} step={1}
-        value={duration} required disabled={!canConfigure} onChange={event => setDuration(event.target.value)} /></label>}
-    </div>
+    {mayStart && <details className="client-details">
+      <summary>连接选项</summary>
+      <div className="client-actions">
+        <label>启动环境<select value={environment} disabled={!canConfigure} onChange={event => {
+          if (isMacStartEnvironment(event.target.value)) setEnvironment(event.target.value)
+        }}>
+          <option value="shared">{environmentLabels.shared}</option>
+          <option value="office">{environmentLabels.office}</option>
+          <option value="home">{environmentLabels.home}</option>
+        </select></label>
+        <label>运行模式<select value={mode} disabled={!canConfigure} onChange={event => setMode(event.target.value === 'validation' ? 'validation' : 'daily')}>
+          <option value="daily">日用连接</option>
+          <option value="validation">限时验证</option>
+        </select></label>
+        {mode === 'validation' && <label>验证时长（秒）<input type="number" min={1} max={2700} step={1}
+          value={duration} required disabled={!canConfigure} onChange={event => setDuration(event.target.value)} /></label>}
+      </div>
+    </details>}
     <div className="client-actions">
       <button disabled={!canAuthenticate} onClick={() => authenticate(canEditCompany)}>在终端进行公司认证</button>
-      <button disabled={!canConfigure || !configured || mode === 'validation' && !validDuration} onClick={() => {
+      <button className="client-primary" disabled={!canConfigure || !configured || mode === 'validation' && !validDuration} onClick={() => {
         start(mode === 'daily' ? { mode, channels: desired, environment } : { mode, channels: desired, environment, validation_seconds: seconds })
       }}>连接网络</button>
       <button disabled={!mayStop || busy && !preemptible} onClick={stop}>请求停止</button>

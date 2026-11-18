@@ -237,6 +237,7 @@ type Node struct {
 	ID       string `json:"id"`
 	Name     string `json:"name"`
 	Type     string `json:"type"`
+	Region   string `json:"region,omitempty"`
 	Selected bool   `json:"selected"`
 }
 type Nodes struct {
@@ -264,7 +265,13 @@ func (d *Desktop) ListNodes(offset, limit int) (Nodes, error) {
 	if err != nil {
 		return out, unavailable("POLICY_INVALID", "Local policy is missing or invalid.")
 	}
-	nodes, err := d.desktopNodes(cfg)
+	var nodes []policy.Node
+	var regions []string
+	if d.WorkspaceEnabled() {
+		nodes, regions, err = app.DesktopWorkspaceNodeInventory(d.Profile, cfg)
+	} else {
+		nodes, err = d.desktopNodes(cfg)
+	}
 	if err != nil {
 		return out, unavailable("NODE_CACHE_UNAVAILABLE", "Validated node cache unavailable; use the existing CLI to import or sync.")
 	}
@@ -278,7 +285,11 @@ func (d *Desktop) ListNodes(offset, limit int) (Nodes, error) {
 		}
 		// Generated Pxxx labels can refer to different nodes after a cache
 		// update. The saved frozen run's label alone is not identity evidence.
-		out.Items = append(out.Items, Node{ID: id, Name: id, Type: oneOf(typ, "unknown", "vless", "hysteria2"), Selected: false})
+		node := Node{ID: id, Name: id, Type: oneOf(typ, "unknown", "vless", "hysteria2")}
+		if i < len(regions) {
+			node.Region = regions[i]
+		}
+		out.Items = append(out.Items, node)
 	}
 	return out, nil
 }

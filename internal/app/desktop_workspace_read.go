@@ -79,34 +79,45 @@ func DesktopWorkspaceNodes(profile string, cfg policy.Config) ([]policy.Node, er
 	return nodes, err
 }
 
+func DesktopWorkspaceNodeInventory(profile string, cfg policy.Config) ([]policy.Node, []string, error) {
+	_, nodes, regions, err := desktopWorkspaceProfile(profile, cfg)
+	return nodes, regions, err
+}
+
 // DesktopWorkspaceProfile includes only validated cached subscription rules.
 // Callers retain the saved base revision separately for compare-and-swap.
 func DesktopWorkspaceProfile(profile string, cfg policy.Config) (policy.Config, []policy.Node, error) {
+	effective, nodes, _, err := desktopWorkspaceProfile(profile, cfg)
+	return effective, nodes, err
+}
+
+func desktopWorkspaceProfile(profile string, cfg policy.Config) (policy.Config, []policy.Node, []string, error) {
 	sources, present, err := sourceConfigForStorage(profile, cfg)
 	if err != nil {
-		return cfg, nil, err
+		return cfg, nil, nil, err
 	}
 	if present {
 		if _, err := os.Lstat(filepath.Join(profile, "subscription-cache.json")); errors.Is(err, os.ErrNotExist) {
-			return cfg, []policy.Node{}, nil
+			return cfg, []policy.Node{}, nil, nil
 		}
 		cache, err := workspaceCache(profile, cfg, sources)
 		if err != nil {
-			return cfg, nil, err
+			return cfg, nil, nil, err
 		}
-		return workspaceEffectiveResult(cfg, cache.Result)
+		effective, nodes, err := workspaceEffectiveResult(cfg, cache.Result)
+		return effective, nodes, cache.Result.NodeRegions, err
 	}
 	if _, err := os.Lstat(filepath.Join(profile, "nodes.json")); errors.Is(err, os.ErrNotExist) {
-		return cfg, []policy.Node{}, nil
+		return cfg, []policy.Node{}, nil, nil
 	}
 	nodes, err := readNodes(profile)
 	if err != nil {
-		return cfg, nil, err
+		return cfg, nil, nil, err
 	}
 	if err := policy.ValidateEndpointsForStorage(cfg, nodes); err != nil {
-		return cfg, nil, errors.New("local endpoints conflict with saved policy")
+		return cfg, nil, nil, err
 	}
-	return cfg, nodes, nil
+	return cfg, nodes, nil, nil
 }
 
 func DesktopWorkspaceRules(profile string, cfg policy.Config) ([]policy.PlannedRule, error) {

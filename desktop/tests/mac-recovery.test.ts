@@ -24,7 +24,7 @@ describe('macOS Diagnostics recovery', () => {
   it('keeps the standalone control out of Windows and offline diagnostics', () => {
     const diagnostics = (macosClient: boolean, windowsClient: boolean) =>
       renderToStaticMarkup(createElement(ClientWorkspace, {
-        page: 'diagnostics', macosClient, windowsClient, api: {} as ClientAPI, profileID: 'profile',
+        statusTarget: null, page: 'diagnostics', macosClient, windowsClient, api: {} as ClientAPI, profileID: 'profile',
         configured: true, validationOnly: false, config: null, nodes: null, subscriptions: null,
         checking: false, environmentCheck: null, loadNodes() {}, loadRules() {}, refreshInventory() {},
         async chooseProfile() {}, async restoreDefaultProfile() {}, checkEnvironment() {}, showRecovery() {},

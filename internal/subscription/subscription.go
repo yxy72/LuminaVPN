@@ -41,6 +41,7 @@ type Bootstrap struct {
 }
 type Result struct {
 	Nodes        []policy.Node `json:"nodes"`
+	NodeRegions  []string      `json:"-"`
 	Rules        []policy.Rule `json:"rules"`
 	SkippedNodes int           `json:"skipped_nodes"`
 	SkippedRules int           `json:"skipped_rules"`
@@ -205,11 +206,11 @@ func parseWith(ctx context.Context, s Sources, read func(context.Context, Source
 	if e != nil {
 		return out, e
 	}
-	nodes, issues, e := policy.ImportSupportedNodes(data)
+	nodes, issues, regions, e := policy.ImportSupportedNodeInventory(data)
 	if e != nil {
 		return out, errors.New("subscription contains no usable supported nodes")
 	}
-	out.Nodes = nodes
+	out.Nodes, out.NodeRegions = nodes, regions
 	out.SkippedNodes = len(issues)
 	for _, issue := range issues {
 		out.Issues = append(out.Issues, ImportIssue{Source: "nodes", Kind: "node", Index: issue.Index, Reason: "unsupported_or_invalid_node"})

@@ -2,6 +2,7 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import type { ServiceSnapshot } from '../protocol/client'
+import { ConnectionChannels } from '../src/renderer/src/ChannelProbeStatus'
 import { MacLifecycle } from '../src/renderer/src/MacLifecycle'
 
 const channels = { company: false, personal: false }
@@ -45,7 +46,7 @@ describe('macOS startup environment view', () => {
 describe('macOS saved route evidence', () => {
   it('labels all three routes and keeps path validation separate from service response', () => {
     const checked_at = '2026-11-16T12:00:00Z'
-    const html = view({
+    const snapshot: ServiceSnapshot = {
       ...running,
       direct: { desired: true, route: 'direct_reported', state: 'ready_reported' },
       company: {
@@ -53,15 +54,17 @@ describe('macOS saved route evidence', () => {
         probe: { scope: 'system_tun', path_state: 'verified', service_state: 'failed', checked_at },
       },
       personal: { desired: true, route: 'direct_reported', state: 'degraded_reported', reason: 'all_candidates_failed' },
-    })
-    expect(html).toContain('最近保存的系统检查')
-    expect(html).toContain('直连 · 物理网卡')
+    }
+    expect(view(snapshot)).toContain('aria-label="三路出口"')
+    expect(view(snapshot)).not.toContain(checked_at)
+    const html = renderToStaticMarkup(createElement(ConnectionChannels, { snapshot, details: true }))
+    expect(html).toContain('<strong>直连</strong><span>物理网卡</span>')
     expect(html).toContain('路径已验证 · 服务响应异常')
     expect(html).toContain(checked_at)
     expect(html).toContain('候选全部失败，临时直连')
-    expect(view({
+    expect(renderToStaticMarkup(createElement(ConnectionChannels, { details: true, snapshot: {
       ...running,
       personal: { desired: false, route: 'direct_reported', state: 'ready_reported', reason: 'disabled_direct' },
-    })).toContain('个人通道已关闭，走直连')
+    } }))).toContain('个人通道已关闭，走直连')
   })
 })

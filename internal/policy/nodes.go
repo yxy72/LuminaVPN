@@ -44,12 +44,20 @@ type NodeIssue struct {
 // ImportSupportedNodes makes mixed subscriptions usable while reporting every
 // omitted entry. It never relaxes certificate verification or inherits rules.
 func ImportSupportedNodes(data []byte) ([]Node, []NodeIssue, error) {
+	nodes, issues, _, err := ImportSupportedNodeInventory(data)
+	return nodes, issues, err
+}
+
+// ImportSupportedNodeInventory returns display-only region codes alongside
+// the normalized nodes. Raw subscription labels never leave the parser.
+func ImportSupportedNodeInventory(data []byte) ([]Node, []NodeIssue, []string, error) {
 	nodes, e := decodeNodes(data)
 	if e != nil {
-		return nil, nil, e
+		return nil, nil, nil, e
 	}
 	accepted := []Node{}
 	issues := []NodeIssue{}
+	regions := []string{}
 	for i, n := range nodes {
 		clean, e := SanitizeNodes([]Node{n})
 		if e != nil {
@@ -58,12 +66,33 @@ func ImportSupportedNodes(data []byte) ([]Node, []NodeIssue, error) {
 			continue
 		}
 		accepted = append(accepted, clean[0])
+		name, _ := n["name"].(string)
+		regions = append(regions, nodeRegion(name))
 	}
 	if len(accepted) == 0 {
-		return nil, issues, errors.New("subscription has no supported nodes with certificate verification enabled")
+		return nil, issues, nil, errors.New("subscription has no supported nodes with certificate verification enabled")
 	}
 	accepted, e = SanitizeNodes(accepted)
-	return accepted, issues, e
+	return accepted, issues, regions, e
+}
+
+func nodeRegion(name string) string {
+	const flagA, flagZ = '🇦', '🇿'
+	var previous rune
+	for _, current := range name {
+		if previous >= flagA && previous <= flagZ && current >= flagA && current <= flagZ {
+			code := string([]rune{'A' + previous - flagA, 'A' + current - flagA})
+			switch code {
+			case "AU", "BR", "CA", "CH", "CN", "DE", "ES", "FR", "GB", "HK", "ID", "IN", "IT",
+				"JP", "KR", "MO", "MY", "NL", "NZ", "PH", "RU", "SG", "TH", "TR", "TW", "US", "VN":
+				return code
+			default:
+				return ""
+			}
+		}
+		previous = current
+	}
+	return ""
 }
 
 func SanitizeNodes(input []Node) ([]Node, error) {

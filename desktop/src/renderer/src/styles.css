@@ -54,7 +54,8 @@ a {
 .app-shell {
   display: flex;
   height: 100vh;
-  min-height: 520px;
+  min-height: 0;
+  overflow: hidden;
 }
 .sidebar {
   width: 210px;
@@ -160,16 +161,28 @@ a {
 .main {
   flex: 1;
   min-width: 0;
-  overflow-y: auto;
-  padding: 29px 34px 22px;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.page-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
   scrollbar-gutter: stable;
+  padding: 8px 34px 22px;
 }
 .topline {
   display: flex;
   justify-content: space-between;
   gap: 20px;
   align-items: center;
-  margin-bottom: 30px;
+  flex: none;
+  position: relative;
+  z-index: 4;
+  padding: 25px 42px 15px 34px;
+  background: var(--bg);
 }
 .crumb {
   color: var(--muted);
@@ -1070,9 +1083,8 @@ a {
     padding-left: 12px;
     padding-right: 12px;
   }
-  .main {
-    padding: 25px 25px 21px;
-  }
+  .page-scroll { padding-inline: 25px; }
+  .topline { padding-inline: 25px 33px; }
   .connection {
     gap: 18px;
     padding: 27px 23px;
@@ -1098,9 +1110,8 @@ a {
   .sidebar {
     width: 178px;
   }
-  .main {
-    padding: 23px 20px;
-  }
+  .page-scroll { padding-inline: 20px; }
+  .topline { padding-inline: 20px 28px; }
   .logo {
     gap: 8px;
     padding: 0 8px;
@@ -1161,15 +1172,164 @@ a {
   }
 }
 
-.client-workspace { display: grid; gap: 18px; padding-bottom: 28px; }
-.client-status,.client-operation,.client-notice { display:flex; flex-wrap:wrap; gap:16px; padding:14px 18px; background:var(--surface,#fff); border:1px solid var(--line,#dce4df); border-radius:10px; font-size:13px; }
+.client-workspace { display: grid; gap: 16px; padding-bottom: 20px; min-width: 0; }
+.client-workspace > h1 { margin: 8px 0 2px; font-size: clamp(20px, 2.5vw, 26px); }
 .client-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:18px; }
 .client-card { padding:22px; border:1px solid var(--line,#dce4df); background:var(--surface,#fff); border-radius:12px; min-width:0; }
 .client-card h2 { font-size:17px; margin-bottom:14px; }.client-card p,.client-workspace>p { font-size:13px; color:var(--muted,#627169); line-height:1.7; }
 .client-card label { display:grid; gap:7px; font-size:13px; margin:12px 0; }.client-card label:has(input[type=checkbox]) { display:flex; align-items:center; }
 .client-workspace textarea,.client-workspace input:not([type=checkbox]),.client-workspace select { width:100%; box-sizing:border-box; padding:10px 12px; border:1px solid #cfdad2; border-radius:7px; background:#fff; color:#173128; font:inherit; }
-.client-workspace textarea { min-height:96px; resize:vertical; }.client-workspace .client-json { min-height:220px; font:12px/1.6 ui-monospace,monospace; }
+.client-workspace textarea { min-height:76px; max-height:min(45vh, 360px); resize:vertical; }.client-workspace .client-json { min-height:220px; font:12px/1.6 ui-monospace,monospace; }
 .client-actions { display:flex; align-items:center; flex-wrap:wrap; gap:10px; }.client-actions>input { max-width:280px; }.client-actions>select { width:auto; }
 .client-workspace button { padding:9px 14px; border:1px solid #a6bfae; border-radius:7px; background:#eff5ef; color:#1c523c; cursor:pointer; font:inherit; font-size:13px; }.client-workspace button:disabled { opacity:.45;cursor:not-allowed; }
 .client-result { white-space:pre-wrap; overflow-wrap:anywhere; max-height:500px; overflow:auto; font:12px/1.6 ui-monospace,monospace; }.client-workspace li { overflow-wrap:anywhere; margin:10px 0; }
 .client-table { width:100%; border-collapse:collapse; font-size:13px; margin:16px 0; }.client-table th,.client-table td { text-align:left; padding:10px; border-bottom:1px solid #e1e9e3; overflow-wrap:anywhere; }.client-table th { color:#526b60; font-weight:600; }
+
+
+.page-scroll, .client-table-scroll, .client-list-scroll, .client-result, .client-workspace textarea {
+  scrollbar-width: thin;
+  scrollbar-color: #859b8d transparent;
+}
+.client-table-scroll, .client-list-scroll {
+  max-height: min(48vh, 410px);
+  overflow: auto;
+  scrollbar-gutter: stable;
+  overscroll-behavior: contain;
+}
+.client-table-scroll {
+  margin-top: 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: #fff;
+}
+.client-table-scroll .client-table { margin: 0; }
+.client-table-scroll th {
+  position: sticky;
+  top: 0;
+  background: #f0f5f1;
+  color: #2e4e40;
+}
+.client-table-scroll td { vertical-align: top; }
+.client-table-scroll tbody tr:last-child td { border-bottom: 0; }
+.client-table-scroll tbody tr:hover { background: #f7faf7; }
+.client-table-empty { margin: 0; padding: 14px 10px; }
+.client-pagination, .node-inventory-toolbar, .node-health-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.client-pagination { margin-top: 12px; color: var(--muted); }
+.node-inventory-toolbar { align-items: end; margin-top: 12px; }
+.node-inventory-toolbar label { margin: 0; flex: 1 1 180px; max-width: 300px; }
+.node-health-summary { justify-content: flex-start; gap: 8px 14px; color: var(--muted); }
+.node-health-summary strong { color: var(--text); }
+.node-health-summary p { margin: 0; }
+.client-details summary { cursor: pointer; font-weight: 650; width: fit-content; }
+.client-details[open] > summary { margin-bottom: 10px; }
+.node-health-summary + .client-details { margin-top: 10px; }
+.connection-overview > h2 { margin-top: 0; }
+.connection-overview > .client-actions { margin-top: 8px; }
+.connection-overview .client-details { margin: 4px 0 10px; }
+.connection-channels {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  list-style: none;
+  padding: 0;
+  gap: 8px;
+  margin: 12px 0;
+}
+.client-workspace .connection-channels li {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 0;
+  padding: 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f5f8f5;
+}
+.connection-channels span { color: var(--muted); font-size: 12px; }
+.connection-channels p { margin: 0; }
+.workspace-status { position: relative; }
+.workspace-status summary {
+  list-style: none;
+  display: flex;
+  gap: 7px;
+  align-items: center;
+  white-space: nowrap;
+  cursor: pointer;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 6px 11px;
+  min-height: 28px;
+}
+.workspace-status summary::-webkit-details-marker { display: none; }
+.workspace-status summary::after {
+  content: '';
+  width: 5px;
+  height: 5px;
+  margin: -3px 1px 0 2px;
+  border: solid currentColor;
+  border-width: 0 1px 1px 0;
+  transform: rotate(45deg);
+}
+.workspace-status-dot {
+  height: 7px;
+  width: 7px;
+  border-radius: 50%;
+  background: #3a8563;
+}
+.workspace-status-dot.running { background: #9a6922; }
+.workspace-status-dot.problem { background: #a24740; }
+.workspace-status-panel {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  width: min(320px, 60vw);
+  padding: 14px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px #18372824;
+}
+.workspace-status-panel p { margin: 6px 0; overflow-wrap: anywhere; }
+.workspace-status-panel .link-btn { margin-top: 6px; }
+.policy-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px 14px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: #f0f6f1;
+}
+.policy-toolbar p { margin: 3px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.policy-toolbar p[role="alert"] { color: #8e342f; }
+.client-workspace .client-primary {
+  background: #286149;
+  color: white;
+  border-color: #286149;
+  flex-shrink: 0;
+}
+.page-scroll { scroll-padding-top: 88px; }
+.whitelist-card h2 { margin: 0 0 5px; }
+.whitelist-card > p { margin: 0 0 12px; }
+.whitelist-card fieldset { padding: 0; margin: 0; min-width: 0; border: 0; }
+.client-field-hint { color: var(--muted); font-size: 11px; }
+@media (max-width: 780px) {
+  .topline { padding-inline: 15px; }
+  .page-scroll { padding-inline: 15px; }
+  .connection-channels { gap: 5px; }
+  .client-workspace .connection-channels li { padding: 8px 6px; }
+}
