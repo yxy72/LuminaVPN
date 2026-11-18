@@ -1264,10 +1264,10 @@ a {
   align-items: start;
   gap: 8px 16px;
   padding: 15px 17px;
-  border: 1px solid #d9e9de;
+  border: 1px solid #235746;
   border-radius: 9px;
-  background: linear-gradient(112deg, #eaf5ee, #f1f8f3);
-  color: #214638;
+  background: linear-gradient(112deg, #225747, #36755c);
+  color: #f4fff8;
 }
 .mac-takeover-title {
   display: flex;
@@ -1276,7 +1276,7 @@ a {
   min-width: 0;
 }
 .mac-takeover-title h2 { width: fit-content; margin: 0; font-size: 20px; line-height: 1.25; white-space: nowrap; }
-.mac-takeover-title p { min-height: 1.4em; margin: 4px 0 0; color: #52695d; line-height: 1.4; }
+.mac-takeover-title p { min-height: 1.4em; margin: 4px 0 0; color: #e0f3e7; line-height: 1.4; }
 .mac-takeover-symbol {
   display: grid;
   flex: none;
@@ -1290,8 +1290,8 @@ a {
 .mac-takeover-title .mac-takeover-symbol {
   width: 39px;
   height: 39px;
-  color: #176548;
-  background: #d9eee1;
+  color: #effff5;
+  background: #ecfff528;
 }
 .mac-takeover-status, .mac-takeover-badge {
   display: inline-flex;
@@ -1315,14 +1315,14 @@ a {
   justify-self: end;
   max-width: 100%;
   margin: 0;
-  border: 1px solid #d8e7dd;
+  border: 1px solid #e5f9ed57;
   font-size: 12px;
-  color: #4c675a;
-  background: #f7fbf8;
+  color: #f0fbf4;
+  background: #132f2660;
 }
 .mac-takeover-header .mac-takeover-status[data-ready=true] {
-  color: #176548;
-  background: #def0e5;
+  color: #ebfff3;
+  background: #0f3a2c54;
 }
 .mac-takeover-channels {
   display: grid;
