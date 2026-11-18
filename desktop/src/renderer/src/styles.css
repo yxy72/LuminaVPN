@@ -1259,24 +1259,24 @@ a {
   container-type: inline-size;
 }
 .mac-takeover-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) fit-content(46%);
+  align-items: start;
   gap: 8px 16px;
   padding: 15px 17px;
+  border: 1px solid #d9e9de;
   border-radius: 9px;
-  background: linear-gradient(112deg, #143e32, #205944);
-  color: #f4fff8;
+  background: linear-gradient(112deg, #eaf5ee, #f1f8f3);
+  color: #214638;
 }
 .mac-takeover-title {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 10px;
   min-width: 0;
 }
-.mac-takeover-title h2 { margin: 0; font-size: 20px; line-height: 1.25; }
-.mac-takeover-title p { margin: 4px 0 0; color: #cee5d8; line-height: 1.4; }
+.mac-takeover-title h2 { width: fit-content; margin: 0; font-size: 20px; line-height: 1.25; white-space: nowrap; }
+.mac-takeover-title p { min-height: 1.4em; margin: 4px 0 0; color: #52695d; line-height: 1.4; }
 .mac-takeover-symbol {
   display: grid;
   flex: none;
@@ -1290,8 +1290,8 @@ a {
 .mac-takeover-title .mac-takeover-symbol {
   width: 39px;
   height: 39px;
-  color: #e0fbed;
-  background: #d4f8e528;
+  color: #176548;
+  background: #d9eee1;
 }
 .mac-takeover-status, .mac-takeover-badge {
   display: inline-flex;
@@ -1311,15 +1311,18 @@ a {
   transform: translateY(-2px);
 }
 .mac-takeover-header .mac-takeover-status {
+  align-self: center;
+  justify-self: end;
+  max-width: 100%;
   margin: 0;
-  border: 1px solid #d4f8e545;
+  border: 1px solid #d8e7dd;
   font-size: 12px;
-  color: #eef8f2;
-  background: #edf7f31a;
+  color: #4c675a;
+  background: #f7fbf8;
 }
 .mac-takeover-header .mac-takeover-status[data-ready=true] {
-  color: #d8fae7;
-  background: #9be5bc2b;
+  color: #176548;
+  background: #def0e5;
 }
 .mac-takeover-channels {
   display: grid;
@@ -1412,6 +1415,8 @@ a {
   border-color: var(--line);
 }
 @container (max-width: 440px) {
+  .mac-takeover-header { grid-template-columns: minmax(0, 1fr); }
+  .mac-takeover-header .mac-takeover-status { justify-self: start; }
   .mac-takeover-channels { grid-template-columns: minmax(0, 1fr); }
   .client-workspace .mac-takeover-channels li { gap: 6px; }
 }

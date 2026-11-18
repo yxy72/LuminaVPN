@@ -698,6 +698,10 @@ test('macOS sends a startup-only environment and waits for its applied report', 
     await expect(environment).toHaveValue('office')
     await page.getByLabel('运行模式').selectOption('validation')
     await page.getByLabel('验证时长（秒）').fill('45')
+    const title = page.getByRole('heading', { name: '网络接管', exact: true })
+    const idleTitle = await title.boundingBox()
+    expect(idleTitle).not.toBeNull()
+    await expect(page.getByText('办公 · 待应用', { exact: true })).toBeVisible()
 
     await writeFile(join(root, 'hold-environment'), '')
     await page.getByRole('button', { name: '连接网络', exact: true }).click()
@@ -705,6 +709,7 @@ test('macOS sends a startup-only environment and waits for its applied report', 
     await expect(page.getByText(/已选择 办公.*已应用 等待报告/)).toBeVisible()
     await expect(page.getByText('等待本次运行的环境应用报告', { exact: true })).toBeVisible()
     await expect(page.getByText('已连接', { exact: true })).toHaveCount(0)
+    expect(await title.boundingBox()).toEqual(idleTitle)
     const accepted = JSON.parse((await readFile(join(root, 'accepted.jsonl'), 'utf8')).trim())
     expect(accepted.start).toEqual({
       mode: 'validation', channels: { company: false, personal: false }, validation_seconds: 45, environment: 'office',
@@ -714,6 +719,7 @@ test('macOS sends a startup-only environment and waits for its applied report', 
     await expect(page.getByText('办公 · 已应用', { exact: true })).toBeVisible()
     await expect(page.getByText('已连接', { exact: true })).toBeVisible()
     await expect(environment).toHaveCount(0)
+    expect(await title.boundingBox()).toEqual(idleTitle)
   } finally { await close() }
 })
 

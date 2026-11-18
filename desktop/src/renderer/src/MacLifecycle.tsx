@@ -116,16 +116,18 @@ export function MacLifecycle({ snapshot, configured, busy, preemptible, desired,
   const status = waitingForEnvironment && (state === 'ready_reported' || state === 'managed_reported')
     ? '等待本次运行的环境应用报告'
     : states[state] ?? (snapshot ? '当前运行待确认' : '正在读取网络控制状态')
-  const rules = environmentReport && (waitingForEnvironment
-    ? `已选择 ${environmentLabels[environmentReport.selected]} · 已应用 ${environmentReport.applied ? environmentLabels[environmentReport.applied] : '等待报告'}`
-    : `${environmentLabels[environmentReport.selected]} · 已应用`)
+  const rules = environmentReport
+    ? waitingForEnvironment
+      ? `已选择 ${environmentLabels[environmentReport.selected]} · 已应用 ${environmentReport.applied ? environmentLabels[environmentReport.applied] : '等待报告'}`
+      : `${environmentLabels[environmentReport.selected]} · 已应用`
+    : mayStart || state === 'starting' ? `${environmentLabels[environment]} · 待应用` : ''
   return <section className="client-card mac-takeover" aria-labelledby="mac-lifecycle-title">
     <header className="mac-takeover-header">
       <div className="mac-takeover-title">
         <span className="mac-takeover-symbol"><ShieldCheck size={22} strokeWidth={1.8} aria-hidden="true" /></span>
         <div>
           <h2 id="mac-lifecycle-title">网络接管</h2>
-          {rules && <p>{rules}</p>}
+          <p>{rules}</p>
         </div>
       </div>
       <p className="mac-takeover-status" role="status" data-ready={state === 'ready_reported' && !waitingForEnvironment}>{status}</p>
