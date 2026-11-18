@@ -85,8 +85,17 @@ func MeasureDesktopLatency(ctx context.Context, bundle, profile string, nodes []
 		case <-time.After(60 * time.Millisecond):
 		}
 	}
-	values := sampleNodes(ctx, candidateNames(nodes), 50*time.Second, 16, func(ctx context.Context, node string) (int, bool) {
-		sample := independentNode(ctx, node, "", "", personalroute.Generation{}, []string{target}, request)
+	values := measureDesktopCandidates(ctx, candidateNames(nodes), target, request)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return values, nil
+}
+
+func measureDesktopCandidates(ctx context.Context, names []string, target string, request func(context.Context, string, any) error) map[string]int {
+	const desktopProbeTimeout = 4500 * time.Millisecond
+	measure := func(ctx context.Context, node string) (int, bool) {
+		sample := independentNodeWithin(ctx, node, "", "", personalroute.Generation{}, []string{target}, desktopProbeTimeout, request)
 		switch sample.Observation.Outcome {
 		case personalroute.Healthy:
 			return sample.Latency, true
@@ -95,9 +104,26 @@ func MeasureDesktopLatency(ctx context.Context, bundle, profile string, nodes []
 		default:
 			return 0, false
 		}
-	})
-	if err := ctx.Err(); err != nil {
-		return nil, err
 	}
-	return values, nil
+	// A manual display sample must not change the coordinator's probe budget or
+	// its fallback evidence. Keep bursts small on networks behind another TUN.
+	values := sampleNodes(ctx, names, 40*time.Second, 8, measure)
+	if ctx.Err() != nil {
+		return values
+	}
+	var retry []string
+	for _, name := range names {
+		if value, ok := values[name]; ok && value < 0 {
+			retry = append(retry, name)
+		}
+	}
+	if len(retry) == 0 {
+		return values
+	}
+	for name, value := range sampleNodes(ctx, retry, 15*time.Second, 4, measure) {
+		if value >= 0 {
+			values[name] = value
+		}
+	}
+	return values
 }

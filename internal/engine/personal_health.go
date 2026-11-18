@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/url"
+	"strconv"
 	"sync"
 	"time"
 
@@ -70,6 +71,10 @@ func candidateIDs(nodes []policy.Node) ([]string, map[string]string) {
 // controller/auth/format failures are not. Ordinary 200..599 target responses
 // are accepted by the delay probe and remain path evidence, not service health.
 func independentNode(ctx context.Context, name, id, pool string, generation personalroute.Generation, probes []string, request func(context.Context, string, any) error) independentSample {
+	return independentNodeWithin(ctx, name, id, pool, generation, probes, 3*time.Second, request)
+}
+
+func independentNodeWithin(ctx context.Context, name, id, pool string, generation personalroute.Generation, probes []string, timeout time.Duration, request func(context.Context, string, any) error) independentSample {
 	started := time.Now()
 	o := personalroute.Observation{CandidateID: id, PoolID: pool, Generation: generation, Scope: personalroute.IndependentHealth, Outcome: personalroute.Unknown, StartedAt: started}
 	result := independentSample{Name: name, ID: id, Latency: -1}
@@ -80,7 +85,7 @@ func independentNode(ctx context.Context, name, id, pool string, generation pers
 		var delay struct {
 			Delay *int `json:"delay"`
 		}
-		q := url.Values{"url": {target}, "timeout": {"3000"}, "expected": {"200-599"}}
+		q := url.Values{"url": {target}, "timeout": {strconv.FormatInt(timeout.Milliseconds(), 10)}, "expected": {"200-599"}}
 		if e := request(ctx, "/proxies/"+url.PathEscape(name)+"/delay?"+q.Encode(), &delay); e != nil {
 			if ctx.Err() != nil {
 				break

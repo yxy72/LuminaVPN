@@ -41,6 +41,7 @@ export function NodeInventory({ nodes, savedNode, channel, load, refresh, measur
     .some(value => value?.toLocaleLowerCase().includes(search)))
   if (sortByLatency) visible.sort((a, b) => (a.latency_ms ?? Infinity) - (b.latency_ms ?? Infinity))
   const measuredAt = nodes?.latency_checked_at
+  const latency = nodes?.latency_summary
   return <section className="client-card">
     <h2>节点选择与健康</h2>
     <div className="node-health-summary">
@@ -68,7 +69,12 @@ export function NodeInventory({ nodes, savedNode, channel, load, refresh, measur
         <button onClick={refresh}>刷新库存</button>
       </div>
     </div>
-    {measuredAt && <p>最近测速 <time dateTime={measuredAt}>{new Date(measuredAt).toLocaleTimeString()}</time></p>}
+    {measuredAt && <div>
+      <p>最近测速 <time dateTime={measuredAt}>{new Date(measuredAt).toLocaleTimeString()}</time>
+        {latency && <> · 测得 {latency.measured} 个 · 探针未通过 {latency.failed} 个{latency.unmeasured > 0 && <> · 未测 {latency.unmeasured} 个</>}</>}
+      </p>
+      <p>测速使用当前网络和个人通道的 HTTPS 检查目标。</p>
+    </div>}
     <div className="client-table-scroll" key={nodes?.offset} tabIndex={0} role="region" aria-label="本机节点库存">
       <table className="client-table">
         <thead><tr><th scope="col">地区标注</th><th scope="col">编号</th><th scope="col">协议</th>

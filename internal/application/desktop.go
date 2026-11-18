@@ -242,15 +242,22 @@ type Node struct {
 	LatencyState string `json:"latency_state,omitempty"`
 	Selected     bool   `json:"selected"`
 }
+type NodeLatencySummary struct {
+	Measured   int `json:"measured"`
+	Failed     int `json:"failed"`
+	Unmeasured int `json:"unmeasured"`
+}
+
 type Nodes struct {
-	Items            []Node     `json:"items"`
-	Total            int        `json:"total"`
-	Offset           int        `json:"offset"`
-	Limit            int        `json:"limit"`
-	Inventory        string     `json:"inventory"`
-	SelectionScope   string     `json:"selection_scope"`
-	Latency          string     `json:"latency"`
-	LatencyCheckedAt *time.Time `json:"latency_checked_at,omitempty"`
+	Items            []Node              `json:"items"`
+	Total            int                 `json:"total"`
+	Offset           int                 `json:"offset"`
+	Limit            int                 `json:"limit"`
+	Inventory        string              `json:"inventory"`
+	SelectionScope   string              `json:"selection_scope"`
+	Latency          string              `json:"latency"`
+	LatencyCheckedAt *time.Time          `json:"latency_checked_at,omitempty"`
+	LatencySummary   *NodeLatencySummary `json:"latency_summary,omitempty"`
 }
 
 func (d *Desktop) ListNodes(offset, limit int) (Nodes, error) {
@@ -284,6 +291,20 @@ func (d *Desktop) ListNodes(offset, limit int) (Nodes, error) {
 		measurements, checked = app.DesktopNodeLatency(d.Profile, cfg, nodes, d.Now())
 		if !checked.IsZero() {
 			out.Latency, out.LatencyCheckedAt = "measured", &checked
+			summary := NodeLatencySummary{}
+			for _, node := range nodes {
+				id, _ := node["name"].(string)
+				value, ok := measurements[id]
+				switch {
+				case !ok:
+					summary.Unmeasured++
+				case value < 0:
+					summary.Failed++
+				default:
+					summary.Measured++
+				}
+			}
+			out.LatencySummary = &summary
 		}
 	}
 	out.Total = len(nodes)
