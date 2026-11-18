@@ -27,6 +27,7 @@ function validateHello(v: Record<string, unknown>): boolean {
   if (v.protocol_major !== 1 || !string(v.session_id) || !string(v.mode) || !isRecord(v.build) || !isRecord(v.capabilities)) return false
   const build = v.build, caps = v.capabilities
   if (!['version', 'os', 'arch', 'go_version'].every(key => string(build[key])) || !bool(caps.native_lifecycle)) return false
+  if (build.revision !== undefined && (typeof build.revision !== 'string' || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(build.revision))) return false
   if (caps.windows_client !== undefined && !bool(caps.windows_client) ||
       caps.macos_client !== undefined && !bool(caps.macos_client)) return false
 

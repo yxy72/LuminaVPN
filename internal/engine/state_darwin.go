@@ -63,11 +63,7 @@ func save(run string, s *State) error {
 		return e
 	}
 	out := publicStatus(*s, s.Updated)
-	p := filepath.Join(run, "status.json")
-	if e := securefile.Write(p, out); e != nil {
-		return e
-	}
-	return os.Chown(p, s.Manifest.Owner, -1)
+	return securefile.WriteOwned(filepath.Join(run, "status.json"), out, s.Manifest.Owner)
 }
 
 func readRunFile(run, name string, limit int64) ([]byte, error) {
@@ -180,6 +176,12 @@ func LaunchContext(ctx context.Context, action, run string) error {
 	}
 	if action != "serve" && action != "recover" && action != "recover-verified" {
 		return errors.New("invalid privileged action")
+	}
+	if managed, err := requestDarwinServiceRun(ctx, run, darwinServiceRequest{Action: action}); managed {
+		// The independent command remains usable if launchd is unavailable.
+		if action != "recover" || !errors.Is(err, errDarwinServiceUnavailable) {
+			return err
+		}
 	}
 	self, e := os.Executable()
 	if e != nil {

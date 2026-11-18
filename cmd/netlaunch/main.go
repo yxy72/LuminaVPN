@@ -9,9 +9,17 @@ import (
 
 	"netlaunch/internal/app"
 	"netlaunch/internal/desktopbridge"
+	"netlaunch/internal/engine"
 )
 
 func main() {
+	if handled, err := engine.MacServiceCommand(os.Args[1:]); handled {
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "NetLaunch:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "desktop" {
 		if err := desktopbridge.Run(os.Args[2:], os.Stdin, os.Stdout); err != nil {
 			fmt.Fprintln(os.Stderr, "NetLaunch: desktop bridge unavailable")

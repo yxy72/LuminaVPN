@@ -47,7 +47,7 @@ func readBounded(path string, limit int64, private, tail bool) ([]byte, error) {
 	if private && before.Mode().Perm()&0077 != 0 {
 		return nil, errors.New("secret file must have mode 0600 or stricter")
 	}
-	f, err := os.Open(path)
+	f, err := openBoundedRead(path)
 	if err != nil {
 		return nil, err
 	}
@@ -72,13 +72,25 @@ func readBounded(path string, limit int64, private, tail bool) ([]byte, error) {
 }
 
 func Write(path string, v any) error {
+	return write(path, v, -1)
+}
+
+// WriteOwned sets the ownership on the open temporary file before publishing it.
+func WriteOwned(path string, v any, owner int) error {
+	return write(path, v, owner)
+}
+
+func write(path string, v any, owner int) error {
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return err
 	}
-	return Bytes(path, append(b, '\n'))
+	return writeBytes(path, append(b, '\n'), owner)
 }
 func Bytes(path string, data []byte) error {
+	return writeBytes(path, data, -1)
+}
+func writeBytes(path string, data []byte, owner int) error {
 	if err := Dir(filepath.Dir(path)); err != nil {
 		return err
 	}
@@ -93,6 +105,9 @@ func Bytes(path string, data []byte) error {
 	defer os.Remove(name)
 	if err = f.Chmod(0600); err == nil {
 		_, err = f.Write(data)
+	}
+	if err == nil && owner >= 0 {
+		err = f.Chown(owner, -1)
 	}
 	if err == nil {
 		err = f.Sync()

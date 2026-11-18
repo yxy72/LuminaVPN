@@ -1597,6 +1597,9 @@ export default function App() {
           <div className="build">
             <i className={`dot ${app.control === "available" ? "" : "dim"}`} />
             {app.data.hello?.build.version ?? "LuminaVPN Desktop"}
+            {app.data.hello?.build.revision && (
+              <span title={app.data.hello.build.revision}> · {app.data.hello.build.revision.slice(0, 7)}</span>
+            )}
           </div>
         </div>
       </aside>

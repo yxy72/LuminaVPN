@@ -38,21 +38,21 @@ func BindCurrentRunStop(ctx context.Context, profile string) (*RunStop, error) {
 	if err := securefile.CheckDir(profile); err != nil {
 		return nil, err
 	}
-	runs := filepath.Join(profile, "runs")
-	if err := securefile.CheckDir(runs); err != nil {
-		return nil, err
-	}
-	runs, err = filepath.EvalSymlinks(runs)
-	if err != nil {
-		return nil, err
-	}
 	stop, err := bindRunStop(ctx, options{profile: profile})
 	if err != nil {
 		return nil, err
 	}
-	if filepath.Dir(stop.path) != runs {
-		stop.Close()
-		return nil, errors.New("current run is outside the selected profile")
+	if !engine.MacServiceProfileRun(profile, stop.path) {
+		runs := filepath.Join(profile, "runs")
+		if err := securefile.CheckDir(runs); err != nil {
+			stop.Close()
+			return nil, err
+		}
+		runs, err = filepath.EvalSymlinks(runs)
+		if err != nil || filepath.Dir(stop.path) != runs {
+			stop.Close()
+			return nil, errors.New("current run is outside the selected profile")
+		}
 	}
 	manifest, err := engine.ReadManifest(stop.path)
 	if err != nil {

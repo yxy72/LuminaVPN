@@ -12,7 +12,7 @@ const environmentLabels: Record<MacStartEnvironment, string> = {
 
 const states: Record<string, string> = {
   idle: '当前配置没有运行',
-  starting: '正在启动，可查看 macOS 授权提示',
+  starting: '正在启动 · 首次安装或更新可能需要授权',
   authenticating: '请在本机 Terminal 完成公司认证',
   applying_company: '正在切换本次运行的公司 VPN',
   applying_personal: '正在切换本次运行的个人代理',
@@ -72,7 +72,7 @@ export function macOperationText(operation: ServiceOperation): string {
     takeover_start: '连接', channels_set: '通道切换', auth_begin: '公司认证', takeover_stop: '停止', exit_restore: '验证恢复', workspace: '配置',
   }
   const progress: Record<string, string> = {
-    running: '进行中', authenticating: '等待本机 Terminal', authenticated: '会话已更新', starting: '正在启动，可查看 macOS 授权提示',
+    running: '进行中', authenticating: '等待本机 Terminal', authenticated: '会话已更新', starting: '正在启动 · 首次安装或更新可能需要授权',
     applying_company: '正在应用公司 VPN', company_applied: '公司 VPN 已应用',
     applying_personal: '正在应用个人代理', personal_applied: '个人代理已应用',
     waiting_for_stop_report: '等待停止报告', recovering: '等待管理员恢复',

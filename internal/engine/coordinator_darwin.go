@@ -125,7 +125,14 @@ func serve(run string) (returned error) {
 		_ = recoverRun(run, reason)
 	}()
 	// Freeze the executables and secrets in root-owned storage before executing them.
-	if e = runtimebundle.Copy(filepath.Join(run, "runtime"), filepath.Join(private(run), "runtime")); e != nil {
+	bundle, e := darwinInstalledRuntime(run)
+	if e != nil {
+		return e
+	}
+	if e = validateDarwinServiceBindings(run, s.Manifest); e != nil {
+		return e
+	}
+	if e = runtimebundle.Copy(bundle, filepath.Join(private(run), "runtime")); e != nil {
 		return e
 	}
 	intent := s.Manifest.InitialChannels()
@@ -997,14 +1004,13 @@ func recoverRun(run, reason string) error {
 			return e
 		}
 		status := Status{Phase: "stopped", Updated: time.Now(), Company: "unavailable", Personal: selector.Reject, RecoveryReason: "cancelled_before_network_changes", Experimental: true}
-		p := filepath.Join(run, "status.json")
-		if e = securefile.Write(p, status); e != nil {
+		if e = securefile.WriteOwned(filepath.Join(run, "status.json"), status, m.Owner); e != nil {
 			return e
 		}
 		for _, name := range []string{"auth.json", "auth-refresh.json", "nodes.json"} {
 			_ = os.Remove(filepath.Join(run, name))
 		}
-		return os.Chown(p, m.Owner, -1)
+		return nil
 	}
 	if e := validateRoot(run); e != nil {
 		return e

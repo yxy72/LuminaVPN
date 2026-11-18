@@ -46,6 +46,9 @@ func LaunchDarwinDesktopPersonal(ctx context.Context, run string, r DarwinDeskto
 	if !r.valid() || !darwinPersonalPermit(run, r.ID) {
 		return errors.New("invalid desktop personal request binding")
 	}
+	if managed, err := requestDarwinServiceRun(ctx, run, darwinServiceRequest{Action: "personal", Personal: &r}); managed {
+		return err
+	}
 	switchValue := func(v bool) string {
 		if v {
 			return "on"

@@ -568,15 +568,14 @@ func (c CLI) upLockedContext(ctx context.Context, o options, cfg policy.Config, 
 	if e != nil {
 		return e
 	}
-	runRoot := filepath.Join(o.profile, "runs")
-	if e := securefile.Dir(runRoot); e != nil {
-		return e
+	managedService := macDesktop && !o.prepareOnly
+	var run string
+	if managedService {
+		fmt.Fprintln(c.Out, "The first connection or an update may require authorization for the macOS network service.")
+		run, e = engine.PrepareMacServiceRun(ctx, o.profile, o.runtime)
+	} else {
+		run, e = newLocalRun(o.profile)
 	}
-	tmp, e := filepath.EvalSymlinks(runRoot)
-	if e != nil {
-		return e
-	}
-	run, e := securefile.TempDir(tmp, "netlaunch-")
 	if e != nil {
 		return e
 	}
@@ -584,6 +583,11 @@ func (c CLI) upLockedContext(ctx context.Context, o options, cfg policy.Config, 
 	defer func() {
 		if !published {
 			_ = os.RemoveAll(run)
+			if managedService {
+				cleanup, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				defer cancel()
+				engine.DiscardMacServiceRun(cleanup, run)
+			}
 		}
 	}()
 	self, e := os.Executable()
@@ -604,8 +608,10 @@ func (c CLI) upLockedContext(ctx context.Context, o options, cfg policy.Config, 
 	if e = securefile.Write(filepath.Join(run, "manifest.json"), m); e != nil {
 		return e
 	}
-	if e = runtimebundle.Copy(o.runtime, filepath.Join(run, "runtime")); e != nil {
-		return e
+	if !managedService {
+		if e = runtimebundle.Copy(o.runtime, filepath.Join(run, "runtime")); e != nil {
+			return e
+		}
 	}
 	if intent.Personal || macDesktop && len(nodes) != 0 {
 		if e = securefile.Write(filepath.Join(run, "nodes.json"), nodes); e != nil {
@@ -642,7 +648,9 @@ func (c CLI) upLockedContext(ctx context.Context, o options, cfg policy.Config, 
 	if o.prepareOnly {
 		return c.prepared(run)
 	}
-	fmt.Fprintln(c.Out, "Administrator authorization will now appear.")
+	if !managedService {
+		fmt.Fprintln(c.Out, "Administrator authorization will now appear.")
+	}
 	var expected *policy.ChannelIntent
 	if macDesktop {
 		expected = &intent
@@ -652,6 +660,18 @@ func (c CLI) upLockedContext(ctx context.Context, o options, cfg policy.Config, 
 		return e
 	}
 	return c.json(s)
+}
+
+func newLocalRun(profile string) (string, error) {
+	runRoot := filepath.Join(profile, "runs")
+	if err := securefile.Dir(runRoot); err != nil {
+		return "", err
+	}
+	resolved, err := filepath.EvalSymlinks(runRoot)
+	if err != nil {
+		return "", err
+	}
+	return securefile.TempDir(resolved, "netlaunch-")
 }
 
 func requiresFreshAuthentication(profile string, cfg policy.Config, status engine.Status) bool {

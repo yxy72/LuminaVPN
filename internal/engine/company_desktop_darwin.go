@@ -37,7 +37,7 @@ func darwinLockedPermit(path string) bool {
 	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || info.Size() != 0 {
 		return false
 	}
-	f, err := os.Open(path)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return false
 	}
@@ -58,6 +58,9 @@ func LaunchDarwinDesktopCompany(ctx context.Context, run string, r DarwinDesktop
 	}
 	if !serviceprotocol.ValidID(r.ID) || r.Generation == 0 || r.Inode == 0 || !darwinCompanyPermit(run, r.ID) {
 		return errors.New("invalid desktop company request binding")
+	}
+	if managed, err := requestDarwinServiceRun(ctx, run, darwinServiceRequest{Action: "company", Company: &r}); managed {
+		return err
 	}
 	switchValue := func(v bool) string {
 		if v {
