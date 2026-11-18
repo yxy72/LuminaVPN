@@ -1,7 +1,8 @@
 import { useState } from 'react'
+import { Building2, EthernetPort, Globe, ShieldCheck, Terminal } from 'lucide-react'
 import { isMacStartEnvironment } from '../../../protocol/client'
 import type { DesiredChannels, MacStartEnvironment, ServiceMutation, ServiceOperation, ServiceSnapshot } from '../../../protocol/client'
-import { ConnectionChannels } from './ChannelProbeStatus'
+import { connectionRouteLabel } from './ChannelProbeStatus'
 
 type MacStart = Extract<ServiceMutation, { kind: 'takeover_start' }>['start']
 
@@ -19,15 +20,51 @@ const states: Record<string, string> = {
   waiting_for_stop_report: '等待停止报告',
   recovering: '等待管理员恢复',
   restored: '管理员恢复已确认',
-  ready_reported: '运行报告就绪',
+  ready_reported: '已连接',
   managed_reported: '网络接管正在运行',
   starting_reported: '运行正在启动',
   preparing_reported: '正在准备运行',
   connecting_reported: '正在连接',
+  reconnecting_reported: '正在重新连接',
+  degraded_reported: '部分通道异常',
+  company_unavailable_reported: '公司 VPN 不可用',
+  personal_unavailable_reported: '个人代理不可用',
+  network_unavailable_reported: '网络不可用',
   stopping_reported: '正在停止',
   stopped_reported: '已收到停止报告',
   recovery_failed_reported: '运行报告恢复失败',
   unconfirmed: '当前运行待确认',
+}
+
+const channelCards = [
+  { name: 'direct', label: '直连', Icon: EthernetPort },
+  { name: 'company', label: '公司 VPN', Icon: Building2 },
+  { name: 'personal', label: '个人代理', Icon: Globe },
+] as const
+
+function channelBadge(snapshot: ServiceSnapshot | null, name: typeof channelCards[number]['name']) {
+  const phase = snapshot?.takeover_state
+  const channel = snapshot?.[name]
+  if ((name === 'company' && phase === 'applying_company') || (name === 'personal' && phase === 'applying_personal')) {
+    return { label: '切换中', tone: 'neutral' }
+  }
+  if (name === 'company' && phase === 'authentication_required_reported') return { label: '待认证', tone: 'warning' }
+  if (channel?.reason === 'all_candidates_failed') return { label: '代理不可用', tone: 'warning' }
+  if (channel?.reason === 'disabled_direct' || (channel?.route === 'blocked_reported' && !channel.desired)) {
+    return { label: '已关闭', tone: 'neutral' }
+  }
+  const probe = channel?.probe
+  if (probe?.scope === 'system_tun') {
+    if (probe.path_state === 'failed') return { label: '路径异常', tone: 'warning' }
+    if (probe.service_state === 'failed') return { label: '服务响应异常', tone: 'warning' }
+    if (probe.path_state === 'verified') {
+      return { label: probe.service_state === 'healthy' ? '健康' : '路径已验证', tone: 'ready' }
+    }
+  }
+  if (channel?.state === 'unavailable_reported' || channel?.state === 'degraded_reported') {
+    return { label: '待检查', tone: 'warning' }
+  }
+  return { label: '待验证', tone: 'neutral' }
 }
 
 export function macOperationText(operation: ServiceOperation): string {
@@ -79,24 +116,42 @@ export function MacLifecycle({ snapshot, configured, busy, preemptible, desired,
   const status = waitingForEnvironment && (state === 'ready_reported' || state === 'managed_reported')
     ? '等待本次运行的环境应用报告'
     : states[state] ?? (snapshot ? '当前运行待确认' : '正在读取网络控制状态')
-  return <section className="client-card connection-overview" aria-labelledby="mac-lifecycle-title">
-    <h2 id="mac-lifecycle-title">网络接管</h2>
-    <p role="status">{status}</p>
-    {environmentReport && <p>已选择 {environmentLabels[environmentReport.selected]} ·
-      已应用 {environmentReport.applied ? environmentLabels[environmentReport.applied] : '等待报告'}</p>}
-    <ConnectionChannels snapshot={snapshot} />
-    <div className="client-actions">
-      <label><input type="checkbox" checked={channels.company} disabled={!canConfigure && !canEditCompany}
-        onChange={event => {
-          if (canEditCompany) setChannel('company', event.target.checked)
-          else setDesired({ ...desired, company: event.target.checked })
-        }} />开启公司 VPN</label>
-      <label><input type="checkbox" checked={channels.personal} disabled={!canConfigure && !canEditPersonal}
-        onChange={event => {
-          if (canEditPersonal) setChannel('personal', event.target.checked)
-          else setDesired({ ...desired, personal: event.target.checked })
-        }} />开启个人代理</label>
-    </div>
+  const rules = environmentReport && (waitingForEnvironment
+    ? `已选择 ${environmentLabels[environmentReport.selected]} · 已应用 ${environmentReport.applied ? environmentLabels[environmentReport.applied] : '等待报告'}`
+    : `${environmentLabels[environmentReport.selected]} · 已应用`)
+  return <section className="client-card mac-takeover" aria-labelledby="mac-lifecycle-title">
+    <header className="mac-takeover-header">
+      <div className="mac-takeover-title">
+        <span className="mac-takeover-symbol"><ShieldCheck size={22} strokeWidth={1.8} aria-hidden="true" /></span>
+        <div>
+          <h2 id="mac-lifecycle-title">网络接管</h2>
+          {rules && <p>{rules}</p>}
+        </div>
+      </div>
+      <p className="mac-takeover-status" role="status" data-ready={state === 'ready_reported' && !waitingForEnvironment}>{status}</p>
+    </header>
+    <ul className="mac-takeover-channels" aria-label="三路出口">
+      {channelCards.map(({ name, label, Icon }) => {
+        const badge = channelBadge(showRun ? snapshot : null, name)
+        const canEdit = name === 'company' ? canEditCompany : canEditPersonal
+        return <li key={name}>
+          <div className="mac-takeover-channel-top">
+            <span className="mac-takeover-symbol"><Icon size={17} strokeWidth={1.8} aria-hidden="true" /></span>
+            <span className="mac-takeover-badge" data-tone={badge.tone}>{badge.label}</span>
+          </div>
+          <div className="mac-takeover-channel-body">
+            <div><strong>{label}</strong><p>{connectionRouteLabel(snapshot, name)}</p></div>
+            {name !== 'direct' && <label className="mac-takeover-toggle">
+              <input type="checkbox" aria-label={`开启${name === 'company' ? '公司 VPN' : '个人代理'}`}
+                checked={channels[name]} disabled={!canConfigure && !canEdit} onChange={event => {
+                  if (canEdit) setChannel(name, event.target.checked)
+                  else setDesired({ ...desired, [name]: event.target.checked })
+                }} />
+            </label>}
+          </div>
+        </li>
+      })}
+    </ul>
     {showRun && !busy && !canEditPersonal && <p>当前运行无法切换个人代理，可在下次连接时调整。</p>}
     {!configured && <p>请先在工作空间设置中保存有效策略。</p>}
     {mayStart && <details className="client-details">
@@ -117,13 +172,17 @@ export function MacLifecycle({ snapshot, configured, busy, preemptible, desired,
           value={duration} required disabled={!canConfigure} onChange={event => setDuration(event.target.value)} /></label>}
       </div>
     </details>}
-    <div className="client-actions">
-      <button disabled={!canAuthenticate} onClick={() => authenticate(canEditCompany)}>在终端进行公司认证</button>
-      <button className="client-primary" disabled={!canConfigure || !configured || mode === 'validation' && !validDuration} onClick={() => {
-        start(mode === 'daily' ? { mode, channels: desired, environment } : { mode, channels: desired, environment, validation_seconds: seconds })
-      }}>连接网络</button>
-      <button disabled={!mayStop || busy && !preemptible} onClick={stop}>请求停止</button>
-      <button disabled={busy && !preemptible} onClick={exit}>{snapshot?.run_ref && state !== 'restored' ? '验证恢复并退出' : '退出 LuminaVPN'}</button>
-    </div>
+    <footer className="mac-takeover-footer">
+      <button className="mac-takeover-quiet" disabled={!canAuthenticate} onClick={() => authenticate(canEditCompany)}>
+        <Terminal size={16} aria-hidden="true" />在终端进行公司认证
+      </button>
+      <div className="client-actions mac-takeover-actions">
+        <button className="mac-takeover-quiet" disabled={busy && !preemptible} onClick={exit}>{snapshot?.run_ref && state !== 'restored' ? '验证恢复并退出' : '退出 LuminaVPN'}</button>
+        <button className={mayStart ? 'client-primary' : undefined} disabled={!canConfigure || !configured || mode === 'validation' && !validDuration} onClick={() => {
+          start(mode === 'daily' ? { mode, channels: desired, environment } : { mode, channels: desired, environment, validation_seconds: seconds })
+        }}>连接网络</button>
+        <button className={mayStop ? 'client-primary' : undefined} disabled={!mayStop || busy && !preemptible} onClick={stop}>请求停止</button>
+      </div>
+    </footer>
   </section>
 }

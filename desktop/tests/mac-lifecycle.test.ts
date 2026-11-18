@@ -33,13 +33,13 @@ describe('macOS startup environment view', () => {
     expect(pending).toContain('已选择 办公')
     expect(pending).toContain('已应用 等待报告')
     expect(pending).toContain('等待本次运行的环境应用报告')
-    expect(pending).not.toContain('运行报告就绪')
+    expect(pending).not.toContain('>已连接<')
     const other = view({ ...running, mac_environment: { selected: 'office', applied: 'home' } })
     expect(other).toContain('已应用 家庭')
-    expect(other).not.toContain('运行报告就绪')
+    expect(other).not.toContain('>已连接<')
     const applied = view({ ...running, mac_environment: { selected: 'office', applied: 'office' } })
-    expect(applied).toContain('已应用 办公')
-    expect(applied).toContain('运行报告就绪')
+    expect(applied).toContain('办公 · 已应用')
+    expect(applied).toContain('>已连接<')
   })
 })
 
@@ -48,15 +48,23 @@ describe('macOS saved route evidence', () => {
     const checked_at = '2026-11-16T12:00:00Z'
     const snapshot: ServiceSnapshot = {
       ...running,
-      direct: { desired: true, route: 'direct_reported', state: 'ready_reported' },
+      direct: {
+        desired: true, route: 'direct_reported', state: 'ready_reported',
+        probe: { scope: 'system_tun', path_state: 'verified', service_state: 'not_checked', checked_at },
+      },
       company: {
         desired: true, route: 'vpn_reported', state: 'unavailable_reported',
         probe: { scope: 'system_tun', path_state: 'verified', service_state: 'failed', checked_at },
       },
       personal: { desired: true, route: 'direct_reported', state: 'degraded_reported', reason: 'all_candidates_failed' },
     }
-    expect(view(snapshot)).toContain('aria-label="三路出口"')
-    expect(view(snapshot)).not.toContain(checked_at)
+    const overview = view(snapshot)
+    expect(overview).toContain('aria-label="三路出口"')
+    expect(overview).toContain('data-tone="ready">路径已验证<')
+    expect(overview).toContain('data-tone="warning">服务响应异常<')
+    expect(overview).toContain('data-tone="warning">代理不可用<')
+    expect(overview).not.toContain('>健康<')
+    expect(overview).not.toContain(checked_at)
     const html = renderToStaticMarkup(createElement(ConnectionChannels, { snapshot, details: true }))
     expect(html).toContain('<strong>直连</strong><span>物理网卡</span>')
     expect(html).toContain('路径已验证 · 服务响应异常')

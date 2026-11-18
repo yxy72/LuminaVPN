@@ -13,7 +13,7 @@ const channels = [
   ['direct', '直连'], ['company', '公司 VPN'], ['personal', '个人代理'],
 ] as const
 
-function routeLabel(snapshot: ServiceSnapshot | null, name: typeof channels[number][0], details: boolean): string {
+export function connectionRouteLabel(snapshot: ServiceSnapshot | null, name: typeof channels[number][0], details = false): string {
   const channel = snapshot?.[name]
   if (snapshot?.takeover_state === 'applying_personal' && name === 'personal' ||
       snapshot?.takeover_state === 'applying_company' && name === 'company') return '等待切换结果'
@@ -41,7 +41,7 @@ export function ConnectionChannels({ snapshot, details = false }: {
     {channels.map(([name, label]) => {
       const channel = snapshot?.[name]
       return <li key={name}>
-        <strong>{label}</strong><span>{routeLabel(snapshot, name, details)}</span>
+        <strong>{label}</strong><span>{connectionRouteLabel(snapshot, name, details)}</span>
         {details && <ChannelProbeStatus channel={channel} />}
       </li>
     })}

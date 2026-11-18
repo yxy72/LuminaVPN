@@ -1252,6 +1252,169 @@ a {
 }
 .connection-channels span { color: var(--muted); font-size: 12px; }
 .connection-channels p { margin: 0; }
+
+.mac-takeover {
+  display: grid;
+  gap: 14px;
+  container-type: inline-size;
+}
+.mac-takeover-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  padding: 15px 17px;
+  border-radius: 9px;
+  background: linear-gradient(112deg, #143e32, #205944);
+  color: #f4fff8;
+}
+.mac-takeover-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.mac-takeover-title h2 { margin: 0; font-size: 20px; line-height: 1.25; }
+.mac-takeover-title p { margin: 4px 0 0; color: #cee5d8; line-height: 1.4; }
+.mac-takeover-symbol {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  color: #176548;
+  background: var(--accent-light);
+}
+.mac-takeover-title .mac-takeover-symbol {
+  width: 39px;
+  height: 39px;
+  color: #e0fbed;
+  background: #d4f8e528;
+}
+.mac-takeover-status, .mac-takeover-badge {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.mac-takeover-status::before, .mac-takeover-badge::before {
+  content: '';
+  flex: 0 0 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  transform: translateY(-2px);
+}
+.mac-takeover-header .mac-takeover-status {
+  margin: 0;
+  border: 1px solid #d4f8e545;
+  font-size: 12px;
+  color: #eef8f2;
+  background: #edf7f31a;
+}
+.mac-takeover-header .mac-takeover-status[data-ready=true] {
+  color: #d8fae7;
+  background: #9be5bc2b;
+}
+.mac-takeover-channels {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  list-style: none;
+  padding: 0;
+  gap: 10px;
+  margin: 0;
+}
+.client-workspace .mac-takeover-channels li {
+  display: grid;
+  align-content: space-between;
+  gap: 10px;
+  margin: 0;
+  padding: 11px 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--soft);
+}
+.mac-takeover-channel-top, .mac-takeover-channel-body {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 6px;
+}
+.mac-takeover-channel-top { flex-wrap: wrap; }
+.mac-takeover-channel-body strong { font-size: 14px; }
+.mac-takeover-channel-body p { margin: 2px 0 0; color: #536c5f; line-height: 1.4; }
+.mac-takeover-badge { background: #e8eeea; color: #52695d; }
+.mac-takeover-badge[data-tone=ready] { background: var(--accent-light); color: #176548; }
+.mac-takeover-badge[data-tone=warning] { background: #f7ead6; color: #79511d; }
+.mac-takeover label.mac-takeover-toggle {
+  justify-content: flex-end;
+  flex-shrink: 0;
+  min-width: 40px;
+  min-height: 28px;
+  margin: 0;
+}
+.mac-takeover-toggle input {
+  appearance: none;
+  width: 33px;
+  height: 19px;
+  margin: 0;
+  border-radius: 999px;
+  border: 1px solid #a8bcb0;
+  background: #c5d4ca;
+  display: grid;
+  align-items: center;
+  padding: 0 2px;
+  cursor: pointer;
+}
+.mac-takeover-toggle input::before {
+  content: '';
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: white;
+  box-shadow: 0 1px 2px #10281942;
+}
+.mac-takeover-toggle input:checked {
+  justify-items: end;
+  background: #1b6047;
+  border-color: #1b6047;
+}
+.mac-takeover-toggle input:disabled { opacity: .5; cursor: not-allowed; }
+.mac-takeover > p { margin: 0; }
+.mac-takeover-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 9px 14px;
+  padding-top: 11px;
+  border-top: 1px solid var(--line);
+}
+.mac-takeover-actions { margin-inline-start: auto; justify-content: flex-end; gap: 8px; }
+.client-workspace .mac-takeover-quiet {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border-color: transparent;
+  padding-inline: 6px;
+  background: transparent;
+  color: #176548;
+}
+.client-workspace .mac-takeover-quiet:hover:not(:disabled) { background: var(--soft); }
+.client-workspace .mac-takeover-actions button:disabled {
+  background: var(--soft);
+  color: #536c5f;
+  border-color: var(--line);
+}
+@container (max-width: 440px) {
+  .mac-takeover-channels { grid-template-columns: minmax(0, 1fr); }
+  .client-workspace .mac-takeover-channels li { gap: 6px; }
+}
 .workspace-status { position: relative; }
 .workspace-status summary {
   list-style: none;
