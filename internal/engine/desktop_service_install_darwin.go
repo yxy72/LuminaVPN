@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -69,8 +70,8 @@ func checkDarwinServiceDir(path string) error {
 }
 
 func makeDarwinServiceDir(path string) error {
-	if err := checkDarwinServiceDir(path); !errors.Is(err, os.ErrNotExist) {
-		return err
+	if path != darwinServiceRoot && !strings.HasPrefix(path, darwinServiceRoot+"/") {
+		return checkDarwinServiceDir(path)
 	}
 	if err := makeDarwinServiceDir(filepath.Dir(path)); err != nil {
 		return err
@@ -78,7 +79,12 @@ func makeDarwinServiceDir(path string) error {
 	if err := os.Mkdir(path, 0711); err != nil && !errors.Is(err, os.ErrExist) {
 		return err
 	}
-	return checkDarwinServiceDir(path)
+	if err := checkDarwinServiceDir(path); err != nil {
+		return err
+	}
+	// launchd and the installer run with umask 077. The desktop needs to
+	// traverse these directories to reach its socket and its own run.
+	return os.Chmod(path, 0711)
 }
 
 func installDarwinService(uid int, bundle string) error {
@@ -88,7 +94,7 @@ func installDarwinService(uid int, bundle string) error {
 	if err := checkDarwinServiceDir(filepath.Dir(darwinServicePlist)); err != nil {
 		return err
 	}
-	dir := filepath.Dir(private(""))
+	dir := darwinStateRoot
 	if err := checkDarwinServiceDir(filepath.Dir(dir)); err != nil {
 		return err
 	}

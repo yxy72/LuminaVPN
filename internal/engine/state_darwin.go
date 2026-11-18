@@ -18,8 +18,10 @@ import (
 	"netlaunch/internal/securefile"
 )
 
+const darwinStateRoot = "/Library/Application Support/NetLaunch"
+
 func private(run string) string {
-	return filepath.Join("/Library/Application Support/NetLaunch", filepath.Base(run))
+	return filepath.Join(darwinStateRoot, filepath.Base(run))
 }
 func readVPNLog(run, name string) ([]byte, error) {
 	return securefile.ReadTail(filepath.Join(private(run), name), 128<<10, true)
