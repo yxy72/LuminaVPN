@@ -198,15 +198,21 @@ func LaunchContext(ctx context.Context, action, run string) error {
 		}
 		self = m.Executable
 	}
-	line := "umask 077; cd /private/tmp && " + shellQuote(self) + " _" + action + " --run " + shellQuote(run)
-	if action == "recover" {
+	return runDarwinAuthorization(ctx, darwinLaunchCommand(action, self, run))
+}
+
+func darwinLaunchCommand(action, executable, run string) string {
+	command := shellQuote(executable) + " _" + action + " --run " + shellQuote(run)
+	switch action {
+	case "serve":
+		// Background only the redirected command. A backgrounded cd && command
+		// list retains the AppleScript output pipes until the coordinator exits.
+		return "umask 077; cd /private/tmp || exit 1; " + command + " >/dev/null 2>&1 </dev/null &"
+	case "recover":
 		frozen := shellQuote(filepath.Join(private(run), "netlaunch"))
-		line = "umask 077; cd /private/tmp && if [ -x " + frozen + " ]; then " + frozen + " _recover --run " + shellQuote(run) + "; else " + shellQuote(self) + " _recover --run " + shellQuote(run) + "; fi"
+		command = "if [ -x " + frozen + " ]; then " + frozen + " _recover --run " + shellQuote(run) + "; else " + command + "; fi"
 	}
-	if action == "serve" {
-		line += " >/dev/null 2>&1 </dev/null &"
-	}
-	return runDarwinAuthorization(ctx, line)
+	return "umask 077; cd /private/tmp && " + command
 }
 
 func runDarwinAuthorization(ctx context.Context, line string) error {
