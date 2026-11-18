@@ -118,6 +118,18 @@ func FetchSnapshot(ctx context.Context, sources Sources) (Snapshot, Result, erro
 	return fetchSnapshotWith(ctx, sources, Read)
 }
 
+// FetchDesktopSnapshot retries a failed download once within the original
+// deadline. HTTP rejection and invalid or incompatible data are not retried.
+func FetchDesktopSnapshot(ctx context.Context, sources Sources) (Snapshot, Result, error) {
+	return fetchSnapshotWith(ctx, sources, func(ctx context.Context, source Source) ([]byte, error) {
+		data, err := Read(ctx, source)
+		if errors.Is(err, ErrDownload) && ctx.Err() == nil {
+			return Read(ctx, source)
+		}
+		return data, err
+	})
+}
+
 func fetchSnapshotWith(ctx context.Context, sources Sources, read func(context.Context, Source) ([]byte, error)) (Snapshot, Result, error) {
 	sources, err := normalizedSources(sources)
 	if err != nil {

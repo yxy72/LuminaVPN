@@ -33,7 +33,7 @@ export type WorkspaceWrite = { request_id: string;profile_id:string } & (
   { action: 'initialize'; policy_json: string; bootstrap_json?: never } | { action: 'initialize'; bootstrap_json: string; policy_json?: never } |
   { action: 'apply'; policy_json: string; expected_revision: string } |
   { action: 'rollback'; revision: string; expected_revision: string } |
-  { action: 'import_nodes'; content: string } | { action: 'sync' } | { action: 'sources_save'; sources_json: string; expected_revision: string } | { action: 'cleanup'; opaque_run_id: string })
+  { action: 'import_nodes'; content: string } | { action: 'sync' | 'measure_nodes' } | { action: 'sources_save'; sources_json: string; expected_revision: string } | { action: 'cleanup'; opaque_run_id: string })
 export type WorkspaceCommand = WorkspaceWrite extends infer W ? W extends WorkspaceWrite ? Omit<W,'request_id'|'profile_id'> : never : never
 export type WorkspaceOperation = ServiceOperation
 export interface ClientAPI {
@@ -117,7 +117,7 @@ export function validateWorkspaceWrite(x: unknown): x is WorkspaceWrite {
     case 'apply': return own(x,[...base,'policy_json','expected_revision']) && text(x.policy_json) && text(x.expected_revision,128)
     case 'rollback': return own(x,[...base,'revision','expected_revision']) && text(x.revision,128) && text(x.expected_revision,128)
     case 'import_nodes': return own(x,[...base,'content']) && text(x.content,700000)
-    case 'sync': return own(x,base)
+    case 'sync': case 'measure_nodes': return own(x,base)
     case 'sources_save': return own(x,[...base,'sources_json','expected_revision']) && text(x.sources_json) && text(x.expected_revision,128) && !!x.expected_revision
     case 'cleanup': return own(x,[...base,'opaque_run_id']) && opaqueID(x.opaque_run_id)
     default: return false

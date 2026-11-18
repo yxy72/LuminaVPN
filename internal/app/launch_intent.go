@@ -12,6 +12,7 @@ import (
 	"netlaunch/internal/platform"
 	"netlaunch/internal/policy"
 	"netlaunch/internal/securefile"
+	p "netlaunch/internal/serviceprotocol"
 	"netlaunch/internal/subscription"
 )
 
@@ -58,7 +59,7 @@ func syncSubscriptionsForIntent(ctx context.Context, profile string, cfg policy.
 }
 
 func syncSubscriptionsForStorage(ctx context.Context, profile string, cfg policy.Config) error {
-	return syncSubscriptionsWith(ctx, profile, cfg, desktopStorageIntent(), true, true, subscription.FetchSnapshot)
+	return syncSubscriptionsWith(ctx, profile, cfg, desktopStorageIntent(), true, true, subscription.FetchDesktopSnapshot)
 }
 
 func syncSubscriptionsWith(ctx context.Context, profile string, cfg policy.Config, intent policy.ChannelIntent, force, storage bool, fetch func(context.Context, subscription.Sources) (subscription.Snapshot, subscription.Result, error)) error {
@@ -83,6 +84,9 @@ func syncSubscriptionsWith(ctx context.Context, profile string, cfg policy.Confi
 	}
 	if !present {
 		if force {
+			if storage {
+				return &p.Error{Code: "SYNC_NO_SOURCES"}
+			}
 			return errors.New("no subscription sources configured")
 		}
 		return nil
@@ -108,6 +112,19 @@ func syncSubscriptionsWith(ctx context.Context, profile string, cfg policy.Confi
 	defer cancel()
 	snapshot, result, err := fetch(bounded, sources)
 	if err != nil {
+		if bounded.Err() != nil {
+			return bounded.Err()
+		}
+		if storage {
+			switch {
+			case errors.Is(err, subscription.ErrDownload):
+				return &p.Error{Code: "SYNC_DOWNLOAD_FAILED", Retryable: true}
+			case errors.Is(err, subscription.ErrHTTPStatus):
+				return &p.Error{Code: "SYNC_SOURCE_REJECTED"}
+			default:
+				return &p.Error{Code: "SYNC_SOURCE_INVALID"}
+			}
+		}
 		return errors.New("subscription refresh failed; previous cache retained")
 	}
 	if storage {
@@ -116,6 +133,9 @@ func syncSubscriptionsWith(ctx context.Context, profile string, cfg policy.Confi
 		_, _, err = effectiveResultForIntent(cfg, result, intent)
 	}
 	if err != nil {
+		if storage {
+			return &p.Error{Code: "SYNC_POLICY_CONFLICT"}
+		}
 		return err
 	}
 	fingerprint, err := snapshot.Fingerprint(sources)

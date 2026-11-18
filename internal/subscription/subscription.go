@@ -170,6 +170,12 @@ func Read(ctx context.Context, s Source) ([]byte, error) {
 	defer transport.CloseIdleConnections()
 	return readHTTPS(ctx, s, transport)
 }
+
+var (
+	ErrDownload   = errors.New("subscription download failed; URL and response omitted")
+	ErrHTTPStatus = errors.New("subscription server did not return success")
+)
+
 func readHTTPS(ctx context.Context, s Source, transport http.RoundTripper) ([]byte, error) {
 	client := &http.Client{Timeout: 20 * time.Second, Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error {
 		return errors.New("subscription redirects are not followed")
@@ -183,11 +189,11 @@ func readHTTPS(ctx context.Context, s Source, transport http.RoundTripper) ([]by
 	req.Header.Set("Accept", "application/yaml, application/json, text/yaml, */*")
 	response, e := client.Do(req)
 	if e != nil {
-		return nil, errors.New("subscription download failed; URL and response omitted")
+		return nil, ErrDownload
 	}
 	defer response.Body.Close()
 	if response.StatusCode != 200 {
-		return nil, errors.New("subscription server did not return success")
+		return nil, ErrHTTPStatus
 	}
 	data, e := io.ReadAll(io.LimitReader(response.Body, (4<<20)+1))
 	if e != nil || len(data) > 4<<20 {

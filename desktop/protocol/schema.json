@@ -1245,6 +1245,28 @@
               "additionalProperties": false,
               "properties": {
                 "action": {
+                  "const": "measure_nodes"
+                },
+                "request_id": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+                },
+                "profile_id": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+                }
+              },
+              "required": [
+                "action",
+                "request_id",
+                "profile_id"
+              ]
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "action": {
                   "const": "sources_save"
                 },
                 "request_id": {

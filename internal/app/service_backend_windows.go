@@ -672,8 +672,15 @@ func (b *fixedLifecycleBackend) Workspace(ctx context.Context, v winservice.Veri
 	var response struct {
 		Completed bool            `json:"completed"`
 		Result    json.RawMessage `json:"result"`
+		ErrorCode string          `json:"error_code,omitempty"`
 	}
-	if decodeServiceHelperJSON(output, &response) != nil || !response.Completed {
+	if decodeServiceHelperJSON(output, &response) != nil {
+		return winservice.Completion{}, backendFailure("WORKSPACE_RESULT_UNCONFIRMED")
+	}
+	if !response.Completed && p.WorkspaceFeedbackCode(response.ErrorCode) {
+		return winservice.Completion{}, backendFailure(response.ErrorCode)
+	}
+	if !response.Completed || response.ErrorCode != "" {
 		return winservice.Completion{}, backendFailure("WORKSPACE_RESULT_UNCONFIRMED")
 	}
 	return winservice.Completion{Revision: current.Revision + 1}, nil

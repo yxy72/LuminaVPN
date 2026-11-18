@@ -168,7 +168,7 @@ func (w WorkspacePayload) Validate() error {
 		allowed = w.Revision != "" && len(w.PolicyJSON)+len(w.BootstrapJSON) == 0 && w.Content == "" && w.OpaqueRunID == "" && len(w.SourcesJSON) == 0
 	case "import_nodes":
 		allowed = w.Content != "" && len(w.PolicyJSON)+len(w.BootstrapJSON) == 0 && w.Revision == "" && w.OpaqueRunID == "" && len(w.SourcesJSON) == 0
-	case "sync":
+	case "sync", "measure_nodes":
 		allowed = len(w.PolicyJSON)+len(w.BootstrapJSON) == 0 && w.Revision == "" && w.Content == "" && w.OpaqueRunID == "" && len(w.SourcesJSON) == 0
 	case "sources_save":
 		allowed = len(w.SourcesJSON) > 0 && w.Content == "" && len(w.PolicyJSON)+len(w.BootstrapJSON) == 0 && w.Revision == "" && w.OpaqueRunID == ""
@@ -182,6 +182,16 @@ func (w WorkspacePayload) Validate() error {
 		return errors.New("invalid workspace JSON document")
 	}
 	return nil
+}
+
+// WorkspaceFeedbackCode is the set of safe worker errors exposed to the UI.
+func WorkspaceFeedbackCode(code string) bool {
+	switch code {
+	case "SYNC_NO_SOURCES", "SYNC_DOWNLOAD_FAILED", "SYNC_SOURCE_REJECTED", "SYNC_SOURCE_INVALID", "SYNC_POLICY_CONFLICT",
+		"NODE_PROBE_NO_NODES", "NODE_PROBE_TARGET_MISSING", "NODE_PROBE_UNAVAILABLE":
+		return true
+	}
+	return false
 }
 
 // Mutation has exactly one typed payload selected by Kind. Credentials are

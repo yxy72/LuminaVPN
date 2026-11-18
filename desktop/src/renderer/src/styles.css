@@ -1333,3 +1333,7 @@ a {
   .connection-channels { gap: 5px; }
   .client-workspace .connection-channels li { padding: 8px 6px; }
 }
+
+
+.client-workspace .node-latency-sort { padding: 0; background: none; border: 0; font-weight: inherit; }
+.node-latency-value { font-variant-numeric: tabular-nums; }

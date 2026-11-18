@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -57,13 +58,22 @@ func WorkspaceWorker(in io.Reader, out io.Writer) error {
 	if request.ProfileID != hex.EncodeToString(sum[:16]) {
 		return errors.New("profile is not enrolled in the user workspace")
 	}
-	d := DesktopCommands{Profile: profile}
+	image, err := os.Executable()
+	if err != nil {
+		return errors.New("workspace runtime unavailable")
+	}
+	d := DesktopCommands{Profile: profile, Runtime: filepath.Join(filepath.Dir(image), "runtime")}
 	ctx := context.Background() // The service owns the process/operation lifetime.
 	result, err := d.Execute(ctx, request.Workspace)
+	response := map[string]any{"completed": true, "result": result}
 	if err != nil {
-		return errors.New("workspace action failed; private details omitted")
+		var feedback *p.Error
+		if !errors.As(err, &feedback) || !p.WorkspaceFeedbackCode(feedback.Code) {
+			return errors.New("workspace action failed; private details omitted")
+		}
+		response = map[string]any{"completed": false, "error_code": feedback.Code}
 	}
-	encoded, err := json.Marshal(map[string]any{"completed": true, "result": result})
+	encoded, err := json.Marshal(response)
 	if err != nil || len(encoded) > p.MaxFrame {
 		return errors.New("workspace result unavailable")
 	}

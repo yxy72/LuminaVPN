@@ -373,7 +373,7 @@ func (d *Desktop) submitWorkspace(ctx context.Context, raw json.RawMessage) (any
 		allowed = append(allowed, "revision", "expected_revision")
 	case "import_nodes":
 		allowed = append(allowed, "content")
-	case "sync":
+	case "sync", "measure_nodes":
 	case "cleanup":
 		if d.localWorkspace != nil {
 			return nil, unavailable("CLIENT_UNAVAILABLE", "Privileged run cleanup is unavailable in the local workspace.")

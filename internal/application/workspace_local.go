@@ -140,7 +140,11 @@ func (w *localWorkspace) execute(id string, work p.WorkspacePayload) {
 	if err != nil {
 		record.operation.Phase = "failed"
 		record.operation.Error = &p.Error{Code: "CLIENT_OPERATION_FAILED", Message: "The local workspace operation could not be completed."}
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		var typed *p.Error
+		if errors.As(err, &typed) && p.WorkspaceFeedbackCode(typed.Code) {
+			record.operation.Error.Code = typed.Code
+			record.operation.Error.Retryable = typed.Retryable
+		} else if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			record.operation.Error.Code = "WORKSPACE_INTERRUPTED"
 		}
 	}

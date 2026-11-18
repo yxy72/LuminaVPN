@@ -22,8 +22,8 @@ export interface Profile {
   node_count: number; revision: string | null; transaction_pending: boolean; issues: string[]; read_only: boolean
 }
 export interface Nodes {
-  items: { id: string; name: string; type: string; region?: string; selected: boolean }[]; total: number; offset: number; limit: number
-  inventory: string; selection_scope: string; latency: 'not_provided'
+  items: { id: string; name: string; type: string; region?: string; selected: boolean; latency_ms?: number; latency_state?: 'measured' | 'failed' }[]; total: number; offset: number; limit: number
+  inventory: string; selection_scope: string; latency: 'not_provided' | 'measured'; latency_checked_at?: string
 }
 export interface Config {
   revision: string | null; rules: { type: string; value: string; target: string; source: string; index: number; guard?: boolean }[]

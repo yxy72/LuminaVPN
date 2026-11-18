@@ -17,7 +17,7 @@ type Page = 'overview' | 'nodes' | 'rules' | 'diagnostics' | 'settings'
 type PolicyDocument = Record<string, unknown>
 const initialPolicy = (): PolicyDocument => ({ version: 1, company: { domains: [], cidrs: [], dns: [] }, personal: { domains: [], cidrs: [], dns: [] }, direct_dns: [], vpn: { server: '', endpoint_ipv4: '' }, ports: { proxy: 7890, dns: 1053 }, probes: [], personal_rules: [] })
 const pretty = (x: unknown) => JSON.stringify(x, null, 2)
-function safeError(error: unknown): string { const code = isRecord(error) && typeof error.code === 'string' && /^[A-Z_]{1,64}$/.test(error.code) ? error.code : 'CLIENT_OPERATION_FAILED'; return ({ SERVICE_UNAVAILABLE: '后台服务不可用。请检查安装状态；现有连接是否已恢复尚未确认。', PROFILE_NOT_ENROLLED:'此配置尚未登记到后台服务。配置标识不能代替系统登记，连接状态未确认。', PROFILE_UNAVAILABLE:'后台尚无此配置的可信登记。连接状态未确认。', REVISION_CONFLICT: '配置已被其他操作更新，请重新读取并检查差异。', AUTH_REQUIRED: '请完成新的认证挑战。', CLIENT_UNAVAILABLE: '当前平台未提供此操作。', PROFILE_BUSY: '已有配置操作或配置切换正在进行。', EXIT_WORKSPACE_BUSY: '当前操作还在进行，请等待完成后退出。', EXIT_WORKSPACE_STATUS_UNAVAILABLE: '无法确认配置操作已完成。请刷新工作空间后重试。', OPERATION_NOT_FOUND: '操作记录已失效，请重新读取已保存配置。', MAC_START_FAILED: '连接未完成。请检查所选通道的配置及 macOS 授权。', MAC_AUTH_REQUIRED: '公司 VPN 需要有效会话，请在终端完成公司认证后再连接。', MAC_AUTH_FAILED: '公司认证未完成。请检查公司配置或终端提示。', MAC_OPERATION_INTERRUPTED: '网络操作已中断，请检查运行并按需使用恢复入口。', MAC_RECOVERY_UNCONFIRMED: '管理员恢复未确认。请检查诊断页后重试。', MAC_STOP_UNCONFIRMED: '停止报告尚未收到，请检查诊断页。', MAC_PERSONAL_UNAVAILABLE: '当前运行不支持切换个人代理，可在下次连接时调整。', MAC_PERSONAL_UNCONFIRMED: '个人代理设置尚未确认，请刷新当前运行状态。', RECOVERY_REQUIRED: '上一运行需要先确认恢复。', RUN_UNCONFIRMED: '无法绑定当前运行，请刷新诊断页。', EXIT_RESTORE_UNAVAILABLE: '当前运行的管理员恢复未确认，窗口保持打开。', EXIT_RESTORE_FAILED: '恢复操作未完成，窗口保持打开。', EXIT_RESTORE_UNCONFIRMED: '管理员恢复未确认，窗口保持打开。', EXIT_OPERATION_MISMATCH: '当前运行与恢复操作不匹配，请刷新诊断。', EXIT_RESTORE_TIMEOUT: '等待管理员恢复超时，窗口保持打开。' } as Record<string,string>)[code] ?? '操作未完成。请保留恢复入口，刷新状态后检查。' }
+function safeError(error: unknown): string { const code = isRecord(error) && typeof error.code === 'string' && /^[A-Z_]{1,64}$/.test(error.code) ? error.code : 'CLIENT_OPERATION_FAILED'; return ({ SERVICE_UNAVAILABLE: '后台服务不可用。请检查安装状态；现有连接是否已恢复尚未确认。', SYNC_NO_SOURCES: '还没有订阅来源。请在「来源配置」中填写并保存。', SYNC_DOWNLOAD_FAILED: '连接订阅服务失败。已有缓存可继续使用。', SYNC_SOURCE_REJECTED: '订阅服务拒绝了请求。请检查链接是否有效。已有缓存可继续使用。', SYNC_SOURCE_INVALID: '订阅内容或来源设置无法通过校验。已有缓存可继续使用。', SYNC_POLICY_CONFLICT: '新订阅与本机策略冲突。已有缓存可继续使用。', WORKSPACE_INTERRUPTED: '操作已中断，请重试。', NODE_PROBE_NO_NODES: '请先同步或导入节点。', NODE_PROBE_TARGET_MISSING: '请在工作空间设置中配置一个个人通道检查目标。', NODE_PROBE_UNAVAILABLE: '未获得可用的测速结果，请重试。', STOP_REQUIRED: '请停止当前接管后再操作。',  PROFILE_NOT_ENROLLED:'此配置尚未登记到后台服务。配置标识不能代替系统登记，连接状态未确认。', PROFILE_UNAVAILABLE:'后台尚无此配置的可信登记。连接状态未确认。', REVISION_CONFLICT: '配置已被其他操作更新，请重新读取并检查差异。', AUTH_REQUIRED: '请完成新的认证挑战。', CLIENT_UNAVAILABLE: '当前平台未提供此操作。', PROFILE_BUSY: '已有配置操作或配置切换正在进行。', EXIT_WORKSPACE_BUSY: '当前操作还在进行，请等待完成后退出。', EXIT_WORKSPACE_STATUS_UNAVAILABLE: '无法确认配置操作已完成。请刷新工作空间后重试。', OPERATION_NOT_FOUND: '操作记录已失效，请重新读取已保存配置。', MAC_START_FAILED: '连接未完成。请检查所选通道的配置及 macOS 授权。', MAC_AUTH_REQUIRED: '公司 VPN 需要有效会话，请在终端完成公司认证后再连接。', MAC_AUTH_FAILED: '公司认证未完成。请检查公司配置或终端提示。', MAC_OPERATION_INTERRUPTED: '网络操作已中断，请检查运行并按需使用恢复入口。', MAC_RECOVERY_UNCONFIRMED: '管理员恢复未确认。请检查诊断页后重试。', MAC_STOP_UNCONFIRMED: '停止报告尚未收到，请检查诊断页。', MAC_PERSONAL_UNAVAILABLE: '当前运行不支持切换个人代理，可在下次连接时调整。', MAC_PERSONAL_UNCONFIRMED: '个人代理设置尚未确认，请刷新当前运行状态。', RECOVERY_REQUIRED: '上一运行需要先确认恢复。', RUN_UNCONFIRMED: '无法绑定当前运行，请刷新诊断页。', EXIT_RESTORE_UNAVAILABLE: '当前运行的管理员恢复未确认，窗口保持打开。', EXIT_RESTORE_FAILED: '恢复操作未完成，窗口保持打开。', EXIT_RESTORE_UNCONFIRMED: '管理员恢复未确认，窗口保持打开。', EXIT_OPERATION_MISMATCH: '当前运行与恢复操作不匹配，请刷新诊断。', EXIT_RESTORE_TIMEOUT: '等待管理员恢复超时，窗口保持打开。' } as Record<string,string>)[code] ?? '操作未完成。请保留恢复入口，刷新状态后检查。' }
 function OverrideEditor({title,value,onChange}:{title:string;value:string;onChange:(value:string)=>void}) {
   const [type,setType]=useState<EnvironmentOverride['type']>('domain'),[target,setTarget]=useState<EnvironmentOverride['target']>('personal'),[rule,setRule]=useState(''),[editing,setEditing]=useState<number|null>(null)
   let rows:EnvironmentOverride[]=[];try{const parsed:unknown=JSON.parse(value);if(Array.isArray(parsed)&&parsed.every(isRecord))rows=parsed as unknown as EnvironmentOverride[]}catch{}
@@ -54,6 +54,7 @@ export function ClientWorkspace({ page, statusTarget, api, refreshInventory, nod
   const [policyFeedback, setPolicyFeedback] = useState<{ message: string; error?: boolean } | null>(null)
   const [savingPolicy, setSavingPolicy] = useState(false)
   const pendingPolicy = useRef<{ requestID: string; draft: string } | null>(null)
+  const workspaceRequest = useRef<{ id: string; action: WorkspaceCommand['action'] } | null>(null)
   const [sources, setSources] = useState('')
   const [sourcesPresent,setSourcesPresent]=useState(false),[sourceReplacement,setSourceReplacement]=useState(false)
   const [bootstrap,setBootstrap]=useState(''),[initializeMode,setInitializeMode]=useState<'policy'|'bootstrap'>('policy')
@@ -180,7 +181,7 @@ export function ClientWorkspace({ page, statusTarget, api, refreshInventory, nod
           setBusy(false)
           refreshInventory()
           if (next.kind === 'workspace') void finishPolicy(next)
-          if (next.error) setError(safeError(next.error))
+          if (next.error) { setNotice(null); setError(safeError(next.error)) }
           else {
             setNotice(operationNotice(next))
             if (next.kind === 'workspace') void refreshDocumentMetadata()
@@ -232,6 +233,10 @@ export function ClientWorkspace({ page, statusTarget, api, refreshInventory, nod
     } catch (error) { setError(safeError(error)) }
   }
   const operationNotice = (next: ServiceOperation): string => {
+    if (next.request_id === workspaceRequest.current?.id) {
+      if (workspaceRequest.current.action === 'sync') return '订阅已同步，下次连接使用更新后的节点和规则。'
+      if (workspaceRequest.current.action === 'measure_nodes') return '节点测速已完成。'
+    }
     if (next.kind === 'workspace' || next.kind === 'settings_apply') return '配置操作已完成，请重新读取保存结果。'
     if (macosClient && next.phase === 'authenticated') return next.run_ref ? '本次运行的公司会话已更新。' : '公司认证已完成，可以连接网络。'
     if (macosClient && next.phase === 'company_applied') return '公司 VPN 设置已应用到本次运行。'
@@ -247,9 +252,11 @@ export function ClientWorkspace({ page, statusTarget, api, refreshInventory, nod
     setOperation(next)
     pending.current = next.completed ? null : next.operation_id
     setBusy(!next.completed)
-    if (next.error) setError(safeError(next.error))
+    if (next.error) { setNotice(null); setError(safeError(next.error)) }
     else setNotice(next.completed ? operationNotice(next)
-      : next.kind === 'workspace' ? '配置操作进行中，请保持应用打开。'
+      : workspaceRequest.current?.id === next.request_id && workspaceRequest.current.action === 'sync' ? '正在同步订阅。'
+        : workspaceRequest.current?.id === next.request_id && workspaceRequest.current.action === 'measure_nodes' ? '正在测量节点延迟。'
+        : next.kind === 'workspace' ? '配置操作进行中，请保持应用打开。'
         : windowsClient ? '后台服务已接受操作。'
           : next.kind === 'auth_begin' ? '请在本机 Terminal 完成公司认证。'
             : next.kind === 'channels_set' ? '正在应用本次运行的通道设置。' : '网络操作进行中，请留意 macOS 授权提示。')
@@ -265,6 +272,7 @@ export function ClientWorkspace({ page, statusTarget, api, refreshInventory, nod
       setError(windowsClient ? '后台服务尚未确认可用。' : '请等待当前配置操作完成，或刷新工作空间。')
       return
     }
+    if (busy) return
     const requestID = crypto.randomUUID()
     const policyChange = request.action === 'apply' || request.action === 'initialize' || request.action === 'rollback'
     if (policyChange) {
@@ -273,6 +281,7 @@ export function ClientWorkspace({ page, statusTarget, api, refreshInventory, nod
       setSavingPolicy(true)
       setPolicyFeedback(null)
     }
+    workspaceRequest.current = { id: requestID, action: request.action }
     setBusy(true); setError(null); setNotice(null)
     try {
       accepted(await scopedCommand({ ...request, profile_id: profileID, request_id: requestID } as WorkspaceWrite) as ServiceOperation)
@@ -349,7 +358,11 @@ export function ClientWorkspace({ page, statusTarget, api, refreshInventory, nod
     ? `后台操作记录 ${operation.kind} · ${operation.phase}${operation.restored ? ' · 已确认恢复' : ''}`
     : macOperationText(operation))
   const inProgress = busy || workspaceActivity === true || operation?.completed === false
-  const statusLabel = error ? '操作需检查' : inProgress
+  const work = workspaceRequest.current?.action
+  const syncActive = busy && work === 'sync'
+  const measurementActive = busy && work === 'measure_nodes'
+  const nodeWriteDisabled = busy || !canControl || windowsClient && !!snapshot?.run_ref
+  const statusLabel = error ? '操作需检查' : syncActive ? '同步订阅中' : measurementActive ? '节点测速中' : inProgress
     ? operation?.kind === 'workspace' || savingPolicy ? '配置操作进行中' : '操作进行中'
     : windowsClient ? snapshot?.service_state === 'available' ? '后台服务可用' : '后台服务待确认'
       : workspaceActivity === null ? '正在确认配置' : '配置可编辑'
@@ -494,8 +507,11 @@ export function ClientWorkspace({ page, statusTarget, api, refreshInventory, nod
       </section>}
       {page==='settings'&&windowsClient&&<section className="client-card"><h2>工作环境与启动设置</h2><button disabled={busy} onClick={()=>{void chooseProfile()}}>选择本机配置目录</button><button disabled={busy} onClick={()=>{void restoreDefaultProfile()}}>恢复默认配置目录</button><p>仅当当前目录明确未登记时，可接回服务已登记的默认目录与现有运行；此操作不修改通道或环境设置。</p><label><input type="checkbox" checked={false} disabled/>自动连接暂不可用（保持关闭）</label><label>当前环境<select value={environment} onChange={e=>setEnvironment(e.target.value as 'office'|'home')}><option value="home">家庭</option><option value="office">办公</option></select></label><div className="client-grid"><OverrideEditor title="办公" value={officeRules} onChange={setOfficeRules}/><OverrideEditor title="家庭" value={homeRules} onChange={setHomeRules}/></div><p>覆盖规则只能使用 personal 或 direct，不改变公司精确授权优先级。</p><button disabled={busy||!canControl||!snapshot?.settings} onClick={applySettings}>保存启动与环境设置</button><p>会话由后台加密保存，最多复用两小时；密码/OTP 不保存。实际认证状态以服务挑战为准。</p></section>}
     </>}
-    {page==='nodes'&&<><h1>个人节点与订阅来源</h1><div className="client-actions"><button disabled={busy||!canControl} onClick={()=>{void importNodes()}}>选择并导入节点文件</button><button disabled={busy||!canControl} onClick={()=>{void command({action:'sync'})}}>同步已配置来源</button></div>
-      <NodeInventory nodes={nodes} savedNode={savedNode} channel={snapshot?.personal} load={loadNodes} refresh={refreshInventory} />
+    {page==='nodes'&&<><h1>个人节点与订阅来源</h1><div className="client-actions"><button disabled={busy||!canControl} onClick={()=>{void importNodes()}}>选择并导入节点文件</button><button disabled={nodeWriteDisabled} onClick={()=>{void command({action:'sync'})}}>{syncActive ? '同步订阅中…' : '同步已配置来源'}</button></div>
+      {notice && !error && !busy && (work === 'sync' || work === 'measure_nodes') && <p role="status">{notice}</p>}
+      <NodeInventory nodes={nodes} savedNode={savedNode} channel={snapshot?.personal} load={loadNodes} refresh={refreshInventory}
+        measuring={measurementActive} canMeasure={!nodeWriteDisabled}
+        measure={() => { void command({ action: 'measure_nodes' }) }} />
       <details className="client-card client-details"><summary>来源配置</summary><p>来源状态：{subscriptions?.configured?'已配置':subscriptions?'尚未配置':'未确认'} · 缓存：{subscriptions?.cache_available?'可用':'未确认'}</p><ul>{subscriptions?.sources.map(source=><li key={source.id}>{source.id} · {source.kind} · {source.state}</li>)}</ul><SourceEditor value={sources} onChange={setSources}/><label>高级来源 JSON<textarea className="client-json" value={sources} onChange={e=>setSources(e.target.value)} spellCheck={false}/></label>{sourcesPresent&&<p>此配置已有来源，现有链接不回显。保存将用本次输入替换来源。</p>}{sourcesPresent&&<label><input type="checkbox" checked={sourceReplacement} onChange={e=>setSourceReplacement(e.target.checked)}/>确认替换现有来源</label>}<button disabled={busy||!canControl||!revision||!sources.trim()||sourcesPresent&&!sourceReplacement} onClick={()=>{void command({action:'sources_save',sources_json:sources,expected_revision:revision})}}>校验并保存来源</button></details>
     </>}
     {page==='diagnostics'&&<><h1>诊断、版本与恢复</h1>

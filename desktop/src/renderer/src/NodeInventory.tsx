@@ -8,14 +8,18 @@ const regions = new Intl.DisplayNames(['zh-CN'], { type: 'region', fallback: 'no
 const protocols: Record<string, string> = { vless: 'VLESS', hysteria2: 'Hysteria 2' }
 const candidateStates = { pending: '检查中', healthy: '通过', failed: '失败', unknown: '待确认' }
 
-export function NodeInventory({ nodes, savedNode, channel, load, refresh }: {
+export function NodeInventory({ nodes, savedNode, channel, load, refresh, measure, measuring, canMeasure }: {
   nodes: Nodes | null
   savedNode?: string | null
   channel?: ServiceChannel
   load: (offset: number) => void
   refresh: () => void
+  measure: () => void
+  measuring: boolean
+  canMeasure: boolean
 }) {
   const [query, setQuery] = useState('')
+  const [sortByLatency, setSortByLatency] = useState(false)
   const health = channel?.health_epoch === channel?.health?.epoch ? channel?.health : undefined
   const candidates = health?.candidates.filter(c =>
     c.epoch === health.epoch && c.config_revision === health.config_revision &&
@@ -35,6 +39,8 @@ export function NodeInventory({ nodes, savedNode, channel, load, refresh }: {
   const search = query.trim().toLocaleLowerCase()
   const visible = entries.filter(node => [node.id, node.area, node.region, node.protocol]
     .some(value => value?.toLocaleLowerCase().includes(search)))
+  if (sortByLatency) visible.sort((a, b) => (a.latency_ms ?? Infinity) - (b.latency_ms ?? Infinity))
+  const measuredAt = nodes?.latency_checked_at
   return <section className="client-card">
     <h2>节点选择与健康</h2>
     <div className="node-health-summary">
@@ -55,13 +61,24 @@ export function NodeInventory({ nodes, savedNode, channel, load, refresh }: {
     <div className="node-inventory-toolbar">
       <label>搜索本页节点<input type="search" placeholder="地区、协议或编号" value={query}
         onChange={event => setQuery(event.target.value)} /></label>
-      <button onClick={refresh}>刷新库存</button>
+      <div className="client-actions">
+        <button disabled={!canMeasure || !nodes?.total} onClick={measure}>
+          {measuring ? '正在测延迟…' : '测量节点延迟'}
+        </button>
+        <button onClick={refresh}>刷新库存</button>
+      </div>
     </div>
+    {measuredAt && <p>最近测速 <time dateTime={measuredAt}>{new Date(measuredAt).toLocaleTimeString()}</time></p>}
     <div className="client-table-scroll" key={nodes?.offset} tabIndex={0} role="region" aria-label="本机节点库存">
       <table className="client-table">
-        <thead><tr><th scope="col">地区标注</th><th scope="col">编号</th><th scope="col">协议</th></tr></thead>
+        <thead><tr><th scope="col">地区标注</th><th scope="col">编号</th><th scope="col">协议</th>
+          <th scope="col" aria-sort={sortByLatency ? 'ascending' : 'none'}>
+            <button className="node-latency-sort" onClick={() => setSortByLatency(!sortByLatency)}>延迟（ms）{sortByLatency ? ' ↑' : ''}</button>
+          </th>
+        </tr></thead>
         <tbody>{visible.map(node => <tr key={node.id}>
           <td>{node.area ?? '未标注'}</td><td><code>{node.id}</code></td><td>{node.protocol}</td>
+          <td className="node-latency-value">{node.latency_ms ?? (node.latency_state === 'failed' ? '未通过' : '—')}</td>
         </tr>)}</tbody>
       </table>
       {!visible.length && <p className="client-table-empty">{nodes ? nodes.total ? '本页没有匹配的节点' : '尚无节点，请导入或同步来源' : '正在读取本机节点'}</p>}

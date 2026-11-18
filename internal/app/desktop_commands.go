@@ -42,6 +42,8 @@ func (d DesktopCommands) Execute(ctx context.Context, w serviceprotocol.Workspac
 		return d.ImportNodes(ctx, []byte(w.Content))
 	case "sync":
 		return d.SyncSubscriptions(ctx)
+	case "measure_nodes":
+		return d.MeasureNodes(ctx)
 	case "sources_save":
 		return d.SaveSources(ctx, w.SourcesJSON, w.ExpectedPolicyRevision)
 	case "cleanup":
@@ -290,7 +292,11 @@ func (d DesktopCommands) SyncSubscriptions(ctx context.Context) (any, error) {
 		return nil, err
 	}
 	if err = syncSubscriptionsForStorage(ctx, d.Profile, cfg); err != nil {
-		return nil, err
+		var typed *serviceprotocol.Error
+		if errors.As(err, &typed) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, err
+		}
+		return nil, &serviceprotocol.Error{Code: "SYNC_SOURCE_INVALID"}
 	}
 	return map[string]any{"updated": true, "applies_to": "next_start"}, nil
 }

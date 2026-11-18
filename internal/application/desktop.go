@@ -234,20 +234,23 @@ func (d *Desktop) GetState() State {
 }
 
 type Node struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Type     string `json:"type"`
-	Region   string `json:"region,omitempty"`
-	Selected bool   `json:"selected"`
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Type         string `json:"type"`
+	Region       string `json:"region,omitempty"`
+	LatencyMS    *int   `json:"latency_ms,omitempty"`
+	LatencyState string `json:"latency_state,omitempty"`
+	Selected     bool   `json:"selected"`
 }
 type Nodes struct {
-	Items          []Node `json:"items"`
-	Total          int    `json:"total"`
-	Offset         int    `json:"offset"`
-	Limit          int    `json:"limit"`
-	Inventory      string `json:"inventory"`
-	SelectionScope string `json:"selection_scope"`
-	Latency        string `json:"latency"`
+	Items            []Node     `json:"items"`
+	Total            int        `json:"total"`
+	Offset           int        `json:"offset"`
+	Limit            int        `json:"limit"`
+	Inventory        string     `json:"inventory"`
+	SelectionScope   string     `json:"selection_scope"`
+	Latency          string     `json:"latency"`
+	LatencyCheckedAt *time.Time `json:"latency_checked_at,omitempty"`
 }
 
 func (d *Desktop) ListNodes(offset, limit int) (Nodes, error) {
@@ -275,6 +278,14 @@ func (d *Desktop) ListNodes(offset, limit int) (Nodes, error) {
 	if err != nil {
 		return out, unavailable("NODE_CACHE_UNAVAILABLE", "Validated node cache unavailable; use the existing CLI to import or sync.")
 	}
+	var measurements map[string]int
+	if d.WorkspaceEnabled() {
+		var checked time.Time
+		measurements, checked = app.DesktopNodeLatency(d.Profile, cfg, nodes, d.Now())
+		if !checked.IsZero() {
+			out.Latency, out.LatencyCheckedAt = "measured", &checked
+		}
+	}
 	out.Total = len(nodes)
 	end := min(offset+limit, len(nodes))
 	for i := offset; i < end; i++ {
@@ -288,6 +299,13 @@ func (d *Desktop) ListNodes(offset, limit int) (Nodes, error) {
 		node := Node{ID: id, Name: id, Type: oneOf(typ, "unknown", "vless", "hysteria2")}
 		if i < len(regions) {
 			node.Region = regions[i]
+		}
+		if ms, ok := measurements[id]; ok {
+			if ms < 0 {
+				node.LatencyState = "failed"
+			} else {
+				node.LatencyState, node.LatencyMS = "measured", &ms
+			}
 		}
 		out.Items = append(out.Items, node)
 	}

@@ -294,6 +294,7 @@ let selectedEnvironment
 let appliedEnvironment
 let revision = 1
 let active
+let measuredAt
 const operations = new Map()
 const reachability = { state: 'unknown', reason: '', checked_at: null, path_state: 'unknown', service_state: 'unknown' }
 const methods = [
@@ -416,7 +417,12 @@ function handle(method, params) {
         node_count: 0, revision: null, transaction_pending: false, issues: [], read_only: false,
       }
     case 'nodes.list':
-      return { total: 0, offset: 0, limit: 100, inventory: 'empty', selection_scope: 'not_compared', latency: 'not_provided', items: [] }
+      return { total: 2, offset: 0, limit: 100, inventory: 'next_start', selection_scope: 'not_compared',
+        latency: measuredAt ? 'measured' : 'not_provided', latency_checked_at: measuredAt,
+        items: [
+          { id: 'P001', name: 'P001', type: 'vless', selected: false, ...(measuredAt ? { latency_ms: 18, latency_state: 'measured' } : {}) },
+          { id: 'P002', name: 'P002', type: 'vless', selected: false, ...(measuredAt ? { latency_state: 'failed' } : {}) },
+        ] }
     case 'config.get':
       return { revision: null, total: 0, offset: 0, limit: 100, static_only: true, read_only: true, rules: [] }
     case 'subscriptions.summary':
@@ -425,6 +431,21 @@ function handle(method, params) {
       return { checked_at: now(), read_only: true, checks: [] }
     case 'recovery.describe':
       return { required: false, run_ref: run ?? null, stop_requested: false, available: true, instructions: [], read_only: true }
+    case 'workspace.submit': {
+      const operation = { operation_id: params.request_id, request_id: params.request_id, profile_id: profile,
+        revision, kind: 'workspace', phase: 'running', completed: false, restored: false, created_at: now(), updated_at: now() }
+      operations.set(operation.operation_id, operation)
+      if (params.action === 'sync') {
+        setTimeout(() => Object.assign(operation, { completed: true, phase: 'failed', updated_at: now(),
+          error: { code: 'SYNC_DOWNLOAD_FAILED', message: 'Source unavailable.', retryable: true } }), 350)
+      } else if (params.action === 'measure_nodes') {
+        setTimeout(() => {
+          measuredAt = now()
+          Object.assign(operation, { completed: true, phase: 'completed', updated_at: measuredAt })
+        }, 350)
+      } else throw new Error('INVALID_PARAMS')
+      return operation
+    }
     case 'workspace.read':
       return params.action === 'activity' ? { profile_id: profile, active: Boolean(active) } : { profile_id: profile }
     case 'service.snapshot':
@@ -693,6 +714,26 @@ test('macOS sends a startup-only environment and waits for its applied report', 
     await expect(page.getByText(/已选择 办公.*已应用 办公/)).toBeVisible()
     await expect(page.getByText('运行报告就绪', { exact: true })).toBeVisible()
     await expect(environment).toHaveCount(0)
+  } finally { await close() }
+})
+
+test('node latency and subscription failure use distinct workspace feedback', async () => {
+  test.skip(process.platform !== 'darwin', 'Requires the macOS desktop main process')
+  const { application, close } = await launchMacChannelFixture(true)
+  try {
+    const page = await application.firstWindow()
+    await page.getByRole('button', { name: /代理节点/ }).click()
+    await page.getByRole('button', { name: '同步已配置来源' }).click()
+    await expect(page.getByRole('alert')).toContainText('连接订阅服务失败')
+    const indicator = page.locator('summary[aria-label="工作空间状态"]')
+    await indicator.click()
+    await expect(page.locator('.workspace-status-panel')).not.toContainText('正在同步订阅')
+    await indicator.press('Escape')
+    await page.getByRole('button', { name: '测量节点延迟' }).click()
+    await expect(page.getByText('节点测速已完成。', { exact: true }).filter({ visible: true })).toBeVisible()
+    const inventory = page.getByRole('region', { name: '本机节点库存' })
+    await expect(inventory.getByRole('row').filter({ hasText: 'P001' }).getByRole('cell').last()).toHaveText('18')
+    await expect(inventory.getByRole('row').filter({ hasText: 'P002' }).getByRole('cell').last()).toHaveText('未通过')
   } finally { await close() }
 })
 
