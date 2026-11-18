@@ -50,6 +50,11 @@ func fakeIPFixturePort(t *testing.T) *net.UDPConn {
 
 func serveFakeIPFixtureDNS(t *testing.T, resolver *net.UDPConn) {
 	t.Helper()
+	serveFixtureDNSAnswer(t, resolver, [4]byte{127, 0, 0, 1})
+}
+
+func serveFixtureDNSAnswer(t *testing.T, resolver *net.UDPConn, answer [4]byte) {
+	t.Helper()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -71,7 +76,8 @@ func serveFakeIPFixtureDNS(t *testing.T, resolver *net.UDPConn) {
 			clear(reply[6:12])
 			if binary.BigEndian.Uint16(reply[end-4:]) == 1 {
 				reply[7] = 1
-				reply = append(reply, 0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 127, 0, 0, 1)
+				reply = append(reply, 0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4)
+				reply = append(reply, answer[:]...)
 			}
 			if _, err := resolver.WriteToUDP(reply, source); err != nil {
 				return
