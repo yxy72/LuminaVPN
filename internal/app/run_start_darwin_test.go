@@ -14,6 +14,7 @@ import (
 	"netlaunch/internal/engine"
 	"netlaunch/internal/policy"
 	"netlaunch/internal/securefile"
+	p "netlaunch/internal/serviceprotocol"
 	"netlaunch/internal/subscription"
 	"netlaunch/internal/testutil"
 )
@@ -99,6 +100,28 @@ func TestMacSuccessfulStartLeavesRunActive(t *testing.T) {
 		t.Fatal(status.Phase, err)
 	}
 	requireNoStopMarker(t, first)
+}
+
+func TestMacStartupReportsRestoredFailureStage(t *testing.T) {
+	_, run, _ := macStopFixture(t)
+	stop, err := bindRunStop(t.Context(), options{run: run})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop.Close()
+	intent := policy.ChannelIntent{Personal: true}
+	_, err = launchPreparedRun(t.Context(), stop, func(context.Context, string, string) error { return nil },
+		func(string) (engine.Status, error) {
+			return engine.Status{Phase: "stopped", RecoveryReason: "startup_dns_port"}, nil
+		}, time.Second, time.Millisecond, &intent)
+	var failure *p.Error
+	if !errors.As(err, &failure) || failure.Code != "MAC_START_DNS_PORT" {
+		t.Fatalf("startup phase lost after restoration: %v", err)
+	}
+	requireNoStopMarker(t, run)
+	if got := diagnosticProjection(engine.Status{RecoveryReason: "startup_dns_port"}, time.Now()); got.RecoveryReason != "startup_dns_port" {
+		t.Fatal("diagnostic projection lost the startup stage")
+	}
 }
 
 func TestMacStartupReadinessRequiresTheExactAppliedEnvironment(t *testing.T) {

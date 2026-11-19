@@ -111,13 +111,18 @@ func serve(run string) (returned error) {
 		ctx, cancelDeadline = context.WithDeadline(ctx, deadline)
 		defer cancelDeadline()
 	}
+	startupStage := "startup_runtime"
 	defer func() {
+		_, stopErr := os.Lstat(filepath.Join(run, "STOP"))
+		stopping := !errors.Is(stopErr, os.ErrNotExist) || ctx.Err() != nil
 		cancel()
 		reason := "coordinator_exit"
 		if deadline := darwinRunDeadline(s.Manifest); !deadline.IsZero() && !time.Now().Before(deadline) {
 			reason = "validation_deadline"
 		} else if errors.Is(returned, errVPNAuthenticationRequired) {
 			reason = "authentication_required"
+		} else if returned != nil && startupStage != "" && !stopping {
+			reason = startupStage
 		}
 		if returned != nil {
 			_ = update(run, func(s *State) error { s.Error = runtimeFailureReason(returned); return nil })
@@ -129,9 +134,11 @@ func serve(run string) (returned error) {
 	if e != nil {
 		return e
 	}
+	startupStage = "startup_network_binding"
 	if e = validateDarwinServiceBindings(run, s.Manifest); e != nil {
 		return e
 	}
+	startupStage = "startup_runtime"
 	if e = runtimebundle.Copy(bundle, filepath.Join(private(run), "runtime")); e != nil {
 		return e
 	}
@@ -142,6 +149,7 @@ func serve(run string) (returned error) {
 			return e
 		}
 	}
+	startupStage = "startup_channel_inputs"
 	frozenNodes, e := freezeDarwinChannelInputs(run, s.Manifest)
 	if e != nil {
 		return e
@@ -150,18 +158,30 @@ func serve(run string) (returned error) {
 	if intent.Personal {
 		nodes = frozenNodes
 	}
+	startupStage = "startup_network_binding"
 	network, e := platform.Discover()
 	if e != nil || network != s.Manifest.Network {
 		return errors.New("network changed during authorization; prepare a new run")
 	}
 	if platform.ForeignVPN() {
+		startupStage = "startup_vpn_conflict"
 		return errors.New("another OpenConnect process is active")
 	}
 	if e = platform.CheckConflicts(network); e != nil {
+		switch {
+		case errors.Is(e, platform.ErrSystemProxyConflict):
+			startupStage = "startup_proxy_conflict"
+		case errors.Is(e, platform.ErrTunnelDefaultConflict):
+			startupStage = "startup_tunnel_conflict"
+		}
 		return e
 	}
 	for _, port := range []int{s.Manifest.Config.Ports.Proxy, s.Manifest.Config.Ports.DNS, s.Manifest.Binding.ControllerPort} {
 		if e := platform.CheckPort(port); e != nil {
+			startupStage = "startup_listener_port"
+			if port == s.Manifest.Config.Ports.DNS {
+				startupStage = "startup_dns_port"
+			}
 			return e
 		}
 	}
@@ -172,6 +192,7 @@ func serve(run string) (returned error) {
 	if hasDarwinCandidateInterface(s, interfaces) {
 		return errors.New("candidate interface now in use")
 	}
+	startupStage = "startup_core_config"
 	secretBytes := make([]byte, 32)
 	if _, e = rand.Read(secretBytes); e != nil {
 		return e
@@ -200,9 +221,11 @@ func serve(run string) (returned error) {
 		return e
 	}
 	core := filepath.Join(private(run), "runtime/bin/mihomo")
+	startupStage = "startup_core_validation"
 	if e = native(ctx, core, "-t", "-d", private(run), "-f", filepath.Join(private(run), "core.json")); e != nil {
 		return errors.New("generated core configuration rejected")
 	}
+	startupStage = "startup_watchdog"
 	watchLog, e := os.OpenFile(filepath.Join(private(run), "watchdog-private.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if e != nil {
 		return e
@@ -239,6 +262,7 @@ func serve(run string) (returned error) {
 			}
 		}
 	}()
+	startupStage = ""
 	exits := &childExitTracker{}
 	if intent.Company {
 		vpnChild, e := startVPN(run, exits)

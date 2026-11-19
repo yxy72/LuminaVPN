@@ -316,7 +316,7 @@ func (c CLI) RunContext(ctx context.Context, args []string) error {
 		// Only the policy is printed. Node credentials and controller secrets never appear here.
 		return c.json(map[string]any{"version": Version, "company": cfg.Company, "personal": cfg.Personal, "default_exit": "physical", "failure_exit": "reject", "vpn": cfg.VPN, "probes": cfg.Probes, "node_count": len(nodes), "personal_rules": cfg.PersonalRules, "native_platform": platform.Supported(), "network_changes": false})
 	case "doctor":
-		issues, ports := diagnose(opts, cfg)
+		issues, ports, _ := diagnose(opts, cfg)
 		if e = c.json(map[string]any{"version": Version, "platform": runtime.GOOS + "/" + runtime.GOARCH, "ready_for_start": len(issues) == 0, "issues": issues, "port_checks": ports, "privileged_port_check_required": runtime.GOOS == "darwin", "network_changes": false}); e != nil {
 			return e
 		}
@@ -351,12 +351,13 @@ func readNodes(profile string) ([]policy.Node, error) {
 	}
 	return policy.SanitizeNodes(n)
 }
-func diagnose(o options, c policy.Config) ([]string, []platform.PortCheck) {
+func diagnose(o options, c policy.Config) ([]string, []platform.PortCheck, error) {
 	issues := []string{}
+	var networkConflict error
 	if !platform.Supported() {
 		issues = append(issues, "Native network takeover is not enabled on this platform in this preview.")
 		if runtime.GOOS != "windows" {
-			return issues, nil
+			return issues, nil, nil
 		}
 		// Windows can still diagnose the bundle and network without opening up.
 
@@ -375,6 +376,7 @@ func diagnose(o options, c policy.Config) ([]string, []platform.PortCheck) {
 		issues = append(issues, e.Error())
 	} else if e = platform.CheckConflicts(n); e != nil {
 		issues = append(issues, e.Error())
+		networkConflict = e
 	}
 	if platform.ForeignVPN() {
 		issues = append(issues, "Another OpenConnect process is active.")
@@ -383,7 +385,7 @@ func diagnose(o options, c policy.Config) ([]string, []platform.PortCheck) {
 	for _, e := range failures {
 		issues = append(issues, e.Error())
 	}
-	return issues, ports
+	return issues, ports, networkConflict
 }
 func currentRun(o options) (string, error) {
 	if o.run != "" {
@@ -539,9 +541,17 @@ func (c CLI) upLockedContext(ctx context.Context, o options, cfg policy.Config, 
 			return ErrMacAuthenticationRequired
 		}
 	}
-	if issues, _ := diagnoseLaunch(o, cfg); len(issues) > 0 {
+	if issues, _, conflict := diagnoseLaunch(o, cfg); len(issues) > 0 {
 		for _, i := range issues {
 			fmt.Fprintln(c.Err, i)
+		}
+		if macDesktop {
+			switch {
+			case errors.Is(conflict, platform.ErrSystemProxyConflict):
+				return macStartupFailure("startup_proxy_conflict")
+			case errors.Is(conflict, platform.ErrTunnelDefaultConflict):
+				return macStartupFailure("startup_tunnel_conflict")
+			}
 		}
 		return errors.New("startup stopped before authentication or network changes; resolve doctor findings first")
 	}

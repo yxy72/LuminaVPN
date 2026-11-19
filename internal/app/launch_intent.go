@@ -150,7 +150,7 @@ func syncSubscriptionsWith(ctx context.Context, profile string, cfg policy.Confi
 	})
 }
 
-func diagnoseLaunch(o options, cfg policy.Config) ([]string, []platform.PortCheck) {
+func diagnoseLaunch(o options, cfg policy.Config) ([]string, []platform.PortCheck, error) {
 	if o.mode == "" {
 		return diagnose(o, cfg)
 	}

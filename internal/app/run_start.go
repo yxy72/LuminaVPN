@@ -12,6 +12,7 @@ import (
 	"netlaunch/internal/engine"
 	"netlaunch/internal/policy"
 	"netlaunch/internal/securefile"
+	p "netlaunch/internal/serviceprotocol"
 )
 
 const startupReadinessWindow = 150 * time.Second
@@ -118,6 +119,11 @@ func launchPreparedRun(ctx context.Context, stop *RunStop, launch func(context.C
 					}
 					return s, e
 				}
+				if expected != nil {
+					if failure := macStartupFailure(observed.RecoveryReason); failure != nil {
+						return s, failure
+					}
+				}
 				return s, errors.New("startup did not complete; inspect status and use the recovery entry")
 			case "recovery_failed":
 				return s, errors.New("startup recovery did not complete; inspect status and use the recovery entry")
@@ -128,4 +134,27 @@ func launchPreparedRun(ctx context.Context, stop *RunStop, launch func(context.C
 		case <-ticker.C:
 		}
 	}
+}
+
+func macStartupFailure(reason string) *p.Error {
+	code := ""
+	switch reason {
+	case "startup_proxy_conflict", "startup_tunnel_conflict", "startup_vpn_conflict":
+		code = "MAC_START_NETWORK_CONFLICT"
+	case "startup_network_binding":
+		code = "MAC_START_NETWORK_CHANGED"
+	case "startup_dns_port":
+		code = "MAC_START_DNS_PORT"
+	case "startup_listener_port":
+		code = "MAC_START_LISTENER_PORT"
+	case "startup_runtime", "startup_core_validation":
+		code = "MAC_START_CORE"
+	case "startup_channel_inputs", "startup_core_config":
+		code = "MAC_START_CONFIG"
+	case "startup_watchdog":
+		code = "MAC_START_WATCHDOG"
+	default:
+		return nil
+	}
+	return &p.Error{Code: code, Message: "Network takeover stopped before startup completed.", Retryable: true}
 }

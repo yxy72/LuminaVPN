@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"netlaunch/internal/app"
@@ -507,6 +508,10 @@ func (w *localWorkspace) executeNetwork(job context.Context, done context.Cancel
 		}
 		op.Phase = "failed"
 		op.Error = &p.Error{Code: failureCode, Message: "The local operation could not be confirmed."}
+		var startup *p.Error
+		if m.Kind == p.TakeoverStart && errors.As(err, &startup) && strings.HasPrefix(startup.Code, "MAC_START_") {
+			op.Error = startup
+		}
 		if errors.Is(err, app.ErrMacAuthenticationRequired) {
 			op.Error = &p.Error{Code: "MAC_AUTH_REQUIRED", Message: "Authenticate in the local Terminal before starting the company channel.", Retryable: true}
 		}
