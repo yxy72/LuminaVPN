@@ -269,7 +269,9 @@ func requireServiceAdaptersAbsent(s State, j winstate.Journal) error {
 	if err != nil {
 		return err
 	}
-	deadline := time.Now().Add(10 * time.Second)
+	cleanupAt := time.Now().Add(6 * time.Second)
+	deadline := cleanupAt.Add(4 * time.Second)
+	cleanupTried := false
 	for {
 		complete := true
 		for _, a := range adapters {
@@ -290,12 +292,56 @@ func requireServiceAdaptersAbsent(s State, j winstate.Journal) error {
 		if complete {
 			return nil
 		}
+		if !cleanupTried && !time.Now().Before(cleanupAt) && time.Now().Before(deadline) {
+			cleanupTried = true
+			if err := cleanupStoppedServiceAdapters(s, j, adapters); err != nil {
+				return err
+			}
+		}
 		if !time.Now().Before(deadline) {
 			return errors.New("owned adapter remains present")
 		}
 		time.Sleep(min(100*time.Millisecond, time.Until(deadline)))
 	}
 }
+func cleanupStoppedServiceAdapters(s State, journal winstate.Journal, adapters []winnet.Adapter) error {
+	boot, err := winnet.BootID()
+	if err != nil || boot != s.Windows.BootID || boot != journal.BootID || s.Phase != "stopping" {
+		return errors.Join(errors.New("owned Wintun cleanup requires the stopped run and current boot"), err)
+	}
+
+	network := journal
+	network.IPv6Guards = nil
+	if err := winstate.CheckRecovered(network); err != nil {
+		return err
+	}
+	owners := []platform.Identity{s.Runner}
+	for _, child := range s.Children {
+		if child.Native == nil {
+			return errors.New("owned Wintun cleanup requires the exact child identity")
+		}
+		owners = append(owners, *child.Native)
+	}
+	for _, owner := range owners {
+		if owner.PID < 2 || owner.Birth == "" || owner.OwnerSID != "S-1-5-18" || owner.Executable == "" {
+			return errors.New("owned Wintun cleanup requires a complete SYSTEM process identity")
+		}
+		actual, err := platform.Process(owner.PID)
+		if err != nil {
+			return err
+		}
+		if actual.PID != 0 && (actual.Birth == "" || actual.Birth == owner.Birth) {
+			return errors.New("owned Wintun cleanup refused before its process exited")
+		}
+	}
+	for _, adapter := range adapters {
+		if _, err := winnet.RemoveOwnedWintunAdapter(adapter); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func servicePreparedOnly(run string) (bool, error) {
 	files, id, err := winFiles(run)
 	if err != nil {

@@ -65,7 +65,7 @@ func presenceNotFound(err error) bool {
 // Two raw GAA snapshots and independent LUID/index/GUID queries deliberately
 // do not collapse Down rows, API errors, identity reuse or inconsistent views
 // into absence. This is the client form of winprobe's strict presence gate.
-func observeAdapterPresenceWith(expected Adapter, enumerate func(uint32) ([]Adapter, error), lookup func(uint64, uint32) (Adapter, error), convert func(string) (uint64, error)) (AdapterPresence, error) {
+func observeAdapterPresenceWith(expected Adapter, enumerate func(uint32) ([]Adapter, error), lookup func(uint64, uint32) (Adapter, error), convert func(string) (uint64, error), table func() ([]Adapter, error)) (AdapterPresence, error) {
 	o := AdapterPresence{State: "unknown", Expected: expected, StartedAt: time.Now(), Enumerations: []PresenceEnumeration{}}
 	if err := validPresenceIdentity(expected); err != nil {
 		o.FinishedAt = time.Now()
@@ -114,6 +114,24 @@ func observeAdapterPresenceWith(expected Adapter, enumerate func(uint32) ([]Adap
 	switch {
 	case presenceNotFound(err):
 		o.ByGUID = PresenceLookup{State: "absent", Code: presenceCode(err)}
+	case luid == 0 && errors.Is(err, windows.ERROR_INVALID_PARAMETER) &&
+		!present && !conflict && len(failures) == 0 && o.ByLUID.State == "absent" && o.ByIndex.State == "absent":
+		// On this path, a validated but removed GUID can produce
+		// ERROR_INVALID_PARAMETER. Corroborate with the full interface table.
+		rows, tableErr := table()
+		if tableErr == nil {
+			for _, row := range rows {
+				if presenceCollision(expected, row) {
+					check(row)
+				}
+			}
+		}
+		if tableErr != nil || present || conflict {
+			failures = append(failures, errors.Join(err, tableErr))
+			o.ByGUID = PresenceLookup{State: "unknown", Code: presenceCode(err)}
+		} else {
+			o.ByGUID = PresenceLookup{State: "absent", Code: presenceCode(err)}
+		}
 	case err != nil:
 		failures = append(failures, err)
 		o.ByGUID = PresenceLookup{State: "unknown", Code: presenceCode(err)}
@@ -196,8 +214,29 @@ func presenceGUIDLUID(s string) (uint64, error) {
 	}
 	return luid, nil
 }
+func presenceTable() ([]Adapter, error) {
+	var table *windows.MibIfTable2
+	if err := windows.GetIfTable2Ex(windows.MibIfTableNormalWithoutStatistics, &table); err != nil {
+		return nil, err
+	}
+	if table == nil {
+		return nil, errors.New("missing interface table")
+	}
+	defer windows.FreeMibTable(unsafe.Pointer(table))
+	if table.NumEntries > 16384 {
+		return nil, errors.New("interface table exceeded limit")
+	}
+	result := make([]Adapter, 0, table.NumEntries)
+	for _, row := range unsafe.Slice(&table.Table[0], int(table.NumEntries)) {
+		result = append(result, Adapter{Index: row.InterfaceIndex, LUID: row.InterfaceLuid,
+			GUID: row.InterfaceGuid.String(), Name: windows.UTF16ToString(row.Alias[:]), Type: row.Type,
+			Hardware: row.InterfaceAndOperStatusFlags&1 != 0, Up: row.OperStatus == windows.IfOperStatusUp})
+	}
+	return result, nil
+}
+
 func ObserveAdapterPresence(expected Adapter) (AdapterPresence, error) {
-	return observeAdapterPresenceWith(expected, rawPresenceAdapters, presenceLookup, presenceGUIDLUID)
+	return observeAdapterPresenceWith(expected, rawPresenceAdapters, presenceLookup, presenceGUIDLUID, presenceTable)
 }
 func WaitAdapterAbsent(expected Adapter, limit time.Duration) (AdapterPresence, error) {
 	if limit <= 0 || limit > 10*time.Second {
