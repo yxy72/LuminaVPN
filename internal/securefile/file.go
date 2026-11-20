@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 )
 
+var errReadIdentityChanged = errors.New("file identity changed while opening")
+
 func Dir(path string) error {
 	if err := os.MkdirAll(path, 0700); err != nil {
 		return err
@@ -26,6 +28,23 @@ func Read(path string, limit int64, private bool) ([]byte, error) {
 	return readBounded(path, limit, private, false)
 }
 
+// ReadAtomicSnapshot retries a private file read if an atomic publisher replaced
+// the file between the path check and opening it. Use it for snapshots under a
+// trusted parent; each attempt still performs all of the normal read checks.
+func ReadAtomicSnapshot(path string, limit int64) ([]byte, error) {
+	return readAtomicSnapshot(path, limit, openBoundedRead)
+}
+
+func readAtomicSnapshot(path string, limit int64, open func(string) (*os.File, error)) ([]byte, error) {
+	for range 3 {
+		data, err := readBoundedWithOpen(path, limit, true, false, open)
+		if !errors.Is(err, errReadIdentityChanged) {
+			return data, err
+		}
+	}
+	return nil, errReadIdentityChanged
+}
+
 // ReadTail reads at most limit bytes from the end of a verified regular file.
 // It uses the same identity and permission checks as Read, without loading a
 // potentially long-lived component log into memory.
@@ -34,6 +53,10 @@ func ReadTail(path string, limit int64, private bool) ([]byte, error) {
 }
 
 func readBounded(path string, limit int64, private, tail bool) ([]byte, error) {
+	return readBoundedWithOpen(path, limit, private, tail, openBoundedRead)
+}
+
+func readBoundedWithOpen(path string, limit int64, private, tail bool, open func(string) (*os.File, error)) ([]byte, error) {
 	if limit < 0 || limit == math.MaxInt64 {
 		return nil, errors.New("invalid read limit")
 	}
@@ -47,14 +70,17 @@ func readBounded(path string, limit int64, private, tail bool) ([]byte, error) {
 	if private && before.Mode().Perm()&0077 != 0 {
 		return nil, errors.New("secret file must have mode 0600 or stricter")
 	}
-	f, err := openBoundedRead(path)
+	f, err := open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
 	after, err := f.Stat()
-	if err != nil || !os.SameFile(before, after) {
-		return nil, errors.New("file identity changed while opening")
+	if err != nil {
+		return nil, err
+	}
+	if !os.SameFile(before, after) {
+		return nil, errReadIdentityChanged
 	}
 	if tail {
 		if after.Size() > limit {

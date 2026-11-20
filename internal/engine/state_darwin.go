@@ -69,7 +69,13 @@ func save(run string, s *State) error {
 }
 
 func readRunFile(run, name string, limit int64) ([]byte, error) {
-	return securefile.Read(filepath.Join(private(run), name), limit, true)
+	path := filepath.Join(private(run), name)
+	switch name {
+	case "state.json", "heartbeat.json":
+		return securefile.ReadAtomicSnapshot(path, limit)
+	default:
+		return securefile.Read(path, limit, true)
+	}
 }
 func writeRunFile(run, name string, value any) error {
 	return securefile.Write(filepath.Join(private(run), name), value)
